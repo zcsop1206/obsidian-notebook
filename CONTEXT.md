@@ -107,17 +107,7 @@ In headless Chromium, through `test/run_spike_test.py`:
 ## Next steps
 
 1. **Read the iPad results.** Done: the basics work, so building continues. Still record the measured numbers (see Verified so far), since they shape the ink and audio work.
-2. **GitHub API sync, as its own plugin and repo:** the first real feature, because everything else depends on it. It doesn't exist yet; this design moves to the new repo's context file once it's created. It only needs to run on mobile, since the laptop uses plain git. Design:
-   - A fine-grained personal access token with Contents read/write on one repo, entered by the owner in plugin settings, stored in plugin data.
-   - Config: repo, branch, and the vault subfolder that maps to the repo path.
-   - State: the last synced commit SHA, plus each file's blob SHA at that commit.
-   - **Pull:** compare the last synced commit to the branch head (`GET /repos/{o}/{r}/compare/{base}...{head}`, or a tree diff), then download changed blobs.
-   - **Push:** local changes are files whose content hash differs from the recorded blob SHA (git blob SHA-1 = `sha1("blob <len>\0" + bytes)`). Create blobs, a tree with `base_tree`, and a commit, then update the ref. If the ref moved, pull first and retry.
-   - **Conflicts:** if a file changed on both sides, keep both (`name (iPad).md`) and show a notice. Never silently overwrite.
-   - Deletes and renames need explicit handling and tests.
-   - Never block the editor: async with a concurrency cap, visible progress, cancellable. Only sync note and attachment extensions, and respect an ignore list that includes `.obsidian/workspace*.json` and audio.
-   - Test hard against a throwaway repo before it touches real notes. The laptop can run it for testing (Obsidian desktop or the headless harness) even though it isn't needed there day to day.
-   - It must not fight plain git on the laptop: both sides push ordinary commits to the same branch, so the laptop just pulls before working and pushes after.
+2. **GitHub API sync, as its own plugin and repo:** the first real feature, because everything else depends on it. It lives in `zcsop1206/obsidian-github-sync` (locally `Documents/obsidian-github-sync`), whose `CONTEXT.md` holds the design and status. It only needs to run on mobile, since the laptop uses plain git.
 3. **Ink:**
    - The real page view: continuous vertical scroll, fixed page width, paper templates.
    - Tools: pen, highlighter, stroke eraser, lasso-move, hold-to-straighten line, pasted photos.
