@@ -1,0 +1,9 @@
+{
+  "id": "notebook-spike",
+  "name": "Notebook spike",
+  "version": "0.0.1",
+  "minAppVersion": "1.7.2",
+  "description": "Throwaway test of Apple Pencil input and audio recording inside Obsidian. Writes to _spike/.",
+  "author": "Adit Bhargava",
+  "isDesktopOnly": false
+}

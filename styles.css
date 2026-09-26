@@ -1,0 +1,42 @@
+.view-content.nbspike {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 0;
+  overflow: hidden;
+}
+
+.nbspike-bar {
+  display: flex;
+  gap: 8px;
+  padding: 8px;
+}
+
+.nbspike-hud {
+  padding: 0 8px 8px;
+  font-family: var(--font-monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+}
+
+.nbspike-page {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  border-top: 1px solid var(--background-modifier-border);
+  background-image:
+    linear-gradient(var(--background-modifier-border) 1px, transparent 1px),
+    linear-gradient(90deg, var(--background-modifier-border) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+.nbspike-page canvas {
+  position: absolute;
+  inset: 0;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
