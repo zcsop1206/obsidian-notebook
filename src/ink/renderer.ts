@@ -52,7 +52,10 @@ export function strokePath2D(stroke: Stroke): Path2D {
 
 /**
  * Template layers rasterised through an <img> of an SVG built from renderTemplate, so a new
- * template kind only needs template.ts. Cached per template, pixel size and theme.
+ * template kind only needs template.ts. The SVG sets the `.t` line colour of Obsidian's theme
+ * explicitly: inside an <img>, the page file's prefers-color-scheme follows the OS instead.
+ * Drawn at the bitmap's device resolution, so lines stay crisp. Cached per template, pixel size
+ * and theme.
  */
 export class TemplateImages {
   private cache = new Map<string, { img: HTMLImageElement; ready: boolean; waiting: (() => void)[] }>();

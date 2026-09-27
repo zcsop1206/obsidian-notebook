@@ -1,8 +1,10 @@
 // Bundled by test/build.mjs into test/out/view-fixture.js for test/harness.html: the format
-// functions (to check what the ink view wrote) and a generator for large notes, on window.ink.
+// functions and template names (to check what the ink view wrote) and a generator for large
+// notes, on window.ink.
 import { newPageId } from '../src/format/ids';
 import { newNote, readNote, writeNote } from '../src/format/note';
 import { readPage, writePage } from '../src/format/page';
+import { templateName } from '../src/format/template';
 import { densePage } from './fixture';
 import { seeded } from './seeded';
 
@@ -24,4 +26,4 @@ function largeNote(folder: string, name: string, pages: number, strokes: number)
   return files;
 }
 
-(window as unknown as { ink: unknown }).ink = { readPage, writePage, readNote, writeNote, largeNote };
+(window as unknown as { ink: unknown }).ink = { readPage, writePage, readNote, writeNote, templateName, largeNote };

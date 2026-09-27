@@ -5,11 +5,13 @@ import { FileView, Notice, TAbstractFile, TFile, TFolder, type App, type Workspa
 import { newStrokeId } from '../format/ids';
 import { isInkNote } from '../format/note';
 import type { Page, Point } from '../format/page';
+import type { Template } from '../format/template';
 import { PenInput, PEN, type PageTarget } from './input';
-import { layoutPages, MARGIN, pageAtY, pagesInBand, type Layout } from './layout';
+import { layoutPages, MARGIN, mostVisiblePage, pageAtY, pagesInBand, type Layout } from './layout';
 import { currentTheme, PageBitmap, releaseScratch, TemplateImages, type Theme } from './renderer';
-import { NoteStore, type NoteFiles, type PageSlot } from './store';
+import { NoteStore, type NoteFiles, type PageSlot, type TemplatesBefore } from './store';
 import { VIEW_TYPE_INK } from './takeover';
+import { TemplateChooser } from './template-chooser';
 
 /** How long the view waits after a resize before redrawing bitmaps at the new size. */
 const RESIZE_DELAY = 150;
@@ -76,7 +78,8 @@ export class InkView extends FileView {
   store: NoteStore | null = null;
   private scroller!: HTMLElement;
   private pagesEl!: HTMLElement;
-  private addButton!: HTMLButtonElement;
+  /** The "Add page" controls below the last page. */
+  private footer!: HTMLElement;
   private messageEl!: HTMLElement;
   private pen!: PenInput;
   private pages: PageView[] = [];
@@ -118,9 +121,11 @@ export class InkView extends FileView {
     this.pagesEl = this.scroller.createDiv({ cls: 'nb-ink-pages' });
     this.messageEl = this.scroller.createDiv({ cls: 'nb-ink-message' });
     this.messageEl.hide();
-    this.addButton = this.pagesEl.createEl('button', { cls: 'nb-ink-add', text: 'Add page' });
-    this.addButton.hide();
-    this.addButton.addEventListener('click', () => this.addPage());
+    this.footer = this.pagesEl.createDiv({ cls: 'nb-ink-footer' });
+    this.footer.hide();
+    this.footer.createEl('button', { cls: 'nb-ink-add', text: 'Add page' }).addEventListener('click', () => this.addPage());
+    this.footer.createEl('button', { cls: 'nb-ink-add-with', text: 'Add page with template…' })
+      .addEventListener('click', () => this.chooseTemplate('add'));
 
     this.pen = new PenInput({
       pageAt: target => this.pageAt(target),
@@ -133,6 +138,9 @@ export class InkView extends FileView {
     this.resizeObserver.observe(this.scroller);
 
     this.addAction('file-text', 'Open as markdown', () => void this.openAsMarkdown());
+    // Until #10's toolbar: also reachable from the view header on the iPad.
+    this.addAction('layers', 'Change template of all pages', () => this.chooseTemplate('all'));
+    this.addAction('layout-template', 'Change template of this page', () => this.chooseTemplate('page'));
 
     // Save at once when the app goes to the background or the page is torn down: on the iPad
     // that's the last chance before iOS may kill Obsidian.
@@ -258,7 +266,7 @@ export class InkView extends FileView {
       pv.el.remove();
     }
     this.pages = [];
-    this.addButton.hide();
+    this.footer.hide();
     this.pagesEl.style.height = '';
     this.updateStats();
   }
@@ -266,14 +274,14 @@ export class InkView extends FileView {
   private buildPages() {
     this.clearPages();
     this.pages = this.store!.slots.map(slot => this.makePage(slot));
-    this.addButton.show();
+    this.footer.show();
     this.updateStats();
   }
 
   private makePage(slot: PageSlot): PageView {
     const el = this.pagesEl.createDiv({ cls: 'nb-ink-page' });
     el.dataset.page = slot.id;
-    this.pagesEl.insertBefore(el, this.addButton); // pages before the "Add page" control
+    this.pagesEl.insertBefore(el, this.footer); // pages before the "Add page" controls
     const pv: PageView = { slot, el, bitmap: null };
     this.showError(pv);
     return pv;
@@ -313,7 +321,7 @@ export class InkView extends FileView {
       s.width = `${b.width}px`;
       s.height = `${b.height}px`;
     });
-    this.addButton.style.top = `${layout.footerTop}px`;
+    this.footer.style.top = `${layout.footerTop}px`;
     if (anchor && old && old.scale !== layout.scale && anchor.index < layout.pages.length) {
       const box = layout.pages[anchor.index];
       this.scroller.scrollTop = box.top + anchor.at * box.height;
@@ -462,15 +470,57 @@ export class InkView extends FileView {
     this.updateStats();
   }
 
-  private addPage() {
+  /** Appends a page with the given template, or the note's default, and scrolls to it. */
+  addPage(template?: Template) {
     const store = this.store;
     if (!store) return;
-    const pv = this.makePage(store.addPage());
+    const pv = this.makePage(store.addPage(template));
     this.pages.push(pv);
     this.relayout();
     const box = this.layout?.pages[this.pages.length - 1];
     if (box) this.scroller.scrollTop = box.top - MARGIN;
     this.update();
+  }
+
+  // ---- templates
+
+  /** The index of the page taking up most of the viewport, or -1 if there are no pages. */
+  currentPageIndex(): number {
+    if (!this.layout) return -1;
+    const top = this.scroller.scrollTop;
+    const i = mostVisiblePage(this.layout, top, top + this.scroller.clientHeight);
+    return i >= 0 ? i : pageAtY(this.layout, top);
+  }
+
+  /** Opens the template chooser to add a page, or to change this page's or every page's template. */
+  chooseTemplate(scope: 'add' | 'page' | 'all') {
+    if (!this.store) return;
+    const placeholder = scope === 'add' ? 'Template of the new page' : scope === 'page' ? 'Template of this page' : 'Template of all pages';
+    new TemplateChooser(this.app, placeholder, template => {
+      if (scope === 'add') this.addPage(template);
+      else if (scope === 'page') this.setPageTemplate(this.currentPageIndex(), template);
+      else this.setAllTemplates(template);
+    }).open();
+  }
+
+  /**
+   * Changes page `index`'s template, keeping its ink, and redraws it. Returns the template it
+   * had, or null if there's no such page or it can't be read.
+   */
+  setPageTemplate(index: number, template: Template): Template | null {
+    const pv = this.pages[index];
+    if (!this.store || !pv) return null;
+    const before = this.store.setPageTemplate(pv.slot.id, template);
+    if (before && pv.bitmap) this.renderPage(pv);
+    return before;
+  }
+
+  /** Changes every page's template and the note's default, and redraws. Returns what it replaced. */
+  setAllTemplates(template: Template): TemplatesBefore | null {
+    if (!this.store) return null;
+    const before = this.store.setAllTemplates(template);
+    for (const pv of this.pages) if (pv.bitmap) this.renderPage(pv);
+    return before;
   }
 
   // ---- changes on disk

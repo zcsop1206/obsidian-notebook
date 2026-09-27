@@ -105,10 +105,14 @@
   overflow-wrap: anywhere;
 }
 
-.nb-ink-add {
+/* "Add page" and "Add page with template…" below the last page. */
+.nb-ink-footer {
   position: absolute;
   left: 50%;
   transform: translateX(-50%);
+  display: flex;
+  gap: 8px;
+  white-space: nowrap;
 }
 
 .nb-ink-message {

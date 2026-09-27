@@ -2,7 +2,7 @@
 # module and in-memory vault of test/harness.html and the format functions from
 # test/out/view-fixture.js (built by test/build.mjs). Covers creating a note, writing with
 # synthetic pen events, autosave timing, saving when hidden or closed, reopening, changes on
-# disk, adding pages, a 20-page note, and the markdown takeover. Run by `npm test`; screenshots
+# disk, adding pages, a 20-page note, the markdown takeover, and page templates. Run by `npm test`; screenshots
 # land in test/out/. Exits non-zero if any check fails.
 import os, subprocess, sys, time
 from playwright.sync_api import sync_playwright
@@ -54,6 +54,23 @@ HELPERS = """() => {
       const c = pages()[i].querySelector('canvas.nb-ink-bitmap'), s = c.width / view.store.slots[i].size.width;
       return [...c.getContext('2d').getImageData(Math.round(x * s), Math.round(y * s), 1, 1).data.slice(0, 3)];
     },
+    /** Pixels of page i's bitmap within `tol` of the colour `rgb`. */
+    near(i, rgb, tol = 24) {
+      const c = pages()[i].querySelector('canvas.nb-ink-bitmap');
+      if (!c) return -1;
+      const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+      let n = 0;
+      for (let k = 0; k < d.length; k += 4) if (Math.abs(d[k] - rgb[0]) <= tol && Math.abs(d[k + 1] - rgb[1]) <= tol && Math.abs(d[k + 2] - rgb[2]) <= tol) n++;
+      return n;
+    },
+    /** Picks the template with this label in the open chooser (the newest modal). */
+    async choose(label) {
+      const m = modals[modals.length - 1];
+      [...m.contentEl.querySelectorAll('.suggestion-item')].find(e => e.textContent === label).click();
+      await sleep(150);  // the template image loads, then the page is redrawn
+    },
+    /** The template name of each page of the open note. */
+    templates: () => view.store.slots.map(s => ink.templateName(view.store.page(s).template)),
     liveInk() {
       const c = view.contentEl.querySelector('canvas.nb-ink-live');
       if (!c || !c.width) return 0;
@@ -71,7 +88,7 @@ HELPERS = """() => {
       Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => v });
       document.dispatchEvent(new Event('visibilitychange'));
     },
-    /** Renders an SVG file as an <img> and counts non-white pixels. */
+    /** Renders an SVG file as an <img> and counts dark pixels (n) and non-white ones (marks). */
     async imageInk(path) {
       const img = new Image();
       img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(fs.get(path));
@@ -79,9 +96,12 @@ HELPERS = """() => {
       const c = new OffscreenCanvas(img.naturalWidth, img.naturalHeight), g = c.getContext('2d');
       g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height); g.drawImage(img, 0, 0);
       const d = g.getImageData(0, 0, c.width, c.height).data;
-      let n = 0;
-      for (let k = 0; k < d.length; k += 4) if (d[k] < 200) n++;
-      return { n, w: img.naturalWidth, h: img.naturalHeight };
+      let n = 0, marks = 0;
+      for (let k = 0; k < d.length; k += 4) {
+        if (d[k] < 200) n++;
+        if (d[k] < 250) marks++;
+      }
+      return { n, marks, w: img.naturalWidth, h: img.naturalHeight };
     },
   };
 }"""
@@ -357,6 +377,128 @@ try:
           return out;
         }""")
         check('no takeover: frontmatter without ink, or no frontmatter, opens as markdown', r == ['markdown'] * 4, r)
+
+        # --- 10. Templates: settings default, new-note dialog, change a written page, add pages, reopen
+        r = ev("""async () => {
+          const tab = p.settingTabs[0];
+          tab.display();
+          const names = [...tab.containerEl.querySelectorAll('.setting-item')].map(e => e.dataset.name);
+          const sel = tab.containerEl.querySelector('.setting-item[data-name="Default template for new notes"] select');
+          const options = [...sel.options].map(o => o.value);
+          sel.value = 'lined-college-margin';
+          sel.dispatchEvent(new Event('change'));
+          await T.sleep(10);
+          const saved = pluginData && pluginData.template;
+          commands['new-ink-note'].callback();
+          const m = modals[0], selects = [...m.contentEl.querySelectorAll('select')];
+          const defaults = selects.map(s => s.value);
+          selects[0].value = 'a4';
+          selects[0].dispatchEvent(new Event('change'));
+          const input = m.contentEl.querySelector('input');
+          input.value = 'Paper';
+          input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+          for (let i = 0; i < 50 && !(view.file && view.file.path === 'Paper.md' && view.store); i++) await T.sleep(20);
+          await T.sleep(200);
+          const note = ink.readNote(fs.get('Paper.md'), 'Paper'), path = view.store.slots[0].path, pg = ink.readPage(fs.get(path));
+          return { names, options, saved, defaults, paper: note.paper, noteTpl: note.template, tpl: ink.templateName(pg.template), size: pg.size, path,
+            line: T.near(0, [0xc9, 0xc9, 0xc9], 6), dark: T.near(0, [0x3c, 0x3c, 0x3c], 6), pink: T.near(0, [0xe8, 0xa0, 0xa0], 12) };
+        }""")
+        tpath = r['path']
+        print('templates:', {k: r[k] for k in ('defaults', 'paper', 'noteTpl', 'tpl', 'line', 'dark', 'pink')})
+        check('templates: the settings have a default template beside the paper size, saved on change',
+              r['names'] == ['Default paper size', 'Default template for new notes'] and len(r['options']) == 8 and r['saved'] == 'lined-college-margin', r)
+        check('templates: the new-note dialog offers paper and template, defaulting to the settings', r['defaults'] == ['letter', 'lined-college-margin'], r['defaults'])
+        check('templates: the note is A4 with the chosen template, in the index and its first page',
+              r['paper'] == 'a4' and r['noteTpl'] == 'lined-college-margin' and r['tpl'] == 'lined-college-margin' and r['size'] == {'width': 794, 'height': 1123}, r)
+        check('templates: the bitmap has light template lines and the pink margin (explicit colours)', r['line'] > 2000 and r['pink'] > 300 and r['dark'] == 0, r)
+        r = ev("""async () => {
+          document.body.classList.add('theme-dark');
+          app.workspace.trigger('css-change');
+          await T.sleep(200);
+          const res = { paper: T.pixel(0, 5, 5), dark: T.near(0, [0x3c, 0x3c, 0x3c], 6), light: T.near(0, [0xc9, 0xc9, 0xc9], 6), pink: T.near(0, [0xe8, 0xa0, 0xa0], 12) };
+          document.body.classList.remove('theme-dark');
+          app.workspace.trigger('css-change');
+          await T.sleep(200);
+          return res;
+        }""")
+        check('templates: in the dark theme the lines are dark grey, the margin still pink', r['paper'] == [0x1e] * 3 and r['dark'] > 2000 and r['light'] == 0 and r['pink'] > 300, r)
+        r = ev(f"""async () => {{
+          await T.stroke(0, T.wave(200, 300));
+          const strokes = view.store.page(view.store.slots[0]).strokes.length;
+          const shown = commands['change-page-template'].checkCallback(true);
+          commands['change-page-template'].checkCallback(false);
+          const labels = [...modals[0].contentEl.querySelectorAll('.suggestion-item')].map(e => e.textContent);
+          await T.choose('Grid, 5 mm');
+          const after = {{ strokes: view.store.page(view.store.slots[0]).strokes.length, tpl: T.templates()[0], grid: T.near(0, [0xc9, 0xc9, 0xc9], 6), pink: T.near(0, [0xe8, 0xa0, 0xa0], 12) }};
+          await view.save();
+          const pg = ink.readPage(fs.get('{tpath}'));
+          const img = await T.imageInk('{tpath}');
+          // The previous template comes back, for undo; setting it again restores the page.
+          const prev = view.setPageTemplate(0, {{ kind: 'blank' }});
+          await T.sleep(50);
+          const blankLines = T.near(0, [0xc9, 0xc9, 0xc9], 6);
+          view.setPageTemplate(0, prev);
+          await T.sleep(150);
+          return {{ strokes, shown, labels, after, disk: {{ tpl: ink.templateName(pg.template), strokes: pg.strokes.length }}, img,
+            prev: ink.templateName(prev), blankLines, again: T.templates()[0], gridAgain: T.near(0, [0xc9, 0xc9, 0xc9], 6) }};
+        }}""")
+        print('templates: change page:', {k: r[k] for k in ('strokes', 'after', 'disk', 'img', 'prev', 'blankLines', 'gridAgain')})
+        check('templates: "Change template of this page" is offered in an ink view and lists the eight templates',
+              r['shown'] is True and r['labels'][0] == 'Blank' and 'Lined, college rule, with margin' in r['labels'] and len(r['labels']) == 8, r['labels'])
+        check('templates: lined to grid keeps the writing and redraws the page',
+              r['strokes'] == 1 and r['after']['strokes'] == 1 and r['after']['tpl'] == 'grid-5mm' and r['after']['grid'] > 5000 and r['after']['pink'] == 0, r)
+        check('templates: the page file says grid-5mm and still has the stroke', r['disk'] == {'tpl': 'grid-5mm', 'strokes': 1}, r['disk'])
+        check('templates: the saved page renders as a plain SVG image, grid and stroke', r['img']['marks'] > 50000 and r['img']['n'] > 500 and r['img']['w'] == 794, r['img'])
+        check('templates: setPageTemplate returns the previous template, and setting it back restores the page',
+              r['prev'] == 'grid-5mm' and r['blankLines'] < 1000 and r['again'] == 'grid-5mm' and abs(r['gridAgain'] - r['after']['grid']) < 50, r)
+        page.locator('#leaf').screenshot(path=os.path.join(OUT, 'view_templates_grid.png'))
+        r = ev("""async () => {
+          view.contentEl.querySelector('.nb-ink-add-with').click();
+          await T.choose('Dots, 5 mm');
+          view.contentEl.querySelector('.nb-ink-add-with').click();
+          await T.choose('Lined, wide rule');
+          const current = view.currentPageIndex();
+          view.contentEl.querySelector('.nb-ink-add').click();  // the note's default
+          await T.sleep(150);
+          const live = T.templates();
+          await app.workspace.activeLeaf.detach();
+          await T.sleep(30);
+          const leaf = app.workspace.getLeaf('tab');
+          await leaf.openFile(app.vault.getFile('Paper.md'));
+          await T.sleep(200);
+          const ids = view.store.slots.map(s => s.id);
+          return { current, live, reopened: T.templates(), disk: ids.map(id => ink.templateName(ink.readPage(fs.get(`Paper/${id}.svg`)).template)),
+            strokes: view.store.page(view.store.slots[0]).strokes.length, grid: T.near(0, [0xc9, 0xc9, 0xc9], 6) };
+        }""")
+        print('templates: add pages and reopen:', r)
+        check('templates: "Add page with template..." adds pages with the chosen templates; "Add page" uses the note default',
+              r['live'] == ['grid-5mm', 'dots-5mm', 'lined-wide', 'lined-college-margin'], r['live'])
+        check('templates: the current page is the one scrolled to', r['current'] == 2, r['current'])
+        check('templates: closed and reopened, every page has its template back', r['reopened'] == r['live'] and r['disk'] == r['live'] and r['strokes'] == 1 and r['grid'] > 5000, r)
+        page.evaluate("() => { view.contentEl.querySelector('.nb-ink-scroll').scrollTop = 1400; }")
+        page.wait_for_timeout(300)
+        page.locator('#leaf').screenshot(path=os.path.join(OUT, 'view_templates_light.png'))
+        page.evaluate("() => { document.body.classList.add('theme-dark'); app.workspace.trigger('css-change'); }")
+        page.wait_for_timeout(300)
+        page.locator('#leaf').screenshot(path=os.path.join(OUT, 'view_templates_dark.png'))
+        page.evaluate("() => { document.body.classList.remove('theme-dark'); app.workspace.trigger('css-change'); }")
+        r = ev("""async () => {
+          view.contentEl.querySelector('.nb-ink-scroll').scrollTop = 0;
+          await T.sleep(100);
+          view.actionsEl.querySelector('[aria-label="Change template of all pages"]').click();
+          await T.choose('Grid, ¼ in');
+          await view.save();
+          const note = ink.readNote(fs.get('Paper.md'), 'Paper');
+          const disk = note.pages.map(id => ink.templateName(ink.readPage(fs.get(`Paper/${id}.svg`)).template));
+          const strokes = ink.readPage(fs.get(`Paper/${note.pages[0]}.svg`)).strokes.length;
+          const leaf = app.workspace.getLeaf(false);
+          await leaf.openFile(app.vault.getFile('Plain.md'));
+          const hidden = [commands['change-page-template'].checkCallback(true), commands['change-all-templates'].checkCallback(true)];
+          return { noteTpl: note.template, disk, strokes, hidden };
+        }""")
+        check('templates: "Change template of all pages" (view action) changes every page and the note default',
+              r['noteTpl'] == 'grid-quarter-inch' and r['disk'] == ['grid-quarter-inch'] * 4 and r['strokes'] == 1, r)
+        check('templates: the template commands are hidden outside an ink view', r['hidden'] == [False, False], r['hidden'])
 
         # --- unload removes the patch
         r = ev("""async () => {

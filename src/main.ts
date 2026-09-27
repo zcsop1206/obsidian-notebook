@@ -5,6 +5,7 @@ import { LOG_PREFIX } from './debug/util';
 import { createInkNote, NewNoteModal, targetFolder } from './ink/new-note';
 import { cachedIsInk, installTakeover, VIEW_TYPE_INK } from './ink/takeover';
 import { InkView } from './ink/view';
+import type { Paper } from './format/page';
 import { DEFAULT_SETTINGS, NotebookSettingTab, parseSettings, type NotebookSettings } from './settings';
 
 /**
@@ -34,6 +35,8 @@ export default class NotebookPlugin extends Plugin {
         return true;
       },
     });
+    this.addTemplateCommand('change-page-template', 'Change template of this page', 'page');
+    this.addTemplateCommand('change-all-templates', 'Change template of all pages', 'all');
     this.registerEvent(this.app.workspace.on('file-menu', (menu, file, _source, leaf) => {
       if (!(file instanceof TFile) || !leaf || leaf.view.getViewType() !== 'markdown' || !cachedIsInk(this.app, file)) return;
       menu.addItem(item => item.setTitle('Open as ink note').setIcon('pencil').onClick(() => void this.openAsInk(file, leaf)));
@@ -57,15 +60,34 @@ export default class NotebookPlugin extends Plugin {
     await this.saveData(this.settings);
   }
 
-  /** Asks for a name, then creates the note in the active file's folder and opens it. */
-  newInkNote() {
-    new NewNoteModal(this.app, name => void this.createInkNote(name)).open();
+  /** A command, shown only in an open ink note, that opens the template chooser. */
+  private addTemplateCommand(id: string, name: string, scope: 'page' | 'all') {
+    this.addCommand({
+      id,
+      name,
+      checkCallback: checking => {
+        const view = this.app.workspace.getActiveViewOfType(InkView);
+        if (!view || !view.store) return false;
+        if (!checking) view.chooseTemplate(scope);
+        return true;
+      },
+    });
   }
 
-  /** Creates an ink note with one page and opens it in a new tab; returns its path. */
-  async createInkNote(name: string, folder = targetFolder(this.app)): Promise<string | null> {
+  /** Asks for a name, paper and template, then creates the note in the active file's folder and opens it. */
+  newInkNote() {
+    const { paper, template } = this.settings;
+    new NewNoteModal(this.app, { paper, template }, c => void this.createInkNote(c.name, undefined, c.paper, c.template)).open();
+  }
+
+  /**
+   * Creates an ink note with one page and opens it in a new tab; returns its path. The paper
+   * and template (a template name) default to the settings.
+   */
+  async createInkNote(name: string, folder = targetFolder(this.app), paper: Paper = this.settings.paper,
+    template: string = this.settings.template): Promise<string | null> {
     try {
-      const path = await createInkNote(this.app, folder, name, this.settings.paper);
+      const path = await createInkNote(this.app, folder, name, paper, template);
       const leaf = this.app.workspace.getLeaf('tab');
       await leaf.setViewState({ type: VIEW_TYPE_INK, state: { file: path }, active: true });
       this.app.workspace.revealLeaf(leaf);
