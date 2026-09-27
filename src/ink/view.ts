@@ -7,7 +7,7 @@ import { newStrokeId } from '../format/ids';
 import { isInkNote, markdownEmbed } from '../format/note';
 import type { Page } from '../format/page';
 import type { Template } from '../format/template';
-import { parseTemplate, sameTemplate, templateName } from '../format/template';
+import { isTemplateName, parseTemplate, parseTemplateName, sameTemplate, templateLabel, templateName, templateSize } from '../format/template';
 import type { Stroke } from '../format/page';
 import { listenForUndoTaps } from './gestures';
 import { History } from './history';
@@ -16,7 +16,7 @@ import { DEFAULT_PEN, nextColor, nextSize, withPen, type PenSettings } from './p
 import { DEFAULT_HIGHLIGHTER, nextHighlighterColor, nextHighlighterSize, withHighlighter, type HighlighterSettings, type ToolKind } from './pen';
 import { DEFAULT_ERASER, nextEraserSize, withEraser, type EraserMode, type EraserSettings } from './pen';
 import { DEFAULT_PRESETS, MAX_PRESETS, parseToolState, presetOf, type PenPreset } from './pen';
-import { A4, LETTER, newPage, roundXY } from '../format/page';
+import { A4, LETTER, newPage, paperSize, roundXY } from '../format/page';
 import type { NotebookSettings } from '../settings';
 import { Toolbar } from './toolbar';
 import { splitStroke } from './split';
@@ -27,7 +27,13 @@ import { SpatialIndex } from './spatial';
 import { PagesPanel } from './pages-panel';
 import { NoteStore, type NoteFiles, type PageSlot, type TemplatesBefore } from './store';
 import { VIEW_TYPE_INK } from './takeover';
-import { TemplateChooser } from './template-chooser';
+import { NameModal, TemplateChooser, templateItems } from './template-chooser';
+import { pdfCopyName, pdfPages, type RenderedPdfPage } from './template-changes';
+import { isFavourite } from './favourites';
+import { addImageTemplateFlow, addPdfTemplateFlow } from './pdf-template';
+import { ImageSourceModal, PdfSourceModal, renderPdfPages, stripPdf, type PdfChoice } from './pdf-import';
+import { cleanName } from './names';
+import type { ImportKind } from './picker';
 import { centreOn, encodeClip, isIdentity, lassoSelect, moveBy, resizeBy, resizeScale, strokesBounds, transformStroke, withIds, type Box, type Transform } from './lasso';
 import { hitSelection, SelectionMenu, SelectionOverlay } from './selection';
 import type { Point } from '../format/page';
@@ -88,6 +94,8 @@ export interface ToolSettingsHost {
   saveSettings(): Promise<void>;
   /** Strokes copied with the lasso (#11), kept by the plugin so they paste into any note. */
   inkClipboard?: InkClipboard | null;
+  /** "Import PDF as ink note" (#14), for the Import menu with no note open (#54). */
+  importPdf?(): void;
 }
 
 /** Strokes copied or cut with the lasso (#11): copies, in page px of the page they came from, in drawing order. */
@@ -1156,10 +1164,10 @@ export class InkView extends FileView {
   chooseTemplate(scope: 'add' | 'page' | 'all') {
     if (!this.store) return;
     const placeholder = scope === 'add' ? 'Template of the new page' : scope === 'page' ? 'Template of this page' : 'Template of all pages';
-    new TemplateChooser(this.app, placeholder, (template, size) => {
+    new TemplateChooser(this.app, placeholder, (template, size, name) => {
       if (scope === 'add') this.addPage(template, size);
       else if (scope === 'page') this.setPageTemplate(this.currentPageIndex(), template, size);
-      else this.setAllTemplates(template, size);
+      else this.setAllTemplates(template, size, name);
     }, templateRegistry()?.entries ?? [], scope === 'add').open();
   }
 
@@ -1202,13 +1210,152 @@ export class InkView extends FileView {
     this.update();
   }
 
-  /** Changes every page's template and the note's default, and redraws. Returns what it replaced. */
-  setAllTemplates(template: Template, size?: Size): TemplatesBefore | null {
+  /**
+   * Changes every page's template and the note's default (`name`, if given, is the default's
+   * `template:` name, e.g. a custom template's `tpl:<name>`, #54), and redraws. Returns what it
+   * replaced.
+   */
+  setAllTemplates(template: Template, size?: Size, name?: string): TemplatesBefore | null {
     if (!this.store) return null;
-    const before = this.store.setAllTemplates(template, size);
+    const before = this.store.setAllTemplates(template, size, name);
     this.relayoutRedraw(this.pages.map(p => p.slot.id));
-    this.recordAllTemplates(before, template, size);
+    this.recordAllTemplates(before, template, size, name);
     return before;
+  }
+
+  // ---- custom templates and importing (#54)
+  // The toolbar's Import menu (picker.ts): a PDF as pages of this note or one of its pages as a
+  // template, an image as a page, as a template or onto this page, or pasted. A PDF's pages go
+  // after the current page as pdf pages (the PDF copied into the page folder under a free name),
+  // one "Import PDF" undo step that deletes them again. The page-settings menu saves the current
+  // page's background (template and size, never its ink) as a template, and lists the favourite
+  // templates for adding a page.
+
+  /** Runs an entry of the Import menu; every entry first asks for its source (vault or device). */
+  importAction(kind: ImportKind) {
+    const registry = templateRegistry();
+    switch (kind) {
+      case 'pdf-pages':
+        if (!this.store) {
+          this.settingsHost?.importPdf?.(); // no note open: a new note, as "Import PDF as ink note"
+          return;
+        }
+        new PdfSourceModal(this.app, choice => void this.importPdfIntoNote(choice), 'PDF to add after this page').open();
+        return;
+      case 'pdf-template':
+        if (registry) void addPdfTemplateFlow(this.app, registry);
+        return;
+      case 'image-template':
+        if (registry) void addImageTemplateFlow(this.app, registry, () => this.store?.paperSize ?? paperSize(this.settingsHost?.settings.paper ?? 'letter'));
+        return;
+      case 'image-page':
+      case 'image-here':
+        if (!this.store) {
+          new Notice('Open an ink note first.');
+          return;
+        }
+        new ImageSourceModal(this.app, file => void this.insertImageFile(file, kind === 'image-page'),
+          kind === 'image-page' ? 'Image for a new page' : 'Image for this page').open();
+        return;
+      case 'paste-image':
+        void this.pasteImage();
+    }
+  }
+
+  /**
+   * Inserts every page of a PDF after the current page (#54): each at its PDF page's size with
+   * the page as a pdf template, the PDF copied into the page folder (`<name>.pdf`, or `<name>
+   * 1.pdf`… if taken). One undo step. Resolves the new pages' ids, or null (a notice says why).
+   */
+  async importPdfIntoNote(choice: PdfChoice): Promise<string[] | null> {
+    const store = this.store;
+    if (!store) return null;
+    const notice = new Notice('Importing PDF…', 0);
+    let rendered: RenderedPdfPage[];
+    try {
+      rendered = await renderPdfPages(choice.bytes, (done, total) => notice.setMessage?.(`Importing PDF: page ${done} of ${total}`));
+      if (this.store !== store) return null;
+      const vault = this.app.vault, folder = store.folder;
+      const file = pdfCopyName(cleanName(stripPdf(choice.basename)), n => !!vault.getAbstractFileByPath(`${folder}/${n}`));
+      let acc = '';
+      for (const part of folder.split('/')) {
+        acc = acc ? `${acc}/${part}` : part;
+        if (!vault.getAbstractFileByPath(acc)) await vault.createFolder(acc);
+      }
+      await vault.createBinary(`${folder}/${file}`, choice.bytes.slice(0));
+      if (this.store !== store) return null;
+      const at = this.currentPageIndex() + 1;
+      const ids = pdfPages(file, rendered).map((p, i) => store.insertPage(at + i, p.template, p.size).id);
+      this.clearSelection();
+      this.syncPageViews();
+      this.scrollToPage(at);
+      const where: Record<string, number> = {};
+      this.history.push({
+        label: 'Import PDF',
+        undo: () => {
+          if (this.store !== store) return;
+          for (const id of [...ids].reverse()) where[id] = store.deletePage(id).index;
+          this.syncPageViews();
+        },
+        redo: () => {
+          if (this.store !== store) return;
+          for (const id of ids) store.insertPageInIndex(id, where[id]);
+          this.syncPageViews();
+        },
+      });
+      new Notice(`Added ${ids.length} PDF page${ids.length === 1 ? '' : 's'} after page ${at}`);
+      return ids;
+    } catch (e) {
+      console.warn('[notebook] import PDF into the note', e);
+      new Notice(`Couldn't import the PDF: ${(e as Error).message}`);
+      return null;
+    } finally {
+      notice.hide();
+    }
+  }
+
+  /**
+   * Saves the current page's background, its template at its size (never its ink or images), as
+   * a custom template (#54); asks for the name when none is given. A pdf page's PDF is copied
+   * from the page folder beside the template. Resolves its `tpl:<name>`, or null.
+   */
+  async saveBackgroundAsTemplate(name?: string): Promise<string | null> {
+    const store = this.store, registry = templateRegistry(), pv = this.pages[this.currentPageIndex()];
+    const page = store && pv ? store.page(pv.slot) : null;
+    if (!store || !registry || !page) return null;
+    if (name === undefined) {
+      return new Promise(resolve => new NameModal(this.app, "Save this page's background as a template", templateLabel(page.template), 'Save',
+        n => void this.saveBackgroundAsTemplate(n).then(resolve), () => resolve(null)).open());
+    }
+    try {
+      let pdf: ArrayBuffer | undefined;
+      if (page.template.kind === 'pdf') {
+        const f = this.app.vault.getFileByPath(`${store.folder}/${page.template.source}`);
+        if (!f) throw new Error(`the PDF this page shows (${page.template.source}) isn't in the page folder`);
+        pdf = await this.app.vault.readBinary(f);
+      }
+      const id = await registry.save(name, page.template, page.size, pdf);
+      new Notice(`Saved this page's background as the template "${id.slice(4)}"`);
+      return id;
+    } catch (e) {
+      new Notice(`Couldn't save the template: ${(e as Error).message}`);
+      return null;
+    }
+  }
+
+  /** The favourite templates that exist, for the page-settings menu (at most `max`). */
+  favouriteTemplates(max = 5): { name: string; label: string }[] {
+    const registry = templateRegistry(), favs = registry?.prefs?.favourites() ?? [];
+    return templateItems(registry?.entries ?? [], false, favs).filter(i => isFavourite(favs, i.name)).slice(0, max)
+      .map(i => ({ name: i.name, label: i.label }));
+  }
+
+  /** Appends a page with the named template (built-in or custom) at its size, if it has one. False if unknown. */
+  addTemplatePage(name: string): boolean {
+    const r = templateRegistry()?.resolve(name) ?? (isTemplateName(name) ? { template: parseTemplateName(name), size: templateSize(name) ?? undefined } : null);
+    if (!r || !this.store) return false;
+    this.addPage(r.template, r.size);
+    return true;
   }
 
   // ---- changes on disk
@@ -1360,10 +1507,10 @@ export class InkView extends FileView {
     this.history.push({ label: 'Change page template', undo: set(before, resized ? beforeSize : undefined), redo: set(after, afterSize) });
   }
 
-  private recordAllTemplates(before: TemplatesBefore | null, after: Template, size?: Size) {
+  private recordAllTemplates(before: TemplatesBefore | null, after: Template, size?: Size, given?: string) {
     const store = this.store;
     if (!store || !before) return;
-    const name = templateName(parseTemplate(after));
+    const name = given || templateName(parseTemplate(after));
     const sameSize = (s?: Size) => !size || !s || (s.width === size.width && s.height === size.height);
     if (before.note === name && before.pages.every(p => templateName(p.template) === name && sameSize(p.size))) return;
     const redrawAll = () => this.relayoutRedraw(this.pages.map(p => p.slot.id));
@@ -1377,7 +1524,7 @@ export class InkView extends FileView {
       },
       redo: () => {
         if (this.store !== store) return;
-        store.setAllTemplates(after, size);
+        store.setAllTemplates(after, size, given);
         redrawAll();
       },
     });
@@ -1659,6 +1806,10 @@ export class InkView extends FileView {
       insertImage: asPage => this.insertImage(asPage),
       pasteImage: () => void this.pasteImage(),
       exportPdf: () => void this.exportPdf(),
+      importAction: kind => this.importAction(kind),
+      saveTemplate: () => void this.saveBackgroundAsTemplate(),
+      favouriteTemplates: () => this.favouriteTemplates(),
+      addTemplatePage: name => void this.addTemplatePage(name),
       rulerOn: () => this.rulerOn,
       toggleRuler: () => this.toggleRuler(),
       rulerAngle: () => this.ruler?.angle ?? null,

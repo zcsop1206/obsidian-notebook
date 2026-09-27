@@ -746,3 +746,50 @@
   right: auto;
   bottom: auto;
 }
+
+/*
+ * Custom templates and favourites (#54): the template chooser's rows have a preview (custom
+ * templates), the label, a star and, for custom templates, rename and delete. The buttons are
+ * big enough for a finger or the Pencil.
+ */
+.nb-tpl-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.nb-tpl-label {
+  flex: 1;
+  min-width: 0;
+}
+
+.nb-tpl-preview {
+  flex: none;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 2px;
+}
+
+.nb-tpl-action {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  background: transparent;
+  box-shadow: none;
+}
+
+.nb-tpl-star.is-active {
+  color: var(--color-yellow, #e0ac00);
+}
+
+.nb-tpl-star.is-active svg {
+  fill: currentColor;
+}
+
+.nb-confirm-text {
+  user-select: text;
+}

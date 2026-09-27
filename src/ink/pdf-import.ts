@@ -8,8 +8,10 @@ import { newPageId } from '../format/ids';
 import { newNote, pagePath, writeNote } from '../format/note';
 import { newPage, writePage, type Paper } from '../format/page';
 import { pointsToPx } from '../format/template';
+import { pickImageFile } from './images';
 import { cleanName, uniqueName } from './names';
 import { openPdf, renderPdfPage, type PdfPageProxy } from './pdf';
+import type { RenderedPdfPage } from './template-changes';
 
 /** Resolution of the embedded page images, and their JPEG quality. */
 export const IMPORT_DPI = 150;
@@ -78,6 +80,28 @@ export async function importPdf(app: App, folder: string, name: string, pdfName:
     const notePath = normalizePath(`${dir}${base}.md`);
     await vault.create(notePath, writeNote(note));
     return notePath;
+  } finally {
+    void doc.destroy?.();
+  }
+}
+
+/**
+ * Every page of a PDF rendered as the import embeds it (size, JPEG), one at a time, with
+ * `progress(done, total)` after each (#54: a PDF imported into the open note). Throws if pdf.js
+ * can't read the PDF.
+ */
+export async function renderPdfPages(bytes: ArrayBuffer, progress: (done: number, total: number) => void = () => {}): Promise<RenderedPdfPage[]> {
+  const doc = await openPdf(bytes);
+  try {
+    const out: RenderedPdfPage[] = [];
+    for (let n = 1; n <= doc.numPages; n++) {
+      const pg = await doc.getPage(n);
+      out.push(await pdfPageImage(pg));
+      pg.cleanup?.();
+      progress(n, doc.numPages);
+      await new Promise(r => window.setTimeout(r, 0)); // let the UI breathe between pages
+    }
+    return out;
   } finally {
     void doc.destroy?.();
   }
@@ -166,5 +190,43 @@ export class PdfNameModal extends Modal {
 
   onClose() {
     this.contentEl.empty();
+  }
+}
+
+/** Image files the vault may hold, and their types. */
+const IMAGE_TYPES: Record<string, string> = {
+  jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp', avif: 'image/avif',
+  heic: 'image/heic', heif: 'image/heif',
+};
+
+/**
+ * Chooses an image (#54): the first row opens the system picker (on the iPad: Photos, the
+ * camera or Files), the others are the vault's images. `onChoose` gets the file and its name
+ * without the extension. SVGs aren't listed (in a vault they're mostly ink pages).
+ */
+export class ImageSourceModal extends FuzzySuggestModal<SourceItem> {
+  constructor(app: App, private onChoose: (file: Blob, basename: string) => void, placeholder = 'Image to import') {
+    super(app);
+    this.setPlaceholder(placeholder);
+  }
+
+  getItems(): SourceItem[] {
+    const images = this.app.vault.getFiles().filter(f => Object.prototype.hasOwnProperty.call(IMAGE_TYPES, f.extension.toLowerCase()))
+      .sort((a, b) => a.path.localeCompare(b.path));
+    return [DEVICE, ...images];
+  }
+
+  getItemText(item: SourceItem): string {
+    return item === DEVICE ? 'Choose an image from this device…' : item.path;
+  }
+
+  onChooseItem(item: SourceItem) {
+    if (item === DEVICE) {
+      pickImageFile(file => this.onChoose(file, file.name.replace(/\.[^.]*$/, '') || 'Image'));
+      return;
+    }
+    this.app.vault.readBinary(item).then(
+      bytes => this.onChoose(new Blob([bytes], { type: IMAGE_TYPES[item.extension.toLowerCase()] }), item.basename),
+      e => new Notice(`Couldn't read ${item.path}: ${(e as Error).message}`));
   }
 }

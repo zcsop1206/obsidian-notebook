@@ -13,9 +13,12 @@ import { importPdf, PdfNameModal, PdfSourceModal, type PdfChoice } from './ink/p
 import { PdfPages, type PdfNote } from './ink/pdf';
 import { setSharpPdfRenderer } from './ink/renderer';
 import type { PdfTemplate } from './format/template';
-import type { NotePaper } from './format/page';
-import { addPdfTemplate, PdfTemplateModal } from './ink/pdf-template';
+import { paperSize, type NotePaper } from './format/page';
+import { isTemplateName } from './format/template';
+import { addImageTemplateFlow, addPdfTemplateAs, addPdfTemplateFlow } from './ink/pdf-template';
 import { setTemplateRegistry, TemplateRegistry } from './ink/templates';
+import { defaultTemplateName, settingsPrefs } from './ink/favourites';
+import { TemplateChooser } from './ink/template-chooser';
 import { DEFAULT_SETTINGS, NotebookSettingTab, parseSettings, type NotebookSettings } from './settings';
 
 /**
@@ -30,7 +33,7 @@ export default class NotebookPlugin extends Plugin {
   settings: NotebookSettings = { ...DEFAULT_SETTINGS };
   /** Strokes copied with the lasso (#11), in memory, so they paste into any open note. */
   inkClipboard: InkClipboard | null = null;
-  /** PDF templates in the templates folder (#21). */
+  /** Custom templates in the templates folder (#21, #54). */
   templates!: TemplateRegistry;
 
   async onload() {
@@ -116,6 +119,7 @@ export default class NotebookPlugin extends Plugin {
 
     // Sized templates and page embeds (#27), PDF templates (#21).
     const templates = this.templates = new TemplateRegistry(this.app, () => this.settings.templatesFolder);
+    templates.prefs = settingsPrefs(this); // favourite templates (#54)
     templates.watch(this);
     this.register(setTemplateRegistry(templates));
     this.app.workspace.onLayoutReady(() => void templates.load());
@@ -132,6 +136,20 @@ export default class NotebookPlugin extends Plugin {
       },
     });
     this.addCommand({ id: 'add-pdf-template', name: 'Add PDF template', callback: () => this.addPdfTemplate() });
+    // Custom templates and the Import menu (#54).
+    this.addInkCommand('import-pdf-pages', 'Import PDF as pages after this page', view => view.importAction('pdf-pages'));
+    this.addCommand({ id: 'add-image-template', name: 'Add image template', callback: () => void this.addImageTemplate() });
+    this.addCommand({
+      id: 'save-page-template',
+      name: "Save this page's background as a template",
+      checkCallback: checking => {
+        const view = this.app.workspace.getActiveViewOfType(InkView);
+        if (!view || !view.store) return false;
+        if (!checking) void view.saveBackgroundAsTemplate();
+        return true;
+      },
+    });
+    this.addCommand({ id: 'toggle-favourite-template', name: 'Star or unstar a template', callback: () => this.toggleFavouriteTemplate() });
 
     this.recorder = new Recorder(this);
     this.registerView(VIEW_TYPE_DEBUG, leaf => new DebugView(leaf, this));
@@ -216,20 +234,29 @@ export default class NotebookPlugin extends Plugin {
     });
   }
 
+  /**
+   * The template new notes start with (#54): the first favourite that exists, unless the
+   * settings turn that off, else the settings' default template.
+   */
+  defaultTemplate(): string {
+    const s = this.settings;
+    return defaultTemplateName(s.template, s.favouriteDefault, s.favouriteTemplates, n => isTemplateName(n) || !!this.templates.get(n));
+  }
+
   /** Asks for a name, paper and template, then creates the note in the active file's folder and opens it. */
   newInkNote() {
-    const { paper, template } = this.settings;
-    // The dialog lists the PDF templates loaded so far (the registry loads on layout ready and
+    const { paper } = this.settings;
+    // The dialog lists the custom templates loaded so far (the registry loads on layout ready and
     // after each change to the templates folder).
-    new NewNoteModal(this.app, { paper, template }, c => void this.createInkNote(c.name, undefined, c.paper, c.template)).open();
+    new NewNoteModal(this.app, { paper, template: this.defaultTemplate() }, c => void this.createInkNote(c.name, undefined, c.paper, c.template)).open();
   }
 
   /**
    * Creates an ink note with one page and opens it in a new tab; returns its path. The paper
-   * and template (a template name) default to the settings.
+   * and template (a template name) default to the settings (the template to defaultTemplate()).
    */
   async createInkNote(name: string, folder = targetFolder(this.app), paper: NotePaper = this.settings.paper,
-    template: string = this.settings.template): Promise<string | null> {
+    template: string = this.defaultTemplate()): Promise<string | null> {
     try {
       const path = await createInkNote(this.app, folder, name, paper, template);
       const leaf = this.app.workspace.getLeaf('tab');
@@ -271,24 +298,28 @@ export default class NotebookPlugin extends Plugin {
 
   /** Asks for a PDF (vault or device), a page and a name, then saves that page as a PDF template (#21). */
   addPdfTemplate() {
-    new PdfSourceModal(this.app, choice => {
-      new PdfTemplateModal(this.app, choice.basename, (name, page) => void this.addPdfTemplateAs(choice, name, page)).open();
-    }, 'PDF for the template').open();
+    void addPdfTemplateFlow(this.app, this.templates);
   }
 
-  /** Saves page `page` of a chosen PDF as the template `name` in the templates folder; returns `pdf:<name>`. */
-  async addPdfTemplateAs(choice: PdfChoice, name: string, page = 1): Promise<string | null> {
-    try {
-      const id = await addPdfTemplate(this.app, this.settings.templatesFolder, name, choice.bytes, page);
-      this.templates.invalidate();
-      await this.templates.load();
-      new Notice(`Added the PDF template "${id.slice(4)}"`);
-      return id;
-    } catch (e) {
-      console.warn(LOG_PREFIX, 'add PDF template', e);
-      new Notice(`Couldn't add the PDF template: ${(e as Error).message}`);
-      return null;
-    }
+  /** Saves page `page` of a chosen PDF as the template `name` in the templates folder; returns `tpl:<name>`. */
+  addPdfTemplateAs(choice: PdfChoice, name: string, page = 1): Promise<string | null> {
+    return addPdfTemplateAs(this.templates, choice, name, page);
+  }
+
+  /** Asks for an image (vault or device) and a name, then saves it as a template (#54), as wide as the open note's paper. */
+  addImageTemplate(): Promise<string | null> {
+    const paper = () => this.app.workspace.getActiveViewOfType(InkView)?.store?.paperSize ?? paperSize(this.settings.paper);
+    return addImageTemplateFlow(this.app, this.templates, paper);
+  }
+
+  /** Asks for a template and stars it, or unstars it if it's a favourite (#54; the chooser's stars do the same). */
+  toggleFavouriteTemplate() {
+    const prefs = this.templates.prefs!;
+    void this.templates.load().then(entries => new TemplateChooser(this.app, 'Template to star or unstar', (_t, _s, name) => {
+      if (!name) return;
+      const on = prefs.toggle(name);
+      new Notice(on ? `Starred ${name}: it comes first in template lists` : `Unstarred ${name}`);
+    }, entries, false, prefs).open());
   }
 
   /** The open ink note (index and page folder paths) that has a page with this template object, or null. */

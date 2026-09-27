@@ -1,7 +1,7 @@
 // The ink toolbar (#10): one row of icon buttons at the top of the ink view, wrapping onto a
 // second row when narrow. Left: the tools (pen, highlighter, eraser, lasso #11) and the ruler
 // toggle (#20: shows or hides the ruler; not a tool, the pen stays in use). Middle: the favourite presets. Right: undo, redo, add page, page
-// settings and the Pages panel toggle. Tapping the tool already in use opens its picker (a
+// settings, Import (#54: a menu of PDFs and images, once or as templates) and the Pages panel toggle. Tapping the tool already in use opens its picker (a
 // popover under the button, see picker.ts); so every tool, preset and picker option is at most
 // two taps away. The toolbar knows nothing of the store: the view hands it a ToolbarHost.
 //
@@ -94,6 +94,7 @@ export class Toolbar {
     this.button(page, 'nb-ink-add-page', 'file-plus', 'Add page', () => host.addPage());
     const settings = this.button(page, 'nb-ink-page-settings', 'settings-2', 'Page settings', () => this.pageMenu(settings));
     settings.setAttribute('aria-haspopup', 'dialog');
+    this.importButton(page);
     const pages = this.button(page, 'nb-ink-pages-toggle', 'layout-list', 'Toggle pages panel', () => host.togglePages());
     pages.setAttribute('aria-pressed', 'false');
     this.render();
@@ -137,7 +138,7 @@ export class Toolbar {
     this.mark(this.el.querySelector<HTMLElement>('.nb-ink-ruler')!, !!h.rulerOn?.());
     // A command or a preset switched tools: the other tool's picker no longer applies.
     const open = this.picker.openFor;
-    if (open && open !== 'page' && open !== pen.tool) this.picker.close();
+    if (open && open !== 'page' && open !== 'import' && open !== pen.tool) this.picker.close();
     this.picker.render();
   }
 
@@ -203,6 +204,15 @@ export class Toolbar {
   private pageMenu(b: HTMLElement) {
     if (this.picker.openFor === 'page') this.picker.close();
     else this.picker.open('page', b, this.el);
+  }
+
+  /** Import (#54): PDFs and images, once or as templates, in a menu like page settings. */
+  private importButton(parent: HTMLElement) {
+    const b = this.button(parent, 'nb-ink-import', 'import', 'Import PDF or image', () => {
+      if (this.picker.openFor === 'import') this.picker.close();
+      else this.picker.open('import', b, this.el);
+    });
+    b.setAttribute('aria-haspopup', 'dialog');
   }
 
   private button(parent: HTMLElement, cls: string, icon: string | null, label: string, fn: () => void): HTMLButtonElement {
