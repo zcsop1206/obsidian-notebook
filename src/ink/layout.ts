@@ -1,7 +1,10 @@
 // Where each page sits in the ink view: pages stacked vertically with a gap, centred, all at
-// one scale that fits the widest page to the view width. Pure, so it's unit-tested; the view
-// positions page elements absolutely from these numbers, so the scroll height is right before
-// any page has a bitmap.
+// one scale. At zoom 1 (100%) that scale fits the widest page to the view width; zoom (#9,
+// 0.5 to 4) multiplies it. Margins and gaps stay the same in CSS px at every zoom. Above 100%
+// the pages are wider than the view and the pages layer is as wide as they are (plus margins),
+// so the view scrolls sideways too; below it, pages stay centred in the view's width. Pure, so
+// it's unit-tested; the view positions page elements absolutely from these numbers, so the
+// scroll size is right before any page has a bitmap.
 import type { Size } from '../format/page';
 
 export const MARGIN = 16;
@@ -17,8 +20,12 @@ export interface PageBox {
 }
 
 export interface Layout {
-  /** CSS px per page px. */
+  /** CSS px per page px (the fitted scale times the zoom). */
   scale: number;
+  /** The zoom this layout was made at (1 = fitted to the view width). */
+  zoom: number;
+  /** Width of the pages layer: the view width, or the pages plus margins if wider. */
+  width: number;
   pages: PageBox[];
   /** Top of the "Add page" control. */
   footerTop: number;
@@ -26,18 +33,22 @@ export interface Layout {
   height: number;
 }
 
-/** Lays out pages for a view `viewWidth` CSS px wide. Pages with no size use `fallback`. */
-export function layoutPages(sizes: readonly Size[], viewWidth: number, fallback: Size): Layout {
+/**
+ * Lays out pages for a view `viewWidth` CSS px wide at `zoom` (1 fits the widest page to the
+ * width). Pages with no size use `fallback`.
+ */
+export function layoutPages(sizes: readonly Size[], viewWidth: number, fallback: Size, zoom = 1): Layout {
   const widest = sizes.reduce((w, s) => Math.max(w, s.width), 0) || fallback.width;
-  const scale = Math.max(0.05, (viewWidth - 2 * MARGIN) / widest);
+  const scale = Math.max(0.05, (viewWidth - 2 * MARGIN) / widest) * zoom;
+  const width = Math.max(viewWidth, Math.round(widest * scale) + 2 * MARGIN);
   let top = MARGIN;
   const pages = sizes.map(s => {
-    const width = Math.round(s.width * scale), height = Math.round(s.height * scale);
-    const box = { top, left: Math.max(0, Math.round((viewWidth - width) / 2)), width, height };
+    const w = Math.round(s.width * scale), height = Math.round(s.height * scale);
+    const box = { top, left: Math.max(0, Math.round((width - w) / 2)), width: w, height };
     top += height + GAP;
     return box;
   });
-  return { scale, pages, footerTop: top, height: top + FOOTER };
+  return { scale, zoom, width, pages, footerTop: top, height: top + FOOTER };
 }
 
 /** Indexes of the pages overlapping the band [start, end) of the scroll area, in order. */
