@@ -132,9 +132,10 @@ class Recorder {
 
     await ensureDir(this.adapter, this.dir);
     await this.adapter.write(this.logPath, `# Audio spike ${this.dir.slice(ROOT.length + 5)}\n\n`);
-    await this.adapter.write(`${this.dir}/meta.json`, JSON.stringify({
-      mime: this.mime, ext: this.ext, hasAppend: this.hasAppend, started: new Date(this.startedAt).toISOString(),
-    }, null, 1));
+    // segments[].startMs places each file on the recording's timeline; the time between one
+    // segment's audio and the next start is lost (Obsidian was hidden). audioEndMs is set when known.
+    this.meta = { mime: this.mime, ext: this.ext, hasAppend: this.hasAppend, started: new Date(this.startedAt).toISOString(), segments: [] };
+    await this.adapter.write(`${this.dir}/meta.json`, JSON.stringify(this.meta, null, 1));
     this.note(`device: ${navigator.userAgent}`);
     this.note(`format ${this.mime || 'browser default'}; appendBinary ${this.hasAppend ? 'yes' : 'no, writing parts'}; chunk every ${CHUNK_MS} ms`);
 
@@ -200,6 +201,8 @@ class Recorder {
     };
     rec.start(CHUNK_MS);
     this.rec = rec;
+    this.meta.segments.push({ file: `audio-${n}.${this.ext}`, startMs: Date.now() - this.startedAt });
+    this.saveMeta();
     if (this.segment === 1) this.lastChunk = Date.now();
     this.note(`segment ${n} started as ${rec.mimeType || this.mime || 'default'}`);
   }
@@ -247,9 +250,15 @@ class Recorder {
   // On iOS the mic unmutes and the recorder still says "recording" after a lock or app
   // switch, but it never delivers audio again. So always start over on a fresh stream.
   resume() {
-    const away = r1((Date.now() - this.hiddenAt) / 1000);
+    const away = r1((Date.now() - this.hiddenAt) / 1000), last = this.meta.segments[this.meta.segments.length - 1];
+    if (last) { last.audioEndMs = this.hiddenAt - this.startedAt; this.saveMeta(); }
     this.hiddenAt = null;
     return this.reopen(`back after ${away} s hidden (audio from that time is lost)`);
+  }
+
+  saveMeta() {
+    const path = `${this.dir}/meta.json`, text = JSON.stringify(this.meta, null, 1);
+    this.q.run(() => this.adapter.write(path, text));
   }
 
   // Restarts the recording if no chunk has arrived for 3 timeslices while visible. On the

@@ -101,7 +101,11 @@ try:
         segsC = sorted(page.evaluate(f"() => [...fs.keys()].filter(k => k.startsWith('{dirC}/audio-'))"))
         for f in segsC:
             print(page.evaluate(decode, f))
-        ok_c = len(segsC) == 3 and 'back after' in logC and 'no audio for' in logC and 'DECODE FAILED' not in ''.join(page.evaluate(decode, f) for f in segsC)
+        metaC = json.loads(page.evaluate(f"() => fs.get('{dirC}/meta.json')"))
+        print('META C segments:', metaC['segments'])
+        segs = metaC['segments']
+        ok_meta = [x['file'] for x in segs] == [f.split('/')[-1] for f in segsC] and segs[0]['startMs'] < 1000 and 'audioEndMs' in segs[0] and segs[1]['startMs'] > segs[0]['audioEndMs']
+        ok_c = ok_meta and len(segsC) == 3 and 'back after' in logC and 'no audio for' in logC and 'DECODE FAILED' not in ''.join(page.evaluate(decode, f) for f in segsC)
         print('AUDIO C', 'ok: return and watchdog each started a new segment' if ok_c else 'FAILED')
 
         # --- audio B: no appendBinary, then a crash mid-recording, then recovery on next load

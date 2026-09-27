@@ -134,7 +134,9 @@ In headless Chromium, through `test/run_spike_test.py`:
    - Tools: pen, highlighter, stroke eraser, lasso-move, hold-to-straighten line, pasted photos.
    - Stroke smoothing with pressure-shaped outlines (for example the approach of `perfect-freehand`).
    - Embed in notes by linking the SVG.
-4. **Audio:** turn the spike recorder into a feature, shaped by what the iPad test shows about backgrounding.
+4. **Audio:** turn the spike recorder into a feature, shaped by what the iPad test shows about backgrounding: recording is foreground-only; a lock or app switch splits it into segments.
+   - `meta.json` now records each segment's `startMs` and, when known, `audioEndMs`, so segments can be placed on one timeline.
+   - Playing split segments as one recording is an open, low-priority issue: https://github.com/zcsop1206/obsidian-notebook/issues/1. Workaround: keep Obsidian in front while recording.
 5. **Later ideas:**
    - CI transcription of ink pages to searchable text and alt text.
    - Replaying stroke timestamps on the site.
