@@ -97,7 +97,7 @@ test('toolbar: the tool state round-trips and each bad field falls back on its o
   assert.deepEqual(parseToolState(undefined), { pen: DEFAULT_PEN, highlighter: DEFAULT_HIGHLIGHTER, eraser: DEFAULT_ERASER });
   let got: ReturnType<typeof parseToolState> | undefined;
   const w = warnings(() => (got = parseToolState({
-    pen: { tool: 'lasso', nib: 'pressure', color: 'blue', size: 40 },
+    pen: { tool: 'ruler', nib: 'pressure', color: 'blue', size: 40 },
     highlighter: { color: '#3ddc84', size: 'big' },
     eraser: { size: 13, mode: 'smudge' },
   })));

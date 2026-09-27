@@ -2736,7 +2736,7 @@ try:
               r['groups'] == ['nb-ink-tools', 'nb-ink-presets', 'nb-ink-page-actions'] and not r['strip'], r)
         check('toolbar: 15 buttons, each a 40 px target; all but the five presets have an icon',
               r['buttons'] == 15 and r['icons'] == 10 and all(w >= 40 and h >= 40 for w, h in r['size']), r)
-        check('toolbar: lasso and ruler are placeholders, disabled with their issue', r['lasso'] == [True, 'Lasso: coming in #11'] and r['ruler'] == [True, 'Ruler: coming in #20'], r)
+        check('toolbar: the lasso is a tool (#11); the ruler is a placeholder, disabled with its issue', r['lasso'] == [False, 'Lasso'] and r['ruler'] == [True, 'Ruler: coming in #20'], r)
         check('toolbar: every tool is one tap from every other', r['taps'] == [True] * 6, r['taps'])
         check('toolbar: "Open as markdown" stays the header action', r['header'] == ['Open as markdown'], r['header'])
 
@@ -3054,6 +3054,386 @@ try:
         check('pen edges (#32): the curved, refitted outline is smoother than the 0.3.0 polygon (centre and coverage roughness down by a third)',
               r['after']['centre'] < 0.67 * r['before']['centre'] and r['after']['coverage'] < 0.67 * r['before']['coverage'], r)
         # ======== end of 21. Pen polish (#32) ========
+
+        # ======== 22. The lasso (#11) ========
+        # A "paragraph" of short handwriting-like strokes on page 1 of a two-page note, a stroke
+        # below it and a highlighter under it; the lasso selects, moves, resizes, recolours,
+        # duplicates, deletes, cuts, copies and pastes (here and into another note), and moves onto
+        # page 2; each step is undone and redone, and the saved page is compared with the model.
+        r = ev("""async () => {
+          await p.createInkNote('Lasso', '', 'letter', 'blank');  // the clipboard is on the view's plugin: view['settingsHost']
+          await T.sleep(150);
+          view.addPage();
+          view.scrollToPage(0);
+          await T.sleep(100);
+          T.P = i => view.store.slots[i].page;
+          T.path = i => view.store.slots[i].path;
+          /** A closed loop around the box [x0, y0, x1, y1] (page px), as a pen or mouse drag. */
+          T.loop = ([x0, y0, x1, y1], n = 12) => {
+            const pts = [];
+            for (let j = 0; j < n; j++) pts.push([x0 + (x1 - x0) * j / n, y0, 0.3]);
+            for (let j = 0; j < n; j++) pts.push([x1, y0 + (y1 - y0) * j / n, 0.3]);
+            for (let j = 0; j < n; j++) pts.push([x1 - (x1 - x0) * j / n, y1, 0.3]);
+            for (let j = 0; j <= n; j++) pts.push([x0, y1 - (y1 - y0) * j / n, 0.3]);
+            return pts;
+          };
+          T.lasso = (box, type = 'pen', id = 21) => T.pen(0, T.loop(box), { type, id, predict: 0 });
+          /** A drag (page px of page i) from a to b in n steps, left down with up false. */
+          T.drag = (i, [ax, ay], [bx, by], { n = 12, up = true, type = 'pen' } = {}) =>
+            T.pen(i, Array.from({ length: n + 1 }, (_, j) => [ax + (bx - ax) * j / n, ay + (by - ay) * j / n, 0.3]), { type, id: 23, per: 1, predict: 0, up });
+          T.snap = i => JSON.parse(JSON.stringify(T.P(i).strokes));
+          T.disk = async i => { await view.save(); return ink.readPage(fs.get(T.path(i))).strokes; };
+          T.selInk = () => {
+            const c = view.contentEl.querySelector('canvas.nb-ink-selection');
+            if (!c || !c.isConnected || !c.width) return 0;
+            const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+            let n = 0;
+            for (let k = 3; k < d.length; k += 4) if (d[k] > 0) n++;
+            return n;
+          };
+          // The paragraph: three lines of five "words" at y 150, 200, 250, x 100..500.
+          view.setTool('pen');
+          for (const y of [150, 200, 250]) for (let w = 0; w < 5; w++) {
+            const x0 = 100 + w * 80;
+            await T.pen(0, Array.from({ length: 30 }, (_, j) => [x0 + j * 2, y + 8 * Math.sin(j / 3), 0.3]), { predict: 0 });
+          }
+          view.commit({ key: view.pages[0] }, { tool: 'highlighter', color: '#ffd400', size: 14,
+            points: Array.from({ length: 60 }, (_, j) => ({ x: 120 + j * 5, y: 200, p: 0.5, t: 2 * j })) });
+          await T.pen(0, Array.from({ length: 30 }, (_, j) => [100 + j * 4, 600, 0.3]), { predict: 0 });  // outside
+          T.para = view.store.slots[0].page.strokes.slice(0, 16).map(s => s.id);
+          T.outside = view.store.slots[0].page.strokes[16].id;
+          return { n: T.P(0).strokes.length, tools: T.P(0).strokes.map(s => s.tool).join(','), lassoBtn: !!T.bar().querySelector('.nb-ink-lasso:not([disabled])'),
+            cmd: commands['tool-lasso'].checkCallback(true), paste: commands['paste-strokes'].checkCallback(true) };
+        }""")
+        check('lasso setup: 15 words, a highlighter and a stroke outside; the lasso button is enabled; "Use the lasso" is available, "Paste strokes" not yet',
+              r['n'] == 17 and r['lassoBtn'] and r['cmd'] and not r['paste'], r)
+
+        # The Pencil lassos the paragraph; the menu opens; a finger never lassos; a tap outside deselects.
+        r = ev("""async () => {
+          T.bar().querySelector('.nb-ink-lasso').click();
+          const tool = view.pen.tool;
+          T.bar().querySelector('.nb-ink-lasso').click();  // second tap: the hint and Paste
+          const picker = view.contentEl.querySelector('.nb-ink-picker');
+          const hint = { open: view.toolbar.pickerOpen, text: !!picker.querySelector('.nb-ink-lasso-hint'), pasteDisabled: picker.querySelector('.nb-ink-lasso-paste').disabled };
+          view.toolbar.closePicker();
+          const n0 = T.P(0).strokes.length;
+          await T.lasso([80, 120, 520, 280]);
+          await T.sleep(30);
+          const sel = view.selection;
+          const out = { tool, hint, sel: sel && sel.ids.slice().sort(), live: T.liveInk(), selInk: T.selInk(), menu: view.selectionMenuOpen, same: T.P(0).strokes.length === n0 };
+          view.clearSelection();
+          await T.lasso([80, 120, 520, 280], 'touch', 31);
+          out.finger = view.selection;
+          view.scrollToPage(0);  // the finger panned the view (with momentum): back to the top
+          await T.sleep(100);
+          return out;
+        }""")
+        page.locator('#leaf').screenshot(path=os.path.join(OUT, 'lasso_selected.png'))
+        para = ev("() => T.para.slice().sort()")
+        check('lasso: the toolbar button selects the lasso; a second tap shows the hint, Paste disabled with nothing copied',
+              r['tool'] == 'lasso' and r['hint'] == {'open': 'lasso', 'text': True, 'pasteDisabled': True}, r['hint'])
+        check('lasso: a Pencil loop selects the paragraph and its highlighter (16), not the stroke outside; nothing is drawn',
+              r['sel'] == para and r['same'], r)
+        check('lasso: the loop is cleared on release; the box and handle are drawn; the menu opens', r['live'] == 0 and r['selInk'] > 500 and r['menu'], r)
+        check('lasso: a finger drawing a loop selects nothing', r['finger'] is None, r['finger'])
+
+        # A real mouse drag lassos too.
+        box = ev("() => { const r = T.pages()[0].getBoundingClientRect(); return { x: r.left, y: r.top, k: r.width / 816 }; }")
+        k = box['k']
+        loop = ev("() => T.loop([80, 120, 520, 280])")
+        page.mouse.move(box['x'] + loop[0][0] * k, box['y'] + loop[0][1] * k)
+        page.mouse.down()
+        for x, y, _ in loop[1:]:
+            page.mouse.move(box['x'] + x * k, box['y'] + y * k, steps=2)
+        page.mouse.up()
+        page.wait_for_timeout(50)
+        r = ev("() => view.selection && view.selection.ids.slice().sort()")
+        check('lasso: a mouse loop selects the same strokes', r == para, r)
+
+        # Move: drag from inside the box by (+40, +30); the saved points shift by exactly that.
+        r = ev("""async () => {
+          view.select(0, T.para);
+          const before = T.snap(0), inkBefore = T.ink(0);
+          await T.drag(0, [300, 200], [340, 230], { up: false });
+          const mid = { ink: T.ink(0), selInk: T.selInk(), menu: view.selectionMenuOpen, n: T.P(0).strokes.length };
+          T.penUp(0, [340, 230], 23);
+          await T.sleep(20);
+          const after = T.snap(0), disk = await T.disk(0);
+          const moved = after.filter(s => T.para.includes(s.id));
+          const orig = new Map(before.map(s => [s.id, s]));
+          const shift = moved.every(s => s.points.every((q, j) => Math.abs(q.x - orig.get(s.id).points[j].x - 40) < 1e-9 && Math.abs(q.y - orig.get(s.id).points[j].y - 30) < 1e-9)
+            && s.size === orig.get(s.id).size);
+          const outside = JSON.stringify(after.find(s => s.id === T.outside)) === JSON.stringify(orig.get(T.outside));
+          const order = after.map(s => s.id).join() === before.map(s => s.id).join();
+          const undo = view.undo(), undone = JSON.stringify(T.snap(0)) === JSON.stringify(before), selAfterUndo = view.selection;
+          view.redo();
+          const redone = JSON.stringify(T.snap(0)) === JSON.stringify(after);
+          return { inkBefore, mid, shift, outside, order, disk: JSON.stringify(disk) === JSON.stringify(after), undo, undone, selAfterUndo, redone,
+            labels: view.history.labels.slice(-1), sel: view.selection, drag: view.lassoStats.lastDrag };
+        }""")
+        print('lasso move:', {k: r[k] for k in ('inkBefore', 'mid', 'drag')})
+        check('lasso move: while dragged, the page is drawn without the selection and the overlay shows it; the menu hides',
+              r['mid']['ink'] < r['inkBefore'] * 0.5 and r['mid']['selInk'] > 1000 and not r['mid']['menu'] and r['mid']['n'] == 17, r['mid'])
+        check('lasso move: every selected point moves by the drag (+40, +30), sizes kept, drawing order kept, the rest untouched',
+              r['shift'] and r['outside'] and r['order'], r)
+        check('lasso move: the saved page matches the model', r['disk'])
+        check('lasso move: one undo step ("Move selection"); undo restores and deselects; redo moves again',
+              r['labels'] == ['Move selection'] and r['undo'] and r['undone'] and r['selAfterUndo'] is None and r['redone'], r)
+
+        # Resize by the corner handle: points and sizes scale around the top-left corner; the minimum size.
+        r = ev("""async () => {
+          view.select(0, T.para);
+          const box = view.selection.box, s = 1 / (T.pages()[0].getBoundingClientRect().width / 816);
+          const before = T.snap(0), orig = new Map(before.map(q => [q.id, q]));
+          const hx = box[2] + 3 * s, hy = box[3] + 3 * s;  // the handle: the padded box's corner
+          const tx = box[0] + (hx - box[0]) * 1.5, ty = box[1] + (hy - box[1]) * 1.5;
+          await T.drag(0, [hx, hy], [tx, ty]);
+          await T.sleep(20);
+          const after = T.snap(0), sel = after.filter(q => T.para.includes(q.id));
+          // The scale the view used, from one point, then every point and size checked against it.
+          // The point farthest from the corner gives the scale most precisely.
+          let a = null, o = null;
+          for (const q of sel) q.points.forEach((pt, j) => { const op = orig.get(q.id).points[j]; if (!o || op.x - box[0] > o.x - box[0]) { a = pt; o = op; } });
+          const kx = (a.x - box[0]) / (o.x - box[0]);
+          const r1 = n => Math.round(n * 10) / 10;
+          const bad = [];
+          let errMax = 0;
+          for (const q of sel) {
+            const o = orig.get(q.id);
+            q.points.forEach((pt, j) => { errMax = Math.max(errMax, Math.abs(pt.x - (box[0] + (o.points[j].x - box[0]) * kx)), Math.abs(pt.y - (box[1] + (o.points[j].y - box[1]) * kx))); });
+            if (Math.abs(q.size - Math.max(0.5, r1(o.size * kx))) > 0.1001) bad.push([q.id, o.size, q.size]);
+          }
+          const disk = JSON.stringify(await T.disk(0)) === JSON.stringify(after);
+          const labels = view.history.labels.slice(-1);
+          // Smallest: the handle dragged onto the top-left corner.
+          view.select(0, T.para);
+          const b2 = view.selection.box;
+          await T.drag(0, [b2[2] + 3 * s, b2[3] + 3 * s], [b2[0], b2[1]]);
+          await T.sleep(20);
+          const tiny = T.P(0).strokes.filter(q => T.para.includes(q.id) && q.tool === 'pen').map(q => q.size);
+          const tinyBox = view.selection.box;
+          view.undo();
+          const back1 = JSON.stringify(T.snap(0)) === JSON.stringify(after);
+          view.undo();
+          const back0 = JSON.stringify(T.snap(0)) === JSON.stringify(before);
+          view.redo();
+          const again = JSON.stringify(T.snap(0)) === JSON.stringify(after);
+          return { k: kx, errMax, bad, disk, labels, tiny: [Math.min(...tiny), Math.max(...tiny)], tinyW: Math.max(tinyBox[2] - tinyBox[0], tinyBox[3] - tinyBox[1]), back1, back0, again };
+        }""")
+        print('lasso resize:', {k: r[k] for k in ('k', 'errMax', 'tiny', 'tinyW')})
+        check('lasso resize: the handle scales uniformly about 1.5x; every point scales around the box corner (to 0.05 px); sizes scale, rounded to 0.1',
+              abs(r['k'] - 1.5) < 0.02 and r['errMax'] <= 0.06 and not r['bad'], r)
+        check('lasso resize: the saved page matches; one undo step ("Resize selection")', r['disk'] and r['labels'] == ['Resize selection'], r)
+        check('lasso resize: shrunk to the smallest, pen stroke sizes stop at 0.5 px and the box stays a few px', r['tiny'] == [0.5, 0.5] and 3 < r['tinyW'] < 40, r)
+        check('lasso resize: undo and redo step through each resize', r['back1'] and r['back0'] and r['again'], r)
+
+        # Recolour from the menu: pen strokes turn red, the highlighter keeps its colour.
+        r = ev("""async () => {
+          view.undo();  // back to the moved paragraph
+          view.select(0, T.para);
+          const before = T.snap(0);
+          view.contentEl.querySelector('.nb-ink-selmenu .nb-ink-swatch[data-color="#e0301e"]').click();
+          const sel = T.P(0).strokes.filter(q => T.para.includes(q.id));
+          const colors = [...new Set(sel.map(q => q.tool + ' ' + q.color))].sort();
+          const red = T.near(0, [0xe0, 0x30, 0x1e], 30);
+          const disk = JSON.stringify(await T.disk(0)) === JSON.stringify(T.snap(0));
+          const labels = view.history.labels.slice(-1), after = T.snap(0);
+          view.undo();
+          const undone = JSON.stringify(T.snap(0)) === JSON.stringify(before);
+          view.redo();
+          return { colors, red, disk, labels, undone, redone: JSON.stringify(T.snap(0)) === JSON.stringify(after), outside: T.P(0).strokes.find(q => q.id === T.outside).color };
+        }""")
+        check('lasso recolour: the selected pen strokes turn red on screen and on disk; the highlighter and the stroke outside keep theirs',
+              r['colors'] == ['highlighter #ffd400', 'pen #e0301e'] and r['red'] > 500 and r['disk'] and r['outside'] == '#000000', r)
+        check('lasso recolour: one undo step; undo and redo', r['labels'] == ['Recolour selection'] and r['undone'] and r['redone'], r)
+
+        # Duplicate: a copy 24 px right and down, new ids, selected; delete; both undoable.
+        r = ev("""async () => {
+          view.select(0, T.para);
+          const before = T.snap(0), n0 = before.length;
+          view.contentEl.querySelector('.nb-ink-sel-duplicate').click();
+          const after = T.snap(0), sel = view.selection;
+          const copies = after.slice(n0), orig = before.filter(q => T.para.includes(q.id));
+          const offset = copies.length === orig.length && copies.every((c, i) => c.points.every((pt, j) => Math.abs(pt.x - orig[i].points[j].x - 24) < 1e-9 && Math.abs(pt.y - orig[i].points[j].y - 24) < 1e-9) && c.color === orig[i].color && c.size === orig[i].size);
+          const ids = new Set(after.map(q => q.id));
+          const dup = { n: after.length - n0, offset, uniqueIds: ids.size === after.length, selected: sel && sel.ids.join() === copies.map(q => q.id).join(), labels: view.history.labels.slice(-1),
+            disk: JSON.stringify(await T.disk(0)) === JSON.stringify(after) };
+          view.contentEl.querySelector('.nb-ink-sel-delete').click();
+          const del = { n: T.P(0).strokes.length, sel: view.selection, labels: view.history.labels.slice(-1), same: JSON.stringify(T.snap(0)) === JSON.stringify(before) };
+          view.undo();
+          del.undone = JSON.stringify(T.snap(0)) === JSON.stringify(after);
+          view.undo();
+          dup.undone = JSON.stringify(T.snap(0)) === JSON.stringify(before);
+          view.redo();
+          dup.redone = JSON.stringify(T.snap(0)) === JSON.stringify(after);
+          view.redo();
+          del.redone = JSON.stringify(T.snap(0)) === JSON.stringify(before);
+          return { dup, del };
+        }""")
+        check('lasso duplicate: 16 copies 24 px right and down, same style, new ids unique on the page, selected, saved',
+              r['dup']['n'] == 16 and r['dup']['offset'] and r['dup']['uniqueIds'] and r['dup']['selected'] and r['dup']['disk'], r['dup'])
+        check('lasso delete: the selection is removed and deselected', r['del']['n'] == 17 and r['del']['sel'] is None and r['del']['same'], r['del'])
+        check('lasso duplicate and delete: one undo step each; undo and redo', r['dup']['labels'] == ['Duplicate selection'] and r['del']['labels'] == ['Delete selection']
+              and r['del']['undone'] and r['dup']['undone'] and r['dup']['redone'] and r['del']['redone'], r)
+
+        # Copy, paste (centred on the view), cut, in this note.
+        r = ev("""async () => {
+          view.select(0, T.para);
+          const before = T.snap(0), n0 = before.length;
+          clipboardWrites.length = 0;
+          view.contentEl.querySelector('.nb-ink-sel-copy').click();
+          const clip = view['settingsHost'].inkClipboard, sys = clipboardWrites.length ? JSON.parse(clipboardWrites[0]) : null;
+          const out = { clip: clip && clip.strokes.length, sys: sys && [sys.format, sys.strokes.length], same: JSON.stringify(T.snap(0)) === JSON.stringify(before),
+            cmd: commands['paste-strokes'].checkCallback(true), pasteBtn: view.contentEl.querySelector('.nb-ink-sel-paste').style.display !== 'none' };
+          const sc = view.contentEl.querySelector('.nb-ink-scroll');
+          sc.scrollTop = 150;
+          await T.sleep(60);
+          commands['paste-strokes'].callback ? commands['paste-strokes'].callback() : commands['paste-strokes'].checkCallback(false);
+          const after = T.snap(0), pasted = after.slice(n0);
+          const b = ink.bounds ? null : null;
+          let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+          for (const q of pasted) for (const pt of q.points) { const h = q.tool === 'pen' && q.nib === 'pressure' ? q.size * 0.65 : q.size / 2;
+            x0 = Math.min(x0, pt.x - h); y0 = Math.min(y0, pt.y - h); x1 = Math.max(x1, pt.x + h); y1 = Math.max(y1, pt.y + h); }
+          const r = T.pages()[0].getBoundingClientRect(), s = sc.getBoundingClientRect(), k = 816 / r.width;
+          const cx = (s.left + sc.clientWidth / 2 - r.left) * k, cy = (s.top + sc.clientHeight / 2 - r.top) * k;
+          out.paste = { n: pasted.length, centre: [Math.round((x0 + x1) / 2 - cx), Math.round((y0 + y1) / 2 - cy)], newIds: new Set(after.map(q => q.id)).size === after.length,
+            selected: view.selection && view.selection.ids.join() === pasted.map(q => q.id).join(), labels: view.history.labels.slice(-1),
+            disk: JSON.stringify(await T.disk(0)) === JSON.stringify(after) };
+          view.undo();
+          out.paste.undone = JSON.stringify(T.snap(0)) === JSON.stringify(before);
+          view.redo();
+          out.paste.redone = JSON.stringify(T.snap(0)) === JSON.stringify(after);
+          view.undo();
+          sc.scrollTop = 0;
+          await T.sleep(60);
+          // Cut: removed and on the clipboard.
+          view.select(0, [T.outside]);
+          view['settingsHost'].inkClipboard = null;
+          view.contentEl.querySelector('.nb-ink-sel-cut').click();
+          out.cut = { n: T.P(0).strokes.length, clip: view['settingsHost'].inkClipboard && view['settingsHost'].inkClipboard.strokes.map(q => q.id), labels: view.history.labels.slice(-1) };
+          view.undo();
+          out.cut.undone = JSON.stringify(T.snap(0)) === JSON.stringify(before);
+          view.select(0, T.para);
+          view.copySelection();
+          return out;
+        }""")
+        page.locator('#leaf').screenshot(path=os.path.join(OUT, 'lasso_menu.png'))
+        print('lasso copy/paste:', r)
+        check('lasso copy: the plugin clipboard holds the 16 strokes, the system clipboard their JSON tagged notebook-ink/strokes; the page is unchanged',
+              r['clip'] == 16 and r['sys'] == ['notebook-ink/strokes', 16] and r['same'], r)
+        check('lasso paste: "Paste strokes" is available; the menu offers Paste', r['cmd'] and r['pasteBtn'], r)
+        check('lasso paste: 16 strokes centred on the visible area, new ids, selected, saved; one undo step; undo and redo',
+              r['paste']['n'] == 16 and all(abs(v) <= 1 for v in r['paste']['centre']) and r['paste']['newIds'] and r['paste']['selected'] and r['paste']['disk']
+              and r['paste']['labels'] == ['Paste'] and r['paste']['undone'] and r['paste']['redone'], r['paste'])
+        check('lasso cut: removed from the page and on the clipboard; undo puts it back',
+              r['cut']['n'] == 16 and r['cut']['clip'] == [ev("() => T.outside")] and r['cut']['labels'] == ['Cut selection'] and r['cut']['undone'], r['cut'])
+
+        # Paste into a second note.
+        r = ev("""async () => {
+          await view.save();  // the first note stays open in its tab
+          const first = view.file.path;
+          await p.createInkNote('Lasso 2', '', 'letter', 'blank');
+          await T.sleep(150);
+          const other = view.file.path;
+          commands['paste-strokes'].checkCallback(false);
+          const n = T.P(0).strokes.length, disk = (await T.disk(0)).length, sel = view.selection && view.selection.ids.length;
+          const labels = view.history.labels;
+          view.undo();
+          const undone = T.P(0).strokes.length;
+          view.redo();
+          await view.save();
+          await app.workspace.getLeaf(false).openFile(app.vault.getFile(first));
+          await T.sleep(150);
+          return { other, n, disk, sel, labels, undone, back: view.file.path === first && view.selection === null && view.pen.tool };
+        }""")
+        check('lasso paste into another note: the 16 strokes land there, selected and saved; undo and redo', r['n'] == 16 and r['disk'] == 16 and r['sel'] == 16
+              and r['labels'] == ['Paste'] and r['undone'] == 0 and r['back'] == 'lasso', r)
+
+        # Move onto the next page: the source loses the strokes, the target gains them where they were shown.
+        r = ev("""async () => {
+          view.scrollToPage(0);
+          await T.sleep(60);
+          view.select(0, T.para);
+          const before0 = T.snap(0), before1 = T.snap(1);
+          const r0 = T.pages()[0].getBoundingClientRect(), r1 = T.pages()[1].getBoundingClientRect(), k = 816 / r0.width;
+          const dy = (r1.top - r0.top) * k + 100;  // page 1 px: 100 px further down, on page 2
+          await T.drag(0, [300, 200], [300, 200 + dy], { up: false, n: 16 });
+          const mid = { onPage2: view.contentEl.querySelector('canvas.nb-ink-selection')?.parentElement === T.pages()[1], selInk: T.selInk() };
+          T.penUp(0, [300, 200 + dy], 23);
+          await T.sleep(30);
+          const after0 = T.snap(0), after1 = T.snap(1);
+          const moved = after1.slice(before1.length), orig = before0.filter(q => T.para.includes(q.id));
+          const off = (r1.top - r0.top) * k;
+          let err = 0;
+          moved.forEach((q, i) => q.points.forEach((pt, j) => { err = Math.max(err, Math.abs(pt.x - orig[i].points[j].x), Math.abs(pt.y - (orig[i].points[j].y + dy - off))); }));
+          const disk0 = await T.disk(0), disk1 = await T.disk(1);
+          const out = { mid, n0: after0.length, n1: after1.length, err, ids: moved.map(q => q.id).join() === orig.map(q => q.id).join(),
+            sel: view.selection && [view.selection.page, view.selection.ids.length], labels: view.history.labels.slice(-1),
+            disk: JSON.stringify(disk0) === JSON.stringify(after0) && JSON.stringify(disk1) === JSON.stringify(after1) };
+          view.undo();
+          out.undone = JSON.stringify(T.snap(0)) === JSON.stringify(before0) && JSON.stringify(T.snap(1)) === JSON.stringify(before1);
+          view.redo();
+          out.redone = JSON.stringify(T.snap(0)) === JSON.stringify(after0) && JSON.stringify(T.snap(1)) === JSON.stringify(after1);
+          return out;
+        }""")
+        ev("async () => { T.pages()[1].scrollIntoView(); await T.sleep(100); }")
+        page.locator('#leaf').screenshot(path=os.path.join(OUT, 'lasso_moved_page.png'))
+        ev("async () => { view.scrollToPage(0); await T.sleep(100); }")
+        print('lasso move to page 2:', {k: r[k] for k in ('mid', 'n0', 'n1', 'err', 'sel')})
+        check('lasso move to another page: the preview follows onto page 2', r['mid']['onPage2'] and r['mid']['selInk'] > 500, r['mid'])
+        check('lasso move to another page: page 1 loses the 16 strokes, page 2 gains them (ids kept, no clash) where they were shown (to 0.25 px: rounding and whole-px page boxes), selected there',
+              r['n0'] == 1 and r['n1'] == 16 and r['err'] <= 0.25 and r['ids'] and r['sel'] == [1, 16], r)
+        check('lasso move to another page: both pages saved as shown; one undo step; undo and redo', r['disk'] and r['labels'] == ['Move selection to another page'] and r['undone'] and r['redone'], r)
+
+        # Deselecting: a tap outside, switching tools, Escape.
+        r = ev("""async () => {
+          view.undo();
+          view.select(0, T.para);
+          await T.pen(0, [[700, 900, 0.3]], { id: 41 });  // a tap far from the box
+          const tap = view.selection;
+          view.select(0, T.para);
+          view.setTool('pen');
+          const tool = [view.selection, T.selInk(), view.selectionMenuOpen];
+          view.select(0, T.para);
+          view.contentEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          const esc = view.selection;
+          view.select(0, T.para);
+          const box = view.selection.box;
+          await T.pen(0, [[(box[0] + box[2]) / 2, (box[1] + box[3]) / 2, 0.3]], { id: 42 });  // a tap inside keeps it
+          return { tap, tool, esc, inside: view.selection && view.selection.ids.length, n: T.P(0).strokes.length };
+        }""")
+        check('lasso: a tap outside, switching tools and Escape deselect; a tap inside keeps the selection; taps draw nothing',
+              r['tap'] is None and r['tool'] == [None, 0, False] and r['esc'] is None and r['inside'] == 16 and r['n'] == 17, r)
+
+        # Dark theme: the box and menu stay visible.
+        ev("() => { document.body.classList.add('theme-dark'); app.workspace.trigger('css-change'); }")
+        page.wait_for_timeout(100)
+        page.locator('#leaf').screenshot(path=os.path.join(OUT, 'lasso_dark.png'))
+        ev("() => { document.body.classList.remove('theme-dark'); app.workspace.trigger('css-change'); }")
+
+        # Drag frame time on a page of 300 strokes, with 100 of them selected.
+        r = ev("""async () => {
+          view.clearSelection();
+          const pg = T.P(1);
+          view.setTool('pen');
+          for (let i = 0; i < 300; i++) {
+            const x0 = 60 + (i % 15) * 46, y0 = 80 + Math.floor(i / 15) * 45;
+            view.commit({ key: view.pages[1] }, { tool: 'pen', nib: 'uniform', color: '#000000', size: 2.5,
+              points: Array.from({ length: 80 }, (_, j) => ({ x: x0 + j * 0.5, y: y0 + 10 * Math.sin(j / 5), p: 0.4, t: j * 2 })) });
+          }
+          view.scrollToPage(1);
+          await T.sleep(100);
+          view.select(1, pg.strokes.slice(0, 100).map(q => q.id));
+          const box = view.selection.box, cx = (box[0] + box[2]) / 2, cy = (box[1] + box[3]) / 2;
+          await T.drag(1, [cx, cy], [cx + 60, cy + 90], { n: 60 });
+          await T.sleep(20);
+          return { d: view.lassoStats.lastDrag, sel: view.selection.ids.length, n: pg.strokes.length };
+        }""")
+        d = r['d']
+        print(f"lasso drag on a 300-stroke page ({r['sel']} selected): {d['frames']} frames, median {d['frameMs']:.2f} ms, max {d['frameMaxMs']:.2f} ms")
+        check('lasso drag: 100 of 300 strokes dragged at a median frame under 8 ms', r['sel'] == 100 and d['frames'] >= 30 and d['frameMs'] < 8, r)
+        ev("() => { view.clearSelection(); view.setTool('pen'); }")
+        # ======== end of 22. The lasso (#11) ========
 
         # --- unload removes the patch
         r = ev("""async () => {

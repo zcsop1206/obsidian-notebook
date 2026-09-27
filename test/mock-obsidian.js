@@ -26,6 +26,12 @@
   P.createSpan = function (o = {}) { return this.createEl('span', o); };
   window.createDiv = o => document.createElement('div').createDiv(o);
 
+  // The system clipboard (#11 writes copied strokes to it, best effort): recorded, never refused.
+  window.clipboardWrites = [];
+  try {
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async t => { clipboardWrites.push(t); } } });
+  } catch (e) { /* left as the browser has it */ }
+
   window.notices = [];
   class Notice { constructor(m) { notices.push(m); } hide() {} setMessage(m) { notices.push(m); return this; } }
 
