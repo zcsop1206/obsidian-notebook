@@ -22,6 +22,7 @@ import { layoutPages, MARGIN, mostVisiblePage, pageAtY, pagesInBand, type Layout
 import { anchorAt, clampZoom, navStatsLines, Navigator, newNavStats, scrollToKeep, zoomStep, type NavStats } from './navigate';
 import { currentTheme, PageBitmap, releaseScratch, strokeColor, TemplateImages, warmOutlines, type Theme } from './renderer';
 import { SpatialIndex } from './spatial';
+import { PagesPanel } from './pages-panel';
 import { NoteStore, type NoteFiles, type PageSlot, type TemplatesBefore } from './store';
 import { VIEW_TYPE_INK } from './takeover';
 import { TemplateChooser } from './template-chooser';
@@ -98,6 +99,10 @@ export function vaultFiles(app: App): NoteFiles {
       const f = vault.getAbstractFileByPath(folder);
       return f instanceof TFolder ? f.children.map(c => c.name) : [];
     },
+    async delete(path) {
+      const f = vault.getAbstractFileByPath(path);
+      if (f instanceof TFile) await vault.delete(f);
+    },
   };
 }
 
@@ -167,6 +172,7 @@ export class InkView extends FileView {
     this.strip = root.createDiv({ cls: 'nb-ink-strip' });
     this.buildStrip();
     this.buildHistoryGroup();
+    this.buildPagesPanel(root);
     this.scroller = root.createDiv({ cls: 'nb-ink-scroll' });
     this.sizer = this.scroller.createDiv({ cls: 'nb-ink-sizer' });
     this.pagesEl = this.scroller.createDiv({ cls: 'nb-ink-pages' });
@@ -253,6 +259,7 @@ export class InkView extends FileView {
     this.nav.reset();
     this.input.destroy();
     this.templates.clear();
+    this.pagesPanel?.destroy();
     releaseScratch();
     await super.onClose();
   }
@@ -280,6 +287,7 @@ export class InkView extends FileView {
       indexChanged: () => this.store === store && this.indexChanged(),
       notice: message => new Notice(message),
       saved: () => this.stats.saves++,
+      pageEdited: slot => this.store === store && this.pagesPanel?.changed(slot.id),
     });
     try {
       await store.load(text);
@@ -352,6 +360,7 @@ export class InkView extends FileView {
       pv.el.remove();
     }
     this.pages = [];
+    this.pagesPanel?.sync();
     this.footer.hide();
     this.pagesEl.style.height = this.pagesEl.style.width = '';
     this.sizer.style.height = this.sizer.style.width = '';
@@ -416,6 +425,7 @@ export class InkView extends FileView {
       s.height = `${b.height}px`;
     });
     this.footer.style.top = `${layout.footerTop}px`;
+    this.pagesPanel?.sync(); // #17: pages may have been added, removed or reordered
     if (anchor && old && old.scale !== layout.scale && anchor.index < layout.pages.length) {
       const box = layout.pages[anchor.index];
       this.scroller.scrollTop = box.top + anchor.at * box.height;
@@ -481,6 +491,7 @@ export class InkView extends FileView {
     }
     this.updateStats();
     this.pump();
+    if (this.pagesPanel?.isOpen) this.pagesPanel.setCurrent(this.currentPageIndex());
   }
 
   /**
@@ -959,6 +970,7 @@ export class InkView extends FileView {
   private pageChanged(slot: PageSlot) {
     const pv = this.pages.find(p => p.slot === slot);
     if (!pv) return;
+    this.pagesPanel?.changed(slot.id);
     this.showError(pv);
     pv.spatial = null; // reloaded from disk: rebuilt when next erased
     this.relayout(); // the size may have changed
@@ -1203,5 +1215,185 @@ export class InkView extends FileView {
     };
     set('.nb-ink-undo', this.history.canUndo);
     set('.nb-ink-redo', this.history.canRedo);
+  }
+
+  // ---- page management (#17)
+  // The Pages panel (pages-panel.ts) and the page operations it offers: insert after, duplicate,
+  // delete and move. Each is one undo step, recorded like recordAddPage; the page elements are
+  // brought in line with the store's slots by syncPageViews, which the panel follows through
+  // relayout.
+
+  /** The Pages panel: thumbnails of the pages, closed by default. */
+  private pagesPanel: PagesPanel | null = null;
+
+  get pagesPanelOpen(): boolean {
+    return !!this.pagesPanel?.isOpen;
+  }
+
+  /** Opens or closes the Pages panel (or sets it with `open`). */
+  togglePagesPanel(open = !this.pagesPanelOpen) {
+    const panel = this.pagesPanel;
+    if (!panel) return;
+    // Below the strip; the pages area narrows beside it (relaid out through the ResizeObserver).
+    panel.el.style.top = `${this.strip.offsetTop + this.strip.offsetHeight}px`;
+    this.contentEl.toggleClass('nb-pages-open', open);
+    panel.setOpen(open);
+    this.strip.querySelector('.nb-ink-pages-toggle')?.toggleClass('is-active', open);
+    this.strip.querySelector('.nb-ink-pages-toggle')?.setAttribute('aria-pressed', String(open));
+  }
+
+  /** The panel's stats (thumbnails drawn, frame times), for tests. */
+  get pagesPanelStats() {
+    return this.pagesPanel?.stats ?? null;
+  }
+
+  private buildPagesPanel(root: HTMLElement) {
+    this.pagesPanel = new PagesPanel(root, {
+      pages: () => this.pages.map(pv => ({ id: pv.slot.id, size: pv.slot.size })),
+      page: id => {
+        const pv = this.pages.find(p => p.slot.id === id);
+        return pv && this.store ? this.store.page(pv.slot) : null;
+      },
+      bitmap: id => {
+        const pv = this.pages.find(p => p.slot.id === id);
+        return pv?.bitmap && pv.pending == null && !this.nav.previewing ? pv.bitmap.canvas : null;
+      },
+      theme: () => this.theme,
+      template: (template, size, w, h, onReady) => this.templates.get(template, size, w, h, this.theme, onReady),
+      current: () => this.currentPageIndex(),
+      go: i => this.scrollToPage(i),
+      insertAfter: i => this.insertPageAfter(i),
+      duplicate: i => this.duplicatePage(i),
+      remove: i => this.deletePage(i),
+      move: (from, to) => this.movePage(from, to),
+    });
+    // PROVISIONAL (#10): one button in the strip, before the "provisional" label.
+    const b = this.strip.createEl('button', {
+      cls: 'nb-ink-control nb-ink-pages-toggle', text: 'Pages', attr: { 'aria-label': 'Toggle pages panel', 'aria-pressed': 'false', type: 'button' },
+    });
+    this.strip.insertBefore(b, this.strip.querySelector('.nb-ink-provisional'));
+    b.addEventListener('click', () => this.togglePagesPanel());
+  }
+
+  /** Scrolls so page `index` is at the top of the view. */
+  scrollToPage(index: number) {
+    const box = this.layout?.pages[index];
+    if (!box) return;
+    this.nav.stopMomentum();
+    this.scroller.scrollTop = Math.max(0, box.top - MARGIN);
+    this.update();
+  }
+
+  /**
+   * Inserts a page after page `index` (-1: before the first) with the given template, or the
+   * note's default, and scrolls to it. One undo step.
+   */
+  insertPageAfter(index: number, template?: Template) {
+    const store = this.store;
+    if (!store) return;
+    const slot = store.insertPage(index + 1, template);
+    this.syncPageViews();
+    this.scrollToPage(store.slots.indexOf(slot));
+    this.recordNewPage('Insert page', slot.id);
+  }
+
+  /** Inserts a copy of page `index` after it and scrolls to the copy. One undo step. */
+  duplicatePage(index: number) {
+    const store = this.store, pv = this.pages[index];
+    if (!store || !pv) return;
+    const slot = store.duplicatePage(pv.slot.id);
+    if (!slot) {
+      new Notice("This page can't be read, so it can't be duplicated");
+      return;
+    }
+    this.syncPageViews();
+    this.scrollToPage(store.slots.indexOf(slot));
+    this.recordNewPage('Duplicate page', slot.id);
+  }
+
+  /**
+   * Deletes page `index` and its file, without asking: it's one undo step, and undo writes the
+   * file again with its content.
+   */
+  deletePage(index: number) {
+    const store = this.store, pv = this.pages[index];
+    if (!store || !pv) return;
+    const pageId = pv.slot.id;
+    const at = store.deletePage(pageId).index;
+    this.syncPageViews();
+    new Notice(`Page ${index + 1} deleted (undo brings it back)`);
+    this.history.push({
+      label: 'Delete page',
+      undo: () => {
+        if (this.store !== store) return;
+        store.insertPageInIndex(pageId, at);
+        this.syncPageViews();
+      },
+      redo: () => {
+        if (this.store !== store) return;
+        store.deletePage(pageId);
+        this.syncPageViews();
+      },
+    });
+  }
+
+  /** Moves page `from` to position `to` (of the pages without it). Only the index changes. One undo step. */
+  movePage(from: number, to: number) {
+    const store = this.store, pv = this.pages[from];
+    if (!store || !pv) return;
+    const pageId = pv.slot.id;
+    const before = store.movePage(pageId, to);
+    const after = store.index.pages.indexOf(pageId);
+    if (before < 0 || before === after) return;
+    this.syncPageViews();
+    const move = (i: number) => () => {
+      if (this.store !== store) return;
+      store.movePage(pageId, i);
+      this.syncPageViews();
+    };
+    this.history.push({ label: 'Move page', undo: move(before), redo: move(after) });
+  }
+
+  /** Records a page inserted or duplicated: undo takes it out of the index, redo puts it back. */
+  private recordNewPage(label: string, pageId: string) {
+    const store = this.store;
+    if (!store) return;
+    let index = -1;
+    this.history.push({
+      label,
+      undo: () => {
+        if (this.store !== store) return;
+        index = store.removePageFromIndex(pageId).index;
+        this.syncPageViews();
+      },
+      redo: () => {
+        if (this.store !== store) return;
+        store.insertPageInIndex(pageId, index);
+        this.syncPageViews();
+      },
+    });
+  }
+
+  /**
+   * Brings the page elements in line with the store's slots (after pages were inserted,
+   * removed or reordered here), keeping the elements and bitmaps of pages still there.
+   */
+  private syncPageViews() {
+    const store = this.store;
+    if (!store) return;
+    this.input.cancel();
+    const old = new Map(this.pages.map(pv => [pv.slot, pv] as const));
+    this.pages = store.slots.map(slot => {
+      const pv = old.get(slot);
+      old.delete(slot);
+      return pv ?? this.makePage(slot);
+    });
+    for (const pv of old.values()) {
+      this.dropBitmap(pv);
+      pv.el.remove();
+    }
+    for (const pv of this.pages) this.pagesEl.insertBefore(pv.el, this.footer);
+    this.relayout();
+    this.update();
   }
 }

@@ -37,6 +37,8 @@ export interface StoreListener {
   notice(message: string): void;
   /** A file write finished. */
   saved(path: string): void;
+  /** A page's model was changed here (strokes or template), e.g. to redraw its thumbnail (#17). */
+  pageEdited?(slot: PageSlot): void;
 }
 
 export interface PageSlot {
@@ -217,6 +219,7 @@ export class NoteStore {
   changed(slot: PageSlot) {
     this.dirtyPages.add(slot.id);
     this.schedule();
+    this.listener.pageEdited?.(slot);
   }
 
   /**
