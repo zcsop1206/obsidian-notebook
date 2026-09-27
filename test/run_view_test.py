@@ -1852,6 +1852,12 @@ try:
           view.contentEl.querySelector('.nb-ink-pages-toggle').click();
           await T.sleep(400);
           await T.idle();
+          // #55: the current page's two rows of 36 px buttons push page 4's thumbnail out of view here.
+          const list = view.contentEl.querySelector('.nb-pages-list');
+          list.scrollTop = list.scrollHeight;
+          await T.sleep(100);
+          await T.idle();
+          list.scrollTop = 0;
           const nums = T.thumbs().map(t => t.querySelector('.nb-pages-num').textContent);
           return { open: view.pagesPanelOpen, shown: T.panel().style.display !== 'none', order: T.order(), ids: view.store.index.pages, nums,
             ink: T.thumbs().map((_, i) => T.thumbInk(i)), w0, w1: T.pages()[0].offsetWidth, margin: getComputedStyle(T.sc()).marginLeft,
@@ -4731,7 +4737,7 @@ try:
         check('dense save: no frame over 32 ms while the autosave runs', r['maxFrame'] <= 32, r)
         # ======== end of 28. Autosave on a dense page (#37) ========
 
-        # ======== 29. The Pencil on every control (#53) ========
+        # ======== 29. The Pencil on every control (#53) and the Pages panel's buttons (#55) ========
         # On the iPad a Pencil tap sends pen pointer events and stylus touch events; WebKit clicks
         # (and focuses) the element only if the touchstart wasn't prevented, and scrolls or selects
         # only if the touchmoves weren't. T.pencilTap sends both, then clicks and focuses as WebKit
@@ -4916,6 +4922,99 @@ try:
         check('controls: a Pencil tap on "Add page" (inside the scroller) adds a page and draws nothing', r['added'] == 1 and r['noStroke'], r)
         check('controls: none of those Pencil touches was prevented', r['taps'] and not any(r['taps']), r['taps'])
 
+        # (4) the Pages panel with the Pencil: tap a thumbnail, the icon buttons, a long press and drag
+        r = ev("""async () => {
+          const out = {};
+          const cur = () => T.thumbs().findIndex(t => t.classList.contains('is-current'));
+          const s0 = T.strokeCount();
+          out.thumbTap = T.pencilTap(T.thumbs()[1].querySelector('.nb-pages-frame'));
+          await T.sleep(150);
+          out.afterTap = [cur(), view.currentPageIndex(), T.strokeCount() - s0];
+          const btn = what => view.contentEl.querySelector('.nb-pages-thumb.is-current .nb-pages-' + what);
+          out.icons = [...T.thumbs()[cur()].querySelectorAll('.nb-pages-action')].map(b => b.getAttribute('data-icon'));
+          out.buttons = [...T.thumbs()[cur()].querySelectorAll('.nb-pages-action')].map(b => [b.dataset.action, b.getAttribute('aria-label'), b.getAttribute('title'), b.getAttribute('data-icon') && !!b.querySelector('svg'),
+            [...b.childNodes].filter(c => c.nodeType === 3).map(c => c.textContent).join('').trim()]);
+          const ids = view.store.index.pages.slice();
+          // Move down: page 2 becomes page 3 and stays current, so its buttons follow it.
+          const labels0 = view.history.labels.length;
+          out.down = T.pencilTap(btn('down'));
+          await T.sleep(150);
+          out.afterDown = { order: view.store.index.pages.slice(), cur: cur(), view: view.currentPageIndex(), currentId: T.thumbs()[cur()].dataset.page,
+            steps: view.history.labels.length - labels0, label: view.history.labels.slice(-1)[0] };
+          out.downDisabled = btn('down').disabled;
+          out.up = T.pencilTap(btn('up'));
+          await T.sleep(150);
+          out.afterUp = { order: view.store.index.pages.slice(), cur: cur() };
+          view.undo();
+          await T.sleep(100);
+          out.undone = view.store.index.pages.slice();
+          view.undo();
+          await T.sleep(100);
+          out.undone2 = view.store.index.pages.slice();
+          view.scrollToPage(0);
+          await T.sleep(150);
+          out.firstUpDisabled = btn('up').disabled;
+          out.firstDownDisabled = btn('down').disabled;
+          // Insert, duplicate, delete with the Pencil; each undone.
+          const n0 = view.store.slots.length;
+          T.pencilTap(btn('insert')); await T.sleep(100);
+          out.inserted = view.store.slots.length - n0; view.undo(); await T.sleep(100);
+          view.scrollToPage(0); await T.sleep(150);
+          T.pencilTap(btn('duplicate')); await T.sleep(100);
+          out.duplicated = view.store.slots.length - n0; view.undo(); await T.sleep(100);
+          view.scrollToPage(0); await T.sleep(150);
+          T.pencilTap(btn('delete')); await T.sleep(100);
+          out.deleted = n0 - view.store.slots.length; view.undo(); await T.sleep(100);
+          out.back = view.store.index.pages.slice();
+          out.ids = ids;
+          // A Pencil long press picks thumbnail 1 up; its touchmoves are then prevented (no scroll); a drag reorders.
+          view.scrollToPage(0); await T.sleep(150);
+          const list = view.contentEl.querySelector('.nb-pages-list'), frame = T.thumbs()[0].querySelector('.nb-pages-frame');
+          T.onThumb('pointerdown', 0, { pointerType: 'pen', id: 92 });
+          out.beforeLift = T.touch(frame, 'touchmove', 'stylus');
+          await T.sleep(450);
+          out.lifted = T.thumbs()[0].classList.contains('is-lifted');
+          out.afterLift = T.touch(frame, 'touchmove', 'stylus');
+          const r1 = T.thumbs()[1].getBoundingClientRect(), r2 = T.thumbs()[2].getBoundingClientRect(), f0 = frame.getBoundingClientRect();
+          const dy = (r1.top + r1.height / 2 + r2.top + r2.height / 2) / 2 - (f0.top + f0.height / 2);
+          for (const d of [10, dy / 2, dy]) { T.onThumb('pointermove', 0, { pointerType: 'pen', id: 92, dy: d, target: list }); await T.sleep(16); }
+          T.onThumb('pointerup', 0, { pointerType: 'pen', id: 92, dy, target: list });
+          await T.sleep(100);
+          out.dragged = view.store.index.pages.slice();
+          view.undo();
+          await T.sleep(100);
+          out.dragUndone = view.store.index.pages.slice();
+          // A finger long press still works too.
+          T.onThumb('pointerdown', 0, { pointerType: 'touch', id: 93 });
+          await T.sleep(450);
+          out.fingerLifted = T.thumbs()[0].classList.contains('is-lifted');
+          out.fingerAfterLift = T.touch(frame, 'touchmove', 'direct');
+          T.onThumb('pointerup', 0, { pointerType: 'touch', id: 93 });
+          out.strokes = T.strokeCount() - s0;
+          return out;
+        }""")
+        ids = r['ids']
+        check('pages panel: a Pencil tap on a thumbnail goes to its page (touchstart not prevented, no stroke)',
+              r['thumbTap'] == [False, False] and r['afterTap'] == [1, 1, 0], r)
+        check('pages panel: five icon buttons with labels and tooltips: plus, copy, trash, arrow-up, arrow-down, no text',
+              r['buttons'] == [['insert', 'Insert page after', 'Insert page after', True, ''], ['duplicate', 'Duplicate page', 'Duplicate page', True, ''],
+                               ['delete', 'Delete page', 'Delete page', True, ''], ['up', 'Move page up', 'Move page up', True, ''],
+                               ['down', 'Move page down', 'Move page down', True, '']]
+              and r['icons'] == ['plus', 'copy', 'trash', 'arrow-up', 'arrow-down'], r['buttons'])
+        check('pages panel: "Move down" moves the page one place, one undo step, and it stays the current page',
+              r['down'] == [False, False] and r['afterDown']['order'] == [ids[0], ids[2], ids[1]] and r['afterDown']['cur'] == 2
+              and r['afterDown']['view'] == 2 and r['afterDown']['currentId'] == ids[1] and r['afterDown']['steps'] == 1 and r['afterDown']['label'] == 'Move page', r)
+        check('pages panel: on the last page "Move down" is disabled; "Move up" moves it back', r['downDisabled'] and r['afterUp'] == {'order': ids, 'cur': 1}, r)
+        check('pages panel: undo undoes each move', r['undone'] == [ids[0], ids[2], ids[1]] and r['undone2'] == ids, r)
+        check('pages panel: on the first page "Move up" is disabled, "Move down" is not', r['firstUpDisabled'] and not r['firstDownDisabled'], r)
+        check('pages panel: Pencil taps on insert, duplicate and delete work (each undone)',
+              r['inserted'] == 1 and r['duplicated'] == 1 and r['deleted'] == 1 and r['back'] == ids, r)
+        check('pages panel: a Pencil long press picks a thumbnail up; its touchmoves are prevented only once lifted (before, the panel scrolls)',
+              r['lifted'] and r['beforeLift'] is False and r['afterLift'] is True, r)
+        check('pages panel: a Pencil drag reorders (page 1 between pages 2 and 3); undo restores', r['dragged'] == [ids[1], ids[0], ids[2]] and r['dragUndone'] == ids, r)
+        check('pages panel: a finger long press still lifts, and then blocks the scroll', r['fingerLifted'] and r['fingerAfterLift'] is True, r)
+        check('pages panel: no Pencil tap or drag on the panel drew a stroke', r['strokes'] == 0, r)
+
         # (5) a stroke in progress: the window blocker stops stylus touchmoves anywhere, until the pen lifts
         r = ev("""async () => {
           const s0 = T.strokeCount();
@@ -5005,8 +5104,56 @@ try:
         check("dialogs: the settings tab's dropdowns take Pencil taps and focus", r['settings']['n'] >= 2 and r['settings']['bad'] == [] and all(r['settings']['focus']), r['settings'])
         check('dialogs: all closed', r['modals'] == 0, r['modals'])
 
-        ev("async () => { view.togglePagesPanel(false); if (view.rulerOn) commands['toggle-ruler'].checkCallback(false); await T.sleep(50); }")
-        # ======== end of 29. The Pencil on every control (#53) ========
+        # (7) #55: the panel's buttons fit, at iPad widths with a mobile font and Obsidian's mobile button padding,
+        # with enough pages that the panel scrolls (a desktop scrollbar takes room in Chromium)
+        ev("""async () => {
+          for (let i = 0; i < 5; i++) view.addPage();
+          await T.sleep(100);
+          const s = document.createElement('style');
+          s.id = 'nb-mobile';
+          // Obsidian's mobile look, roughly: bigger UI font and roomy text buttons.
+          s.textContent = `html { font-size: 20px; } body.is-mobile { --font-ui-smaller: 16px; --font-ui-small: 18px; font-size: 20px; }
+            body.is-mobile button:not(.clickable-icon) { font-size: 18px; padding: 6px 18px; height: 44px; min-width: 44px; }`;
+          document.head.appendChild(s);
+          document.body.classList.add('is-mobile');
+        }""")
+        fits = {}
+        for name, w, h in (('portrait', 768, 1024), ('landscape', 1024, 768)):
+            page.set_viewport_size({'width': w, 'height': h})
+            ev(f"() => {{ const s = document.getElementById('leaf').style; s.width = '{w}px'; s.height = '{h - 120}px'; s.boxSizing = 'border-box'; }}")
+            page.wait_for_timeout(300)
+            fits[name] = ev("""async () => {
+              view.scrollToPage(1);
+              await T.sleep(200);
+              const panel = T.panel(), list = panel.querySelector('.nb-pages-list'), pr = panel.getBoundingClientRect(), lr = list.getBoundingClientRect();
+              const thumb = panel.querySelector('.nb-pages-thumb.is-current'), actions = thumb.querySelector('.nb-pages-actions');
+              const buttons = [...actions.querySelectorAll('.nb-pages-action')];
+              const boxes = buttons.map(b => b.getBoundingClientRect());
+              // Inside the panel and left of the list's scrollbar (its client area), and on top where they are.
+              const right = lr.left + list.clientLeft + list.clientWidth;
+              const inside = boxes.every(q => q.left >= pr.left - 0.5 && q.right <= Math.min(pr.right, right) + 0.5);
+              const onTop = boxes.every((q, i) => document.elementFromPoint(q.left + q.width / 2, q.top + q.height / 2)?.closest('.nb-pages-action') === buttons[i]);
+              return { scrolls: list.scrollHeight > list.clientHeight, panelW: Math.round(pr.width), margin: getComputedStyle(T.sc()).marginLeft, count: buttons.length, inside, onTop,
+                sizes: boxes.map(q => [Math.round(q.width), Math.round(q.height)]), rows: new Set(boxes.map(q => Math.round(q.top))).size,
+                listScroll: [list.scrollWidth, list.clientWidth], actionsScroll: [actions.scrollWidth, actions.clientWidth],
+                fontPx: getComputedStyle(document.documentElement).fontSize, pageLeft: Math.round(T.pages()[0].getBoundingClientRect().left - pr.right) };
+            }""")
+            page.locator('.nb-pages-panel').screenshot(path=os.path.join(OUT, f'pages_panel_{name}.png'))
+            page.locator('#leaf').screenshot(path=os.path.join(OUT, f'pages_panel_{name}_view.png'))
+        ev("() => { document.getElementById('nb-mobile').remove(); document.body.classList.remove('is-mobile'); }")
+        page.set_viewport_size({'width': 1000, 'height': 700})
+        ev("() => { const s = document.getElementById('leaf').style; s.width = s.height = s.boxSizing = ''; }")
+        page.wait_for_timeout(200)
+        print('pages panel fits:', fits)
+        for name in ('portrait', 'landscape'):
+            f = fits[name]
+            check(f'pages panel: at the iPad {name} width with a 20 px mobile font, all five buttons lie inside the panel, uncovered, in at most two rows; nothing scrolls sideways',
+                  f['count'] == 5 and f['inside'] and f['onTop'] and f['rows'] <= 2 and f['fontPx'] == '20px' and f['scrolls']
+                  and f['listScroll'][0] <= f['listScroll'][1] and f['actionsScroll'][0] <= f['actionsScroll'][1], f)
+            check(f'pages panel: ({name}) each button is at least 36 px square; the panel is about 172 px and the pages area starts beside it',
+                  all(w >= 36 and h >= 36 for w, h in f['sizes']) and 160 <= f['panelW'] <= 180 and f['margin'] == f"{f['panelW']}px" and f['pageLeft'] >= 0, f)
+        ev("async () => { for (let i = 0; i < 5; i++) view.undo(); view.togglePagesPanel(false); if (view.rulerOn) commands['toggle-ruler'].checkCallback(false); await T.sleep(50); }")
+        # ======== end of 29. The Pencil on every control (#53) and the Pages panel's buttons (#55) ========
 
         # --- unload removes the patch
         r = ev("""async () => {
