@@ -525,11 +525,14 @@ export class NoteStore {
    */
   async movePages(to: string, move: () => Promise<void>): Promise<boolean> {
     while (this.moving) await this.moving;
+    // The writes queued now; later ones wait for the move (a page delete's job waits for a
+    // flush, which waits for the move, so waiting for it here would never end).
+    const queued = Promise.all([...this.writes.values()]);
     let release!: () => void;
     this.moving = new Promise(r => { release = r; });
     let ok = false;
     try {
-      while (this.writes.size) await Promise.all([...this.writes.values()]);
+      await queued;
       await move();
       this.pagesMoved(to);
       ok = true;
@@ -742,6 +745,7 @@ export class NoteStore {
     const job = Promise.all([prev, indexWritten]).then(async () => {
       // Undone (and so being written again) meanwhile: keep the file.
       if (this.slots.includes(slot)) return;
+      const path = slot.path; // where it is now, if the page folder moved meanwhile (#26)
       this.ownDeletes.add(path);
       try {
         await del(path);

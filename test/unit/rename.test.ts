@@ -45,6 +45,9 @@ class MemFiles implements NoteFiles {
   list(folder: string) {
     return [...this.files.keys()].filter(k => k.startsWith(folder + '/')).map(k => k.slice(folder.length + 1));
   }
+  async delete(path: string) {
+    this.files.delete(path);
+  }
   isFolder(path: string) {
     return this.list(path).length > 0;
   }
@@ -133,4 +136,38 @@ test('store: follows its page folder renamed by hand, in either event order', as
     assert.equal(store.followRename('other', 'elsewhere', true), false);
     store.close();
   }
+});
+
+async function twoPages() {
+  const { files, store, notices } = await setup();
+  store.insertPage(1);
+  await store.flush();
+  return { files, store, notices, second: store.slots[1].id };
+}
+
+test('store: a page deleted while its folder moves is deleted in the new place, and the move finishes', async () => {
+  const { files, store, notices, second } = await twoPages();
+  const moved = store.movePages('pages', async () => {
+    store.deletePage(second);
+    await new Promise(r => setTimeout(r, 20));
+    files.move('lec', 'pages');
+  });
+  assert.ok(await moved);
+  await store.flush();
+  await new Promise(r => setTimeout(r, 20));
+  assert.deepEqual([...files.files.keys()].sort(), ['lec.md', 'pages/p-000001.svg']);
+  assert.deepEqual(readNote(files.files.get('lec.md')!, 'lec').pages, ['p-000001']);
+  assert.deepEqual(notices, []);
+  store.close();
+});
+
+test('store: a folder moved while a page delete is queued waits for the delete, without deadlock', async () => {
+  const { files, store, notices, second } = await twoPages();
+  store.deletePage(second);
+  assert.ok(await store.movePages('pages', async () => files.move('lec', 'pages')));
+  await store.flush();
+  assert.deepEqual([...files.files.keys()].sort(), ['lec.md', 'pages/p-000001.svg']);
+  assert.equal(readNote(files.files.get('lec.md')!, 'lec').folder, 'pages');
+  assert.deepEqual(notices, []);
+  store.close();
 });
