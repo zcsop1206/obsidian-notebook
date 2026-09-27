@@ -50,6 +50,16 @@
 // removes what it touches (whole strokes, or in partial mode, #15, the parts under the
 // eraser), redrawing a page at most once. A circle of the hit radius follows
 // the pointer on the tail overlay and is cleared on release. Touches never erase.
+//
+// The lasso (#11): with the lasso selected, a pen or mouse pointer going down on a page asks the
+// host what it grabs (selectionHit): the selection's corner handle (a resize), its box (a move)
+// or nothing. Nothing starts a new lasso: the selection is dropped, the loop is drawn on the
+// tail overlay each frame (a dashed 1 CSS px line closing back to its start) and, on release,
+// given to the host (lassoSelect), which selects what's inside. A move or resize drag is given
+// to the host once per animation frame as its start and current point (page px of the page it
+// started on, not clamped) and the pointer's client position (to find the page under it); the
+// host draws the preview (see selection.ts) and commits on release (endSelectionDrag). Touches
+// never lasso. Like every gesture, these follow their pointer on the window until it lifts.
 import { strokePath } from '../format/outline';
 import { roundP, roundXY, type HighlighterStroke, type PenStroke, type Point, type Size } from '../format/page';
 import { fmt, median, yn } from '../debug/util';
@@ -103,7 +113,24 @@ export interface PenHost {
    * is true for the first call of a gesture. `path` is reused afterwards, so don't keep it.
    */
   erase(target: PageTarget, path: readonly Point[], radius: number, start: boolean, mode: EraserMode, tally: EraseTally): void;
+  /** With the lasso (#11): what a pointer going down at `point` (page px) on `target` grabs. */
+  selectionHit(target: PageTarget, point: Point): SelectionHit;
+  /** A new lasso starts: drop the selection. */
+  clearSelection(): void;
+  /** A lasso loop (page px, closed back to its start) was drawn on `target`: select what's inside. */
+  lassoSelect(target: PageTarget, loop: readonly Point[]): void;
+  /**
+   * The selection is being dragged by its box (`move`) or corner handle (`resize`) from `from` to
+   * `to` (page px of the page the drag started on); the pointer is at (clientX, clientY). Called
+   * at most once per animation frame.
+   */
+  dragSelection(kind: 'move' | 'resize', from: Point, to: Point, clientX: number, clientY: number): void;
+  /** The drag ended where dragSelection last put it: commit it, or with `cancelled` drop it. */
+  endSelectionDrag(cancelled: boolean): void;
 }
+
+/** What a pointer going down grabs with the lasso: the selection's box, its corner handle, or nothing. */
+export type SelectionHit = 'move' | 'resize' | null;
 
 /** What an erase gesture did. */
 export interface EraseTally {
@@ -420,6 +447,21 @@ export interface EraseStats {
   remnants: number;
 }
 
+/** A lasso loop or a selection drag in progress (#11). */
+interface Lassoing {
+  pointerId: number;
+  target: PageTarget;
+  map: PageMap;
+  /** null: drawing a loop; else dragging the selection. */
+  drag: 'move' | 'resize' | null;
+  /** The loop's samples (drag: the first point is where it started). */
+  trace: Trace;
+  /** The drag's latest point, page px, and the pointer's client position. */
+  now: Point | null;
+  clientX: number;
+  clientY: number;
+}
+
 type Listen = <K extends keyof HTMLElementEventMap>(type: K, fn: (e: HTMLElementEventMap[K]) => void, options?: AddEventListenerOptions) => void;
 
 function overlay(cls: string): [HTMLCanvasElement, CanvasRenderingContext2D] {
@@ -437,6 +479,7 @@ export class PenInput {
   private tailCtx: CanvasRenderingContext2D;
   private live: Live | null = null;
   private erasing: Erasing | null = null;
+  private lassoing: Lassoing | null = null;
   private frame = 0;
   /** The last erase gesture's measurements, or null. */
   lastErase: EraseStats | null = null;
@@ -488,7 +531,7 @@ export class PenInput {
       this.host.statsChanged();
       return;
     }
-    if (this.live || this.erasing || (e.pointerType === 'mouse' && e.button !== 0)) return;
+    if (this.live || this.erasing || this.lassoing || (e.pointerType === 'mouse' && e.button !== 0)) return;
     const target = this.host.pageAt(e.target);
     if (!target) return;
     e.preventDefault();
@@ -502,6 +545,10 @@ export class PenInput {
     this.place(target, rect);
     if (this.host.pen().tool === 'eraser') {
       this.eraseDown(e, target, rect);
+      return;
+    }
+    if (this.host.pen().tool === 'lasso') {
+      this.lassoDown(e, target, rect);
       return;
     }
     const pen = { ...this.host.pen() };
@@ -520,6 +567,10 @@ export class PenInput {
   }
 
   private move(e: PointerEvent) {
+    if (this.lassoing) {
+      this.lassoMove(e);
+      return;
+    }
     if (this.erasing) {
       this.eraseMove(e);
       return;
@@ -539,6 +590,10 @@ export class PenInput {
   }
 
   private up(e: PointerEvent) {
+    if (this.lassoing) {
+      this.lassoUp(e);
+      return;
+    }
     if (this.erasing) {
       this.eraseUp(e);
       return;
@@ -565,6 +620,10 @@ export class PenInput {
   /** The frame callback: freezes older points if needed and redraws the tail. */
   private draw() {
     this.frame = 0;
+    if (this.lassoing) {
+      this.lassoFrame(this.lassoing);
+      return;
+    }
     if (this.erasing) {
       this.eraseFrame(this.erasing);
       return;
@@ -699,6 +758,8 @@ export class PenInput {
   viewMoved() {
     const er = this.erasing;
     if (er) er.map = pageMap(er.target.el.getBoundingClientRect(), er.target.size, er.map.t0);
+    const la = this.lassoing;
+    if (la) la.map = pageMap(la.target.el.getBoundingClientRect(), la.target.size, la.map.t0);
     const live = this.live;
     if (!live) return;
     const rect = live.target.el.getBoundingClientRect();
@@ -719,6 +780,9 @@ export class PenInput {
     this.untrack();
     this.live = null;
     this.erasing = null;
+    const la = this.lassoing;
+    this.lassoing = null;
+    if (la?.drag) this.host.endSelectionDrag(true);
     cancelAnimationFrame(this.frame);
     this.frame = 0;
     this.clear();
@@ -805,6 +869,97 @@ export class PenInput {
       er.cursor = [p.x - m, p.y - m, p.x + m, p.y + m];
     }
     er.frames.push(performance.now() - t0);
+  }
+
+  // ---- the lasso (#11)
+
+  /** The last selection drag's frames (host time included), for the stats and tests. */
+  lastDrag: { kind: 'move' | 'resize'; frames: number; frameMs: number; frameMaxMs: number } | null = null;
+  private dragFrames: number[] = [];
+
+  private lassoDown(e: PointerEvent, target: PageTarget, rect: DOMRect) {
+    const map = pageMap(rect, target.size, e.timeStamp);
+    const at = toPoint(e, map);
+    const drag = this.host.selectionHit(target, at);
+    if (!drag) this.host.clearSelection();
+    const la: Lassoing = this.lassoing = { pointerId: e.pointerId, target, map, drag, trace: newTrace(), now: null, clientX: e.clientX, clientY: e.clientY };
+    addSamples(la.trace, [e], map);
+    this.dragFrames = [];
+    this.schedule();
+  }
+
+  private lassoMove(e: PointerEvent) {
+    const la = this.lassoing!;
+    if (e.pointerId !== la.pointerId) return;
+    e.preventDefault();
+    la.clientX = e.clientX;
+    la.clientY = e.clientY;
+    if (la.drag) la.now = toPoint(e, la.map);
+    else addSamples(la.trace, samplesOf(e), la.map);
+    this.schedule();
+  }
+
+  private lassoUp(e: PointerEvent) {
+    const la = this.lassoing!;
+    if (e.pointerId !== la.pointerId) return;
+    this.lassoing = null;
+    this.untrack();
+    cancelAnimationFrame(this.frame);
+    this.frame = 0;
+    const cancelled = e.type === 'pointercancel';
+    if (la.drag) {
+      // A tap on the selection (no move) changes nothing.
+      if (!cancelled && la.now) {
+        la.clientX = e.clientX;
+        la.clientY = e.clientY;
+        la.now = toPoint(e, la.map);
+        this.dragStep(la);
+      }
+      this.host.endSelectionDrag(cancelled);
+      const f = this.dragFrames;
+      this.lastDrag = { kind: la.drag, frames: f.length, frameMs: median(f), frameMaxMs: f.length ? Math.max(...f) : NaN };
+    } else {
+      this.clear();
+      if (!cancelled) this.host.lassoSelect(la.target, la.trace.points);
+    }
+    this.host.statsChanged();
+  }
+
+  private dragStep(la: Lassoing) {
+    const from = la.trace.points[0];
+    if (from && la.now) this.host.dragSelection(la.drag!, from, la.now, la.clientX, la.clientY);
+  }
+
+  /** The frame callback of the lasso: redraws the loop, or moves the selection's preview. */
+  private lassoFrame(la: Lassoing) {
+    const t0 = performance.now();
+    if (la.drag) {
+      if (!la.now) return;
+      this.dragStep(la);
+      this.dragFrames.push(performance.now() - t0);
+      return;
+    }
+    const c = this.tail, ctx = this.tailCtx, pts = la.trace.points;
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, c.width, c.height);
+    ctx.restore();
+    if (pts.length < 2) return;
+    const line = la.map.sx; // 1 CSS px in page px
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+    ctx.closePath();
+    ctx.lineWidth = line;
+    ctx.setLineDash([5 * line, 4 * line]);
+    ctx.strokeStyle = 'rgba(40, 110, 230, 0.95)';
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  /** Whether a lasso loop or selection drag is in progress. */
+  get lassoActive(): boolean {
+    return this.lassoing !== null;
   }
 
   destroy() {
