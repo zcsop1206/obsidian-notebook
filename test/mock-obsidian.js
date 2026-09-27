@@ -27,7 +27,7 @@
   window.createDiv = o => document.createElement('div').createDiv(o);
 
   window.notices = [];
-  class Notice { constructor(m) { notices.push(m); } hide() {} }
+  class Notice { constructor(m) { notices.push(m); } hide() {} setMessage(m) { notices.push(m); return this; } }
 
   // ---- files
   window.fs = new Map();
@@ -149,6 +149,18 @@
     },
     /** [old, new] of every rename (for tests). */
     renames: [],
+    async createBinary(path, data) {
+      if (fs.has(path) || dirs.has(path)) throw new Error('File already exists.');
+      const dir = dirname(path);
+      if (dir && !dirs.has(dir)) throw new Error('createBinary: no folder ' + dir);
+      vault.writes.push(path);
+      fs.set(path, new Uint8Array(data.slice(0)));
+      const f = this.getFile(path);
+      this.trigger('create', f);
+      return f;
+    },
+    async readBinary(file) { const d = fs.get(file.path); if (!(d instanceof Uint8Array)) throw new Error('readBinary: not binary ' + file.path); return d.slice().buffer; },
+    getFiles() { return [...fs.keys()].map(p => this.getFile(p)); },
     /** Paths written through modify/create, in order (for tests). */
     writes: [],
   });
@@ -384,9 +396,56 @@
   const setIcon = (el, name) => el.setAttribute('data-icon', name);
   const Platform = { isMobile: false, isMobileApp: false, isIosApp: false, isDesktop: true, isDesktopApp: true };
 
+  // ---- a fake pdf.js for loadPdfJs (#14). A fake PDF is text: `%PDF-FAKE` then one line per
+  // page, `<width>x<height>` in points (window.fakePdf builds one). A page renders as white with
+  // a marker square in its top-left corner, coloured by page number (red 40·n), and vertical
+  // lines exactly 1 device px wide every 3 points, so a sharp render (all black or white) can be
+  // told apart from a scaled image (grey edges). window.pdfjsStats counts calls.
+  window.pdfjsStats = { loads: 0, documents: 0, renders: [] };
+  window.fakePdf = sizes => new TextEncoder().encode('%PDF-FAKE\n' + sizes.map(([w, h]) => `${w}x${h}`).join('\n')).buffer;
+  const fakePdfjs = {
+    getDocument({ data }) {
+      const promise = (async () => {
+        const text = new TextDecoder().decode(data);
+        if (!text.startsWith('%PDF-FAKE')) throw new Error('Invalid PDF structure.');
+        pdfjsStats.documents++;
+        const sizes = text.split('\n').slice(1).filter(Boolean).map(l => l.split('x').map(Number));
+        return {
+          numPages: sizes.length,
+          async getPage(n) {
+            const [w, h] = sizes[n - 1];
+            return {
+              getViewport: ({ scale }) => ({ width: w * scale, height: h * scale, scale }),
+              render({ canvasContext: g, viewport }) {
+                const s = viewport.scale;
+                pdfjsStats.renders.push([n, Math.round(viewport.width), Math.round(viewport.height)]);
+                return { promise: (async () => {
+                  await new Promise(r => setTimeout(r, 5));
+                  g.save();
+                  g.setTransform(1, 0, 0, 1, 0, 0);
+                  g.fillStyle = '#ffffff'; g.fillRect(0, 0, g.canvas.width, g.canvas.height);
+                  g.fillStyle = `rgb(${(40 * n) % 256},0,0)`; g.fillRect(0, 0, Math.round(36 * s), Math.round(36 * s));
+                  g.fillStyle = '#000000';
+                  for (let x = 72; x < w; x += 3) g.fillRect(Math.round(x * s), Math.round(72 * s), 1, Math.round((h - 144) * s));
+                  g.restore();
+                })() };
+              },
+              cleanup() {},
+            };
+          },
+          destroy() {},
+        };
+      })();
+      return { promise };
+    },
+  };
+  /** Obsidian's loadPdfJs; window.noPdfJs = true makes it fail, as if pdf.js were unavailable. */
+  const loadPdfJs = async () => { if (window.noPdfJs) throw new Error('no pdf.js'); pdfjsStats.loads++; return fakePdfjs; };
+
   window.obsidian = {
     Plugin, Component, View, ItemView, FileView, MarkdownView, Notice, Events, TAbstractFile, TFile, TFolder,
     WorkspaceLeaf, Menu, Modal, FuzzySuggestModal, PluginSettingTab, Setting, Platform, normalizePath, setIcon,
+    loadPdfJs,
   };
 
   window.loadPlugin = async () => {
