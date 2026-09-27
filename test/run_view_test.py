@@ -1778,6 +1778,282 @@ try:
         check('stats overlay: shows the zoom and the last finger gesture frame times', 'zoom 100%' in r and 'last finger gesture' in r and 'over 32 ms' in r, r)
         # ======== end of 15. Zoom and finger navigation (#9) ========
 
+        # ======== 16. Page management (#17) ========
+        ev("""async () => {
+          T.panel = () => view.contentEl.querySelector('.nb-pages-panel');
+          T.thumbs = () => [...view.contentEl.querySelectorAll('.nb-pages-thumb')];
+          T.order = () => T.thumbs().map(t => t.dataset.page);
+          T.pageOrder = () => T.pages().map(el => el.dataset.page);
+          T.saved = name => ink.readNote(fs.get(name + '.md'), name).pages;
+          T.idle = async () => { for (let i = 0; i < 200 && view.pagesPanelOpen && view.contentEl && T.busy(); i++) await T.sleep(20); };
+          T.busy = () => { const t = T.thumbs(); return view['pagesPanel'].busy; };
+          /** Pixels of thumbnail i's canvas that differ clearly from its first pixel (-1 if not drawn). */
+          T.thumbInk = i => {
+            const c = T.thumbs()[i] && T.thumbs()[i].querySelector('canvas');
+            if (!c || !c.width) return -1;
+            const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+            let n = 0;
+            for (let k = 0; k < d.length; k += 4) if (Math.abs(d[k] - d[0]) + Math.abs(d[k + 1] - d[1]) + Math.abs(d[k + 2] - d[2]) > 60) n++;
+            return n;
+          };
+          /** A pointer event of `type` on the thumbnail list at the middle of thumbnail i (dy: offset). */
+          T.onThumb = (type, i, { pointerType = 'touch', dy = 0, id = 301, target } = {}) => {
+            const t = T.thumbs()[i], r = t.querySelector('.nb-pages-frame').getBoundingClientRect();
+            const e = new PointerEvent(type, { pointerId: id, pointerType, isPrimary: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 + dy,
+              bubbles: true, cancelable: true, button: type === 'pointermove' ? -1 : 0, buttons: type === 'pointerup' ? 0 : 1 });
+            (target || t.querySelector('.nb-pages-frame')).dispatchEvent(e);
+          };
+          T.act = what => view.contentEl.querySelector('.nb-pages-thumb.is-current .nb-pages-' + what).click();
+          await p.createInkNote('Sorter', '', 'letter', 'blank');
+          await T.sleep(150);
+          for (let i = 0; i < 3; i++) view.addPage();
+          // page i gets i + 1 strokes, so each page can be told apart
+          for (let i = 0; i < 4; i++) {
+            view.scrollToPage(i);
+            await T.sleep(60);
+            for (let j = 0; j <= i; j++) await T.stroke(i, T.wave(80, 150 + 120 * j, 40), 'pen', 7, 0);
+          }
+          view.history.clear();
+          await view.save();
+          view.scrollToPage(0);
+          await T.sleep(100);
+        }""")
+        r = ev("""() => ({ shown: T.panel().style.display !== 'none', open: view.pagesPanelOpen, thumbs: T.thumbs().length,
+          margin: getComputedStyle(T.sc()).marginLeft, button: !!view.contentEl.querySelector('.nb-ink-strip .nb-ink-pages-toggle'),
+          strokes: view.store.slots.map(s => view.store.page(s).strokes.length) })""")
+        check('pages: the panel is closed by default (no thumbnails, pages area full width)', not r['shown'] and not r['open'] and r['thumbs'] == 0 and r['margin'] == '0px', r)
+        check('pages: the strip has a Pages button', r['button'], r)
+        check('pages: the test note has 4 pages with 1-4 strokes', r['strokes'] == [1, 2, 3, 4], r)
+
+        # (1) the strip button opens it: a thumbnail per page, numbered, drawn
+        r = ev("""async () => {
+          const w0 = T.pages()[0].offsetWidth;
+          view.contentEl.querySelector('.nb-ink-pages-toggle').click();
+          await T.sleep(400);
+          await T.idle();
+          const nums = T.thumbs().map(t => t.querySelector('.nb-pages-num').textContent);
+          return { open: view.pagesPanelOpen, shown: T.panel().style.display !== 'none', order: T.order(), ids: view.store.index.pages, nums,
+            ink: T.thumbs().map((_, i) => T.thumbInk(i)), w0, w1: T.pages()[0].offsetWidth, margin: getComputedStyle(T.sc()).marginLeft,
+            panelW: T.panel().offsetWidth, thumbW: T.thumbs()[0].querySelector('canvas').offsetWidth, stats: { ...view.pagesPanelStats },
+            pressed: view.contentEl.querySelector('.nb-ink-pages-toggle').getAttribute('aria-pressed') };
+        }""")
+        print('pages panel:', {k: r[k] for k in ('nums', 'ink', 'w0', 'w1', 'panelW', 'thumbW', 'stats')})
+        check('pages: the Pages button opens the panel, pressed', r['open'] and r['shown'] and r['pressed'] == 'true', r)
+        check('pages: a thumbnail per page, in order, numbered 1-4', r['order'] == r['ids'] and r['nums'] == ['1', '2', '3', '4'], r)
+        check('pages: thumbnails are 120 px wide and show the ink', r['thumbW'] == 120 and all(n > 20 for n in r['ink']), r)
+        check('pages: the pages area narrows beside the panel', r['margin'] == f"{r['panelW']}px" and r['w1'] < r['w0'], r)
+        check('pages: thumbnails drawn at most 2 per frame, from the page bitmap where there is one', r['stats']['drawn'] >= 4 and r['stats']['fromBitmap'] >= 1, r['stats'])
+
+        # (2) the current page's thumbnail follows the scroll; a tap scrolls to a page
+        r = ev("""async () => {
+          const cur = () => T.thumbs().findIndex(t => t.classList.contains('is-current'));
+          const at0 = cur();
+          const sc = T.sc();
+          sc.scrollTop = T.pages()[2].offsetTop - 10;
+          await T.sleep(150);
+          const at2 = [cur(), view.currentPageIndex()];
+          T.onThumb('pointerdown', 1);
+          T.onThumb('pointerup', 1);
+          await T.sleep(150);
+          const tapped = [cur(), view.currentPageIndex(), Math.abs(sc.scrollTop - (T.pages()[1].offsetTop - 16))];
+          // a finger that moves on the panel scrolls it: no tap
+          T.onThumb('pointerdown', 3);
+          T.onThumb('pointermove', 3, { dy: 30 });
+          T.onThumb('pointerup', 3, { dy: 30 });
+          await T.sleep(100);
+          const scrolled = view.currentPageIndex();
+          return { at0, at2, tapped, scrolled, actions: T.thumbs().map(t => getComputedStyle(t.querySelector('.nb-pages-actions')).display) };
+        }""")
+        check('pages: the first page is highlighted at the top', r['at0'] == 0, r)
+        check('pages: the highlight follows a scroll to page 3', r['at2'] == [2, 2], r)
+        check('pages: a tap on a thumbnail scrolls to its page', r['tapped'][0] == 1 and r['tapped'][1] == 1 and r['tapped'][2] <= 1, r)
+        check('pages: a finger moving before the long press does not tap', r['scrolled'] == 1, r)
+        check("pages: only the current page's thumbnail shows its actions", r['actions'] == ['none', 'flex', 'none', 'none'], r)
+
+        # (3) a long press, then a drag, reorders: only the index is written
+        r = ev("""async () => {
+          const ids = view.store.index.pages.slice();
+          const files = Object.fromEntries(ids.map(id => [id, fs.get('Sorter/' + id + '.svg')]));
+          T.mark();
+          T.onThumb('pointerdown', 0);
+          await T.sleep(450);
+          const lifted = T.thumbs()[0].classList.contains('is-lifted');
+          const list = view.contentEl.querySelector('.nb-pages-list');
+          for (const dy of [10, 40, 80]) { T.onThumb('pointermove', 0, { dy, target: list }); await T.sleep(16); }
+          const r2 = T.thumbs()[2].getBoundingClientRect(), r3 = T.thumbs()[3].getBoundingClientRect();
+          const y = (r2.top + r2.height / 2 + r3.top + r3.height / 2) / 2 - T.thumbs()[0].querySelector('.nb-pages-frame').getBoundingClientRect().top - T.thumbs()[0].querySelector('.nb-pages-frame').offsetHeight / 2;
+          T.onThumb('pointermove', 0, { dy: y, target: list });
+          const drop = view.contentEl.querySelector('.nb-pages-drop').style.display !== 'none';
+          T.onThumb('pointerup', 0, { dy: y, target: list });
+          await T.sleep(100);
+          const order = view.store.index.pages.slice();
+          await view.save();
+          const saved = T.saved('Sorter');
+          const same = ids.every(id => fs.get('Sorter/' + id + '.svg') === files[id]);
+          const writes = app.vault.writes.slice(T.marked);
+          const strokes = view.store.slots.map(s => view.store.page(s).strokes.length);
+          const res = { ids, lifted, drop, order, saved, same, writes, thumbs: T.order(), els: T.pageOrder(), strokes };
+          view.undo();
+          await view.save();
+          res.undone = [view.store.index.pages.slice(), T.saved('Sorter'), T.order(), T.pageOrder()];
+          view.redo();
+          await view.save();
+          res.redone = [T.saved('Sorter'), T.order()];
+          res.label = view.history.labels.slice(-1)[0];
+          return res;
+        }""")
+        ids = r['ids']
+        moved = [ids[1], ids[2], ids[0], ids[3]]
+        check('pages: a long press picks a thumbnail up and the drag shows the drop line', r['lifted'] and r['drop'], r)
+        check('pages: dragging page 1 between pages 3 and 4 reorders the note', r['order'] == moved and r['saved'] == moved, r)
+        check('pages: the reorder writes only the index; page files unchanged', r['same'] and r['writes'] == ['Sorter.md'], r)
+        check('pages: the editor and the thumbnails show the new order', r['els'] == moved and r['thumbs'] == moved and r['strokes'] == [2, 3, 1, 4], r)
+        check('pages: undo restores the order (index, editor, thumbnails), redo moves it again',
+              r['undone'] == [ids, ids, ids, ids] and r['redone'] == [moved, moved] and r['label'] == 'Move page', r)
+
+        # (4) insert a page after the current one; (5) duplicate; undo each
+        r = ev("""async () => {
+          view.scrollToPage(1);
+          await T.sleep(100);
+          const before = view.store.index.pages.slice();
+          T.act('insert');
+          await T.sleep(100);
+          await view.save();
+          const after = view.store.index.pages.slice(), added = after.find(id => !before.includes(id));
+          const ins = { before, after, at: after.indexOf(added), file: !!fs.get('Sorter/' + added + '.svg'), saved: T.saved('Sorter'),
+            current: view.currentPageIndex(), thumbs: T.thumbs().length, strokes: ink.readPage(fs.get('Sorter/' + added + '.svg')).strokes.length };
+          view.undo();
+          await view.save();
+          ins.undone = [T.saved('Sorter'), T.thumbs().length];
+          // duplicate page 2 (index 1), which has 3 strokes
+          view.scrollToPage(1);
+          await T.sleep(100);
+          const src = view.store.index.pages[1];
+          T.act('duplicate');
+          await T.sleep(100);
+          await view.save();
+          const now = view.store.index.pages.slice(), copy = now[2];
+          const dup = { src, copy, order: now, saved: T.saved('Sorter'), file: fs.get('Sorter/' + copy + '.svg'), current: view.currentPageIndex() };
+          const a = ink.readPage(fs.get('Sorter/' + src + '.svg')), b = ink.readPage(dup.file);
+          dup.same = JSON.stringify(a.strokes) === JSON.stringify(b.strokes) && a.strokes.length === 3 && b.id === copy;
+          dup.file = !!dup.file;
+          await T.sleep(700);
+          await T.idle();
+          dup.thumbInk = [T.thumbInk(1), T.thumbInk(2)];
+          view.undo();
+          await view.save();
+          dup.undone = T.saved('Sorter');
+          return { ins, dup };
+        }""")
+        ins, dup = r['ins'], r['dup']
+        check('pages: "Insert page after" adds a blank page after the current one and scrolls to it',
+              ins['at'] == 2 and ins['file'] and ins['saved'] == ins['after'] and ins['strokes'] == 0 and ins['current'] == 2 and ins['thumbs'] == 5, ins)
+        check('pages: undo of the insert takes it out again', ins['undone'] == [ins['before'], 4], ins)
+        check('pages: "Duplicate" inserts a copy after the page: new id, new file, same strokes',
+              dup['copy'] != dup['src'] and dup['order'][1] == dup['src'] and dup['file'] and dup['same'] and dup['saved'] == dup['order'] and dup['current'] == 2, dup)
+        check('pages: the copy gets a thumbnail like the original', dup['thumbInk'][1] > 20 and abs(dup['thumbInk'][1] - dup['thumbInk'][0]) <= dup['thumbInk'][0] * 0.25, dup['thumbInk'])
+        check('pages: undo of the duplicate takes it out of the note', dup['undone'] == ins['before'], dup)
+
+        # (6) delete: file gone, undo writes it back with its content, redo deletes again
+        r = ev("""async () => {
+          view.scrollToPage(3);
+          await T.sleep(100);
+          const ids = view.store.index.pages.slice(), gone = ids[3], path = 'Sorter/' + gone + '.svg', text = fs.get(path);
+          const n0 = notices.length;
+          T.act('delete');
+          await T.sleep(50);
+          await view.save();
+          await T.sleep(50);
+          const del = { ids, gone, exists: fs.has(path), saved: T.saved('Sorter'), thumbs: T.order(), els: T.pageOrder(), notice: notices.slice(n0),
+            modals: modals.length };
+          view.undo();
+          await view.save();
+          await T.sleep(50);
+          del.undone = { same: fs.get(path) === text, strokes: fs.has(path) && ink.readPage(fs.get(path)).strokes.length, saved: T.saved('Sorter'), thumbs: T.order() };
+          view.redo();
+          await view.save();
+          await T.sleep(50);
+          del.redone = { exists: fs.has(path), saved: T.saved('Sorter'), thumbs: T.order() };
+          del.errors = notices.slice(n0).filter(n => /couldn|changed on disk/i.test(n));
+          return del;
+        }""")
+        rest = [i for i in r['ids'] if i != r['gone']]
+        check('pages: "Delete" removes the page from the note and deletes its file, without asking',
+              not r['exists'] and r['saved'] == rest and r['thumbs'] == rest and r['els'] == rest and r['modals'] == 0, r)
+        check('pages: undo of the delete writes the file back with its content', r['undone']['same'] and r['undone']['strokes'] == 4 and r['undone']['saved'] == r['ids'] and r['undone']['thumbs'] == r['ids'], r['undone'])
+        check('pages: redo deletes it again', not r['redone']['exists'] and r['redone']['saved'] == rest and r['redone']['thumbs'] == rest, r['redone'])
+        check('pages: no error or "changed on disk" notice from our own delete', not r['errors'], r['errors'])
+
+        # (7) a stroke refreshes its page's thumbnail after the debounce; a reorder on disk updates the panel
+        r = ev("""async () => {
+          view.scrollToPage(0);
+          await T.sleep(100);
+          await T.idle();
+          const before = T.thumbInk(0), drawn = view.pagesPanelStats.drawn;
+          await T.stroke(0, T.wave(80, 700, 60), 'pen', 7, 0);
+          await T.sleep(200);
+          const early = view.pagesPanelStats.drawn - drawn;
+          await T.sleep(500);
+          await T.idle();
+          const after = T.thumbInk(0);
+          await view.save();
+          const note = ink.readNote(fs.get('Sorter.md'), 'Sorter');
+          note.pages.reverse();
+          externalWrite('Sorter.md', ink.writeNote(note));
+          await T.sleep(200);
+          return { before, after, early, disk: note.pages, thumbs: T.order(), els: T.pageOrder(), nums: T.thumbs().map(t => t.querySelector('.nb-pages-num').textContent) };
+        }""")
+        check('pages: a new stroke redraws the thumbnail after the debounce (not before)', r['early'] == 0 and r['after'] > r['before'], r)
+        check('pages: a reorder on disk (a sync) updates the editor and the panel', r['thumbs'] == r['disk'] and r['els'] == r['disk'] and r['nums'] == ['1', '2', '3'], r)
+
+        # (8) the command closes and opens it; closed, thumbnails are released
+        r = ev("""async () => {
+          const cmd = commands['toggle-pages-panel'];
+          cmd.checkCallback(false);
+          await T.sleep(200);
+          const closed = { open: view.pagesPanelOpen, shown: T.panel().style.display !== 'none', thumbs: T.thumbs().length, margin: getComputedStyle(T.sc()).marginLeft };
+          cmd.checkCallback(false);
+          await T.sleep(300);
+          await T.idle();
+          const opened = { open: view.pagesPanelOpen, thumbs: T.thumbs().length, ink: T.thumbInk(0) };
+          return { closed, opened, name: cmd.name };
+        }""")
+        check('pages: the command "Toggle pages panel" closes it (thumbnails released, pages area full width)',
+              r['name'] == 'Toggle pages panel' and not r['closed']['open'] and not r['closed']['shown'] and r['closed']['margin'] == '0px', r)
+        check('pages: the command opens it again with drawn thumbnails', r['opened']['open'] and r['opened']['thumbs'] == 3 and r['opened']['ink'] > 20, r)
+        page.locator('#leaf').screenshot(path=os.path.join(OUT, 'pages_panel.png'))
+
+        # (9) thumbnail cost on the 20-page, 300-strokes-per-page note: drawn with no page bitmaps
+        r = ev("""async () => {
+          const files = ink.largeNote('Thumbs', 'Lecture', 20, 300);
+          dirs.add('Thumbs'); dirs.add('Thumbs/Lecture');
+          for (const [path, text] of Object.entries(files)) fs.set(path, text);
+          await app.workspace.getLeaf(false).openFile(app.vault.getFile('Thumbs/Lecture.md'));
+          await T.sleep(300);
+          const s = view.pagesPanelStats;
+          s.maxFrameMs = 0; s.drawn = 0; s.fromBitmap = 0;
+          const frames = [];
+          let last = performance.now(), run = true;
+          const tick = () => { const now = performance.now(); frames.push(now - last); last = now; if (run) requestAnimationFrame(tick); };
+          requestAnimationFrame(tick);
+          const list = view.contentEl.querySelector('.nb-pages-list');
+          const t0 = performance.now();
+          for (let i = 0; i < 40; i++) { list.scrollTop += 60; await T.sleep(50); }
+          await T.idle();
+          const t1 = performance.now() - t0;
+          run = false;
+          frames.sort((a, b) => a - b);
+          return { open: view.pagesPanelOpen, thumbs: T.thumbs().length, drawn: s.drawn, fromBitmap: s.fromBitmap, maxMs: s.maxFrameMs, ms: t1,
+            median: frames[frames.length >> 1], worst: frames[frames.length - 1], over32: frames.filter(f => f > 32).length, n: frames.length };
+        }""")
+        print(f"thumbnails on the 20-page note: {r['drawn']} drawn ({r['fromBitmap']} from bitmaps) while scrolling the panel for {r['ms']:.0f} ms; "
+              f"thumbnail work max {r['maxMs']:.1f} ms per frame; frames {r['n']}, median {r['median']:.1f} ms, worst {r['worst']:.1f} ms, over 32 ms {r['over32']}")
+        check('pages: the panel stays open for another note and follows it', r['open'] and r['thumbs'] == 20, r)
+        check('pages: thumbnails drawn only as they come into view, never more than about a frame of work',
+              0 < r['drawn'] <= 20 and r['maxMs'] < 40, r)
+        ev("() => view.togglePagesPanel(false)")
+        # ======== end of 16. Page management (#17) ========
+
         # --- unload removes the patch
         r = ev("""async () => {
           p.unload();
