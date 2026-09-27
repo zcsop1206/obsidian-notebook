@@ -4,7 +4,7 @@
 
 ## Status
 
-The ink editor isn't built yet. For now the plugin has one tool, the **ink debug view**: a graph-paper canvas that measures Apple Pencil input (sample rate, pressure, tilt, coalesced and predicted events) and tests audio recording. It writes everything under `_spike/` in the vault. Open it with the command **Open ink debug view**. The command **Start or stop test recording** starts or stops a recording without opening the view.
+Early but usable: **New ink note** (ribbon pencil or command) creates a note whose pages stack in the ink view, with blank, lined, grid or dots templates (per page, changeable at any time), Letter or A4 paper, a uniform or pressure pen with colours and sizes (a provisional strip until the toolbar lands), and autosave 2 s after the last change. Markdown files with `ink:` frontmatter open in the ink view; "Open as markdown" switches back. Progress is tracked in the GitHub issues and milestones (M1 editor foundation → M2 lasso → M3 images → M4 PDF → M5 ruler). The **ink debug view** (command **Open ink debug view**) is the old spike: a graph-paper canvas that measures Apple Pencil input and tests audio recording, writing under `_spike/`. **Start or stop test recording** starts or stops a recording without opening it.
 
 Planned: a page view with paper templates, pen, highlighter and eraser tools, pressure-shaped strokes (with [`perfect-freehand`](https://github.com/steveruizok/perfect-freehand)), ink notes embedded in markdown, and audio recording. Syncing the vault through GitHub is handled by a separate plugin.
 
