@@ -303,6 +303,19 @@
     open() { document.body.appendChild(this.modalEl); modals.push(this); this.onOpen?.(); }
     close() { this.onClose?.(); this.modalEl.remove(); const i = modals.indexOf(this); if (i >= 0) modals.splice(i, 1); }
   }
+  // Lists every item as a .suggestion-item (no filtering); clicking one closes the modal and
+  // chooses it, as selecting a suggestion does in Obsidian.
+  class FuzzySuggestModal extends Modal {
+    constructor(app) { super(app); this.placeholder = ''; }
+    setPlaceholder(p) { this.placeholder = p; }
+    onOpen() {
+      for (const item of this.getItems()) {
+        const el = this.contentEl.createDiv({ cls: 'suggestion-item', text: this.getItemText(item) });
+        el.addEventListener('click', evt => { this.close(); this.onChooseItem(item, evt); });
+      }
+    }
+    onClose() { this.contentEl.empty(); }
+  }
   class PluginSettingTab { constructor(app, plugin) { this.app = app; this.plugin = plugin; this.containerEl = document.createElement('div'); } }
   class Setting {
     constructor(el) { this.settingEl = el.createDiv({ cls: 'setting-item' }); }
@@ -339,7 +352,7 @@
 
   window.obsidian = {
     Plugin, Component, View, ItemView, FileView, MarkdownView, Notice, Events, TAbstractFile, TFile, TFolder,
-    WorkspaceLeaf, Menu, Modal, PluginSettingTab, Setting, Platform, normalizePath, setIcon,
+    WorkspaceLeaf, Menu, Modal, FuzzySuggestModal, PluginSettingTab, Setting, Platform, normalizePath, setIcon,
   };
 
   window.loadPlugin = async () => {
