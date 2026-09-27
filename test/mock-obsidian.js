@@ -116,6 +116,39 @@
       return f;
     },
     async delete(file) { fs.delete(file.path); this.trigger('delete', file); },
+    /**
+     * Renames or moves a file or a folder with everything in it, keeping the file objects (as
+     * Obsidian does): every path is updated first, then 'rename' fires for the item and each
+     * item inside it with its old path. Open file views get onRename.
+     */
+    async rename(file, newPath) {
+      const old = file.path;
+      if (fs.has(newPath) || dirs.has(newPath)) throw new Error('Destination file already exists!');
+      const dir = dirname(newPath);
+      if (dir && !dirs.has(dir)) throw new Error('rename: no folder ' + dir);
+      const isDir = file instanceof TFolder;
+      const inside = p => p === old || p.startsWith(old + '/');
+      const moved = [];
+      const moveObj = (key, p, n) => {
+        const f = fileObjects.get(key);
+        fileObjects.delete(key);
+        const obj = f || (key.startsWith('dir:') ? new TFolder(p) : new TFile(p));
+        obj.path = n; obj.name = basename(n);
+        fileObjects.set(key.startsWith('dir:') ? 'dir:' + n : n, obj);
+        moved.push([obj, p]);
+      };
+      if (isDir) {
+        for (const p of [...dirs].filter(inside).sort()) { const n = newPath + p.slice(old.length); dirs.delete(p); dirs.add(n); moveObj('dir:' + p, p, n); }
+        for (const p of [...fs.keys()].filter(inside).sort()) { const n = newPath + p.slice(old.length); const d = fs.get(p); fs.delete(p); fs.set(n, d); moveObj(p, p, n); }
+      } else {
+        if (!fs.has(old)) throw new Error('rename: no file ' + old);
+        const d = fs.get(old); fs.delete(old); fs.set(newPath, d); moveObj(old, old, newPath);
+      }
+      vault.renames.push([old, newPath]);
+      for (const [obj, p] of moved) this.trigger('rename', obj, p);
+    },
+    /** [old, new] of every rename (for tests). */
+    renames: [],
     /** Paths written through modify/create, in order (for tests). */
     writes: [],
   });
@@ -183,6 +216,7 @@
   class ItemView extends View {}
   class FileView extends ItemView {
     constructor(leaf) { super(leaf); this.file = null; this.allowNoFile = false; this.navigation = true; }
+    load() { super.load(); this.registerEvent(vault.on('rename', f => { if (f === this.file) void this.onRename(f); })); }
     getDisplayText() { return this.file ? this.file.basename : 'No file'; }
     getState() { return this.file ? { file: this.file.path } : {}; }
     async setState(state, result) {
