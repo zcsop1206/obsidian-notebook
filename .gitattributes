@@ -1,0 +1,2 @@
+# The fixture test compares these byte for byte, so keep LF on every checkout.
+test/fixtures/** text eol=lf

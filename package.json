@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
-    "test": "npm run build && python test/run_spike_test.py"
+    "test": "npm run build && npm run test:unit && python test/run_spike_test.py && python test/run_format_test.py",
+    "test:unit": "node test/build.mjs && node --test test/out/unit.js",
+    "fixture": "node test/build.mjs && node test/out/make-fixture.js"
   },
   "author": "Adit Bhargava",
   "license": "MIT",
