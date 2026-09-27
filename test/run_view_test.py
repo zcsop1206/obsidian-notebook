@@ -2,8 +2,9 @@
 # module and in-memory vault of test/harness.html and the format functions from
 # test/out/view-fixture.js (built by test/build.mjs). Covers creating a note, writing with
 # synthetic pen events, autosave timing, saving when hidden or closed, reopening, changes on
-# disk, adding pages, a 20-page note, the markdown takeover, and page templates. Run by `npm test`; screenshots
-# land in test/out/. Exits non-zero if any check fails.
+# disk, adding pages, a 20-page note, the markdown takeover, page templates, and the pen (live
+# and committed outlines, nibs, stylus touches, the pen strip, stats and handler time). Run by
+# `npm test`; screenshots land in test/out/. Exits non-zero if any check fails.
 import os, subprocess, sys, time
 from playwright.sync_api import sync_playwright
 
@@ -71,13 +72,59 @@ HELPERS = """() => {
     },
     /** The template name of each page of the open note. */
     templates: () => view.store.slots.map(s => ink.templateName(view.store.page(s).template)),
-    liveInk() {
-      const c = view.contentEl.querySelector('canvas.nb-ink-live');
-      if (!c || !c.width) return 0;
-      const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    /** Pixels on the live overlays (head and tail) with at least `min` alpha. */
+    liveInk(min = 1) {
       let n = 0;
-      for (let k = 3; k < d.length; k += 4) if (d[k]) n++;
+      for (const c of view.contentEl.querySelectorAll('canvas.nb-ink-live')) {
+        if (!c.width) continue;
+        const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+        for (let k = 3; k < d.length; k += 4) if (d[k] >= min) n++;
+      }
       return n;
+    },
+    /**
+     * A pen stroke on page i through `pts` ([x, y, p] in page px), as the iPad sends it: `per`
+     * coalesced samples per pointermove and `predict` predicted ones, waiting for an animation
+     * frame after each event. With `up` false the stroke is left in progress.
+     */
+    async pen(i, pts, { type = 'pen', id = 11, per = 4, predict = 2, up = true } = {}) {
+      const el = pages()[i], r = el.getBoundingClientRect(), k = r.width / view.store.slots[i].size.width;
+      const target = el.querySelector('canvas.nb-ink-bitmap') || el;
+      const init = ([x, y, p]) => ({ pointerId: id, pointerType: type, pressure: p, clientX: r.left + x * k, clientY: r.top + y * k,
+        bubbles: true, cancelable: true, button: 0, buttons: 1 });
+      target.dispatchEvent(new PointerEvent('pointerdown', init(pts[0])));
+      for (let j = 1; j < pts.length; j += per) {
+        const group = pts.slice(j, j + per);
+        const coalescedEvents = group.map(q => new PointerEvent('pointermove', init(q)));
+        const predictedEvents = pts.slice(j + per, j + per + predict).map(q => new PointerEvent('pointermove', init(q)));
+        target.dispatchEvent(new PointerEvent('pointermove', { ...init(group[group.length - 1]), coalescedEvents, predictedEvents }));
+        await new Promise(res => requestAnimationFrame(res));
+      }
+      if (up) T.penUp(i, pts[pts.length - 1], id, type);
+    },
+    penUp(i, [x, y], id = 11, type = 'pen', kind = 'pointerup') {
+      const el = pages()[i], r = el.getBoundingClientRect(), k = r.width / view.store.slots[i].size.width;
+      el.dispatchEvent(new PointerEvent(kind, { pointerId: id, pointerType: type, clientX: r.left + x * k, clientY: r.top + y * k, bubbles: true, cancelable: true, button: 0, buttons: 0 }));
+    },
+    /** Handwriting-like loops from (x0, y0): n samples about 0.4 px apart, pressure p(j). */
+    loops: (x0, y0, n, p = j => 0.08 + 0.1 * Math.sin(j / 40)) => Array.from({ length: n }, (_, j) => {
+      const a = j / 14;
+      return [x0 + j * 0.28 - 7 * Math.sin(a), y0 - 9 * (1 - Math.cos(a)), p(j)];
+    }),
+    /** The outline's vertical extent near page x, for a stroke along x. */
+    widthAt(d, x) {
+      const ys = [], re = /[ML](-?[\d.]+) (-?[\d.]+)/g;
+      for (let m = re.exec(d); m; m = re.exec(d)) if (Math.abs(Number(m[1]) - x) < 1.5) ys.push(Number(m[2]));
+      return Math.max(...ys) - Math.min(...ys);
+    },
+    /** Dispatches a TouchEvent with one touch of this touchType at element `el`; returns defaultPrevented. */
+    touch(el, type, touchType) {
+      const r = el.getBoundingClientRect();
+      const t = new Touch({ identifier: 1, target: el, clientX: r.left + 5, clientY: r.top + 5 });
+      Object.defineProperty(t, 'touchType', { value: touchType });  // Chromium's Touch has no touchType
+      const e = new TouchEvent(type, { changedTouches: [t], touches: [t], bubbles: true, cancelable: true });
+      el.dispatchEvent(e);
+      return e.defaultPrevented;
     },
     strokesOnDisk: path => ink.readPage(fs.get(path)).strokes.length,
     /** Writes to a path through the vault API since T.mark(). */
@@ -169,8 +216,8 @@ try:
         check('write: the pen stroke is drawn into the page bitmap', r['before'] == 0 and r['after'] > 500, (r['before'], r['after']))
         check('write: the live canvas is cleared after pointerup', r['liveAfter'] == 0, r['liveAfter'])
         check('write: a finger touch draws nothing', r['count'] == 1, r['count'])
-        check('write: the stroke is in the page model (pen, uniform, default ink, 2 px)',
-              st and st['tool'] == 'pen' and st['nib'] == 'uniform' and st['color'] == '#000000' and st['size'] == 2 and st['points'] > 50, st)
+        check('write: the stroke is in the page model (pen, uniform, default ink, 2.5 px)',
+              st and st['tool'] == 'pen' and st['nib'] == 'uniform' and st['color'] == '#000000' and st['size'] == 2.5 and st['points'] > 50, st)
         check('write: points carry pressure and increasing ms', st and st['ps'] > 5 and st['t'][0] == 0 and all(a <= b for a, b in zip(st['t'], st['t'][1:])) and st['t'][-1] > 100, st and st['t'][-3:])
         check('write: nothing written at once', r['onDisk'] == 0, r['onDisk'])
         ev("async () => { await T.sleep(500 - (performance.now() - t1)); await T.stroke(0, T.wave(100, 300), 'pen', 7, 0); window.t2 = performance.now(); window.pageObj = view.store.slots[0].page; }")
@@ -499,6 +546,195 @@ try:
         check('templates: "Change template of all pages" (view action) changes every page and the note default',
               r['noteTpl'] == 'grid-quarter-inch' and r['disk'] == ['grid-quarter-inch'] * 4 and r['strokes'] == 1, r)
         check('templates: the template commands are hidden outside an ink view', r['hidden'] == [False, False], r['hidden'])
+
+        # --- 11. The pen
+        ev("async () => { await p.createInkNote('Pen'); await T.sleep(150); }")
+        pen_path = ev("() => view.store.slots[0].path")
+        # (1) nibs: a straight line with pressure rising from 0.05 to 0.9
+        r = ev(f"""async () => {{
+          const line = Array.from({{ length: 401 }}, (_, j) => [100 + j, 100, 0.05 + 0.85 * j / 400]);
+          await T.pen(0, line);
+          view.setPen({{ nib: 'pressure' }});
+          await T.pen(0, line.map(([x, y, p]) => [x, y + 40, p]));
+          view.setPen({{ nib: 'uniform' }});
+          await view.save();
+          const disk = ink.readPage(fs.get('{pen_path}')).strokes;
+          const w = s => {{ const d = ink.strokePath(s); return [T.widthAt(d, 150), T.widthAt(d, 450)]; }};
+          return {{ nibs: disk.map(s => s.nib), uniform: w(disk[0]), pressure: w(disk[1]), ps: [disk[0].points[50].p, disk[0].points[350].p] }};
+        }}""")
+        print('pen: widths at low and high pressure:', r)
+        check('pen: strokes save with their nib (uniform by default)', r['nibs'] == ['uniform', 'pressure'], r['nibs'])
+        check('pen: the uniform nib is 2.5 px wide whatever the pressure', all(abs(w - 2.5) < 0.3 for w in r['uniform']) and r['ps'][1] > r['ps'][0] + 0.5, r)
+        check('pen: the pressure nib gets wider with pressure', r['pressure'][1] > r['pressure'][0] * 1.4, r['pressure'])
+
+        # (2) mid-stroke: the overlay has the live outline; after pointerup it's clear and the bitmap has the stroke
+        r = ev("""async () => {
+          T.pts = T.loops(120, 230, 150);
+          const before = T.ink(0);
+          await T.pen(0, T.pts, { predict: 0, up: false });
+          const inp = view.input, live = inp.live;
+          const points = live.trace.points.map(q => ({ ...q }));
+          // alpha 145 over white paper is where the ink (#1f1f1f) gets darker than 128
+          return { before, live: T.liveInk(), live145: T.liveInk(145), frames: live.frames.length, events: live.events,
+            same: inp.livePath === ink.strokePath({ tool: 'pen', nib: 'uniform', size: 2.5, points }), points: points.length };
+        }""")
+        check('pen: mid-stroke, the live overlay has ink after the frames', r['live'] > 300 and r['frames'] >= 10, r)
+        check('pen: the live outline is strokePath of the points so far (same options, same code)', r['same'], r)
+        page.locator('.nb-ink-page').first.screenshot(path=os.path.join(OUT, 'pen_live_light.png'))
+        live_px = r['live145']
+        r = ev("""async () => {
+          const n = view.store.slots[0].page.strokes.length;
+          T.penUp(0, T.pts[T.pts.length - 1]);
+          const s = view.store.slots[0].page.strokes;
+          return { live: T.liveInk(), added: s.length - n, ink: T.ink(0), stroke: s[s.length - 1].points.length };
+        }""")
+        check('pen: after pointerup the overlay is clear and the stroke is in the page', r['live'] == 0 and r['added'] == 1, r)
+        page.locator('.nb-ink-page').first.screenshot(path=os.path.join(OUT, 'pen_committed_light.png'))
+        # The committed bitmap stroke covers as many pixels as the live one did (same outline).
+        r2 = ev("""() => {
+          const c = T.pages()[0].querySelector('canvas.nb-ink-bitmap'), s = c.width / 816, g = c.getContext('2d');
+          const d = g.getImageData(Math.round(100 * s), Math.round(200 * s), Math.round(120 * s), Math.round(45 * s)).data;
+          let n = 0;
+          for (let k = 0; k < d.length; k += 4) if (d[k] < 128) n++;
+          return n;
+        }""")
+        check('pen: the committed stroke covers the same pixels as the live one', abs(r2 - live_px) < live_px * 0.03, (live_px, r2))
+
+        # the same in the dark theme
+        ev("async () => { document.body.classList.add('theme-dark'); app.workspace.trigger('css-change'); await T.sleep(100); T.pts = T.loops(120, 300, 150); await T.pen(0, T.pts, { up: false }); }")
+        page.locator('.nb-ink-page').first.screenshot(path=os.path.join(OUT, 'pen_live_dark.png'))
+        r = ev("""() => {
+          const c = view.contentEl.querySelector('canvas.nb-ink-live-tail'), g = c.getContext('2d'), d = g.getImageData(0, 0, c.width, c.height).data;
+          for (let k = 0; k < d.length; k += 4) if (d[k + 3] === 255) return [d[k], d[k + 1], d[k + 2]];
+          return null;
+        }""")
+        check('pen: in the dark theme the live default ink is the light ink colour', r == [0xe6, 0xe3, 0xde], r)
+        ev("() => T.penUp(0, T.pts[T.pts.length - 1])")
+        page.locator('.nb-ink-page').first.screenshot(path=os.path.join(OUT, 'pen_committed_dark.png'))
+        ev("async () => { document.body.classList.remove('theme-dark'); app.workspace.trigger('css-change'); await T.sleep(100); }")
+
+        # (3) the committed stroke's path is strokePath of the saved stroke
+        r = ev(f"""async () => {{
+          await view.save();
+          const mem = view.store.slots[0].page.strokes, text = fs.get('{pen_path}'), disk = ink.readPage(text).strokes;
+          return mem.map((s, i) => {{
+            const m = new RegExp(`data-id="${{s.id}}"[^>]* d="([^"]*)"`).exec(text);
+            return !!m && m[1] === ink.strokePath(s) && m[1] === ink.strokePath(disk[i]) && JSON.stringify(disk[i].points) === JSON.stringify(s.points);
+          }});
+        }}""")
+        check("pen: each committed stroke's path in the file is strokePath of the saved stroke (and of the drawn one)", len(r) == 4 and all(r), r)
+
+        # (4) touches never draw; a stroke off the page's edge continues and keeps its points
+        r = ev("""async () => {
+          const n = view.store.slots[0].page.strokes.length, ignored = view.stats.pen.touchesIgnored;
+          await T.pen(0, T.loops(120, 400, 80), { type: 'touch', id: 21 });
+          const touch = view.store.slots[0].page.strokes.length - n;
+          await T.pen(0, Array.from({ length: 80 }, (_, j) => [760 + j, 460, 0.2]));  // runs off the right edge (816)
+          const s = view.store.slots[0].page.strokes;
+          return { touch, ignored: view.stats.pen.touchesIgnored - ignored, off: s.length - n, maxX: Math.max(...s[s.length - 1].points.map(q => q.x)) };
+        }""")
+        check('pen: touches never draw and are counted', r['touch'] == 0 and r['ignored'] == 1, r)
+        check('pen: a stroke that runs off the page continues', r['off'] == 1 and r['maxX'] > 816, r)
+
+        # (5) stylus touches never scroll: prevented anywhere in the view, except a touchstart on a control
+        r = ev("""() => {
+          const sc = view.contentEl.querySelector('.nb-ink-scroll'), pagesEl = view.contentEl.querySelector('.nb-ink-pages');
+          const add = view.contentEl.querySelector('.nb-ink-add'), swatch = view.contentEl.querySelector('.nb-ink-swatch');
+          return {
+            offPage: [T.touch(pagesEl, 'touchstart', 'stylus'), T.touch(pagesEl, 'touchmove', 'stylus')],
+            scroller: [T.touch(sc, 'touchstart', 'stylus'), T.touch(sc, 'touchmove', 'stylus')],
+            onPage: [T.touch(T.pages()[0], 'touchstart', 'stylus'), T.touch(T.pages()[0], 'touchmove', 'stylus')],
+            finger: [T.touch(pagesEl, 'touchstart', 'direct'), T.touch(T.pages()[0], 'touchmove', 'direct')],
+            control: [T.touch(add, 'touchstart', 'stylus'), T.touch(swatch, 'touchstart', 'stylus'), T.touch(add, 'touchmove', 'stylus')],
+          };
+        }""")
+        check('pen: a stylus touch outside any page is prevented (touchstart and touchmove)', r['offPage'] == [True, True] and r['scroller'] == [True, True], r)
+        check('pen: a stylus touch on a page is prevented', r['onPage'] == [True, True], r)
+        check('pen: a finger touch is not prevented', r['finger'] == [False, False], r)
+        check('pen: a stylus touchstart on a control is not prevented (taps work); touchmove is', r['control'] == [False, False, True], r)
+
+        # (7) the pen strip and the commands set the next stroke's nib, colour and size
+        r = ev(f"""async () => {{
+          const strip = view.contentEl.querySelector('.nb-ink-strip'), q = sel => strip.querySelector(sel);
+          const layout = {{ height: strip.offsetHeight, controls: strip.querySelectorAll('.nb-ink-control').length, swatches: strip.querySelectorAll('.nb-ink-swatch').length }};
+          q('[data-nib="pressure"]').click();
+          q('[data-color="#e0301e"]').click();
+          q('[data-size="4"]').click();
+          q('[data-step="1"]').click();
+          const shown = {{ nib: q('.nb-ink-nib.is-active').dataset.nib, color: q('.nb-ink-swatch.is-active').dataset.color, value: q('.nb-ink-size-value').textContent }};
+          await T.pen(0, T.loops(120, 520, 120));
+          commands['pen-nib-uniform'].checkCallback(false);
+          commands['pen-next-color'].checkCallback(false);
+          commands['pen-next-size'].checkCallback(false);
+          const afterCmds = {{ ...view.pen }};
+          await T.pen(0, T.loops(120, 600, 120));
+          let threw = '';
+          try {{ view.setPen({{ color: 'red' }}); }} catch (e) {{ threw = e.message; }}
+          view.setPen({{ color: '#ABCDEF', size: 40 }});
+          const custom = {{ ...view.pen, active: strip.querySelectorAll('.nb-ink-swatch.is-active').length }};
+          view.setPen({{ color: '#000000', size: 2.5 }});
+          await view.save();
+          const disk = ink.readPage(fs.get('{pen_path}')).strokes.slice(-2).map(s => [s.nib, s.color, s.size]);
+          return {{ layout, shown, afterCmds, disk, threw, custom, red: T.near(0, [0xe0, 0x30, 0x1e], 30) }};
+        }}""")
+        print('pen strip:', r)
+        check('pen strip: one row with nib, 8 swatches, 3 sizes and a stepper', r['layout']['height'] < 44 and r['layout']['swatches'] == 8, r['layout'])
+        check('pen strip: clicks set nib, colour and size, and show them', r['shown'] == {'nib': 'pressure', 'color': '#e0301e', 'value': '4.5 px'}, r['shown'])
+        check('pen strip: the next stroke saves with them, drawn in red', r['disk'][0] == ['pressure', '#e0301e', 4.5] and r['red'] > 200, r)
+        check('pen commands: uniform nib, next colour and next size', r['afterCmds'] == {'nib': 'uniform', 'color': '#1f9d55', 'size': 1.5} and r['disk'][1] == ['uniform', '#1f9d55', 1.5], r)
+        check('pen: setPen refuses a colour that is not #rrggbb, lowercases one that is, clamps sizes',
+              'Invalid pen colour' in r['threw'] and r['custom'] == {'nib': 'uniform', 'color': '#abcdef', 'size': 16, 'active': 0}, r)
+        page.locator('#leaf').screenshot(path=os.path.join(OUT, 'pen_strip.png'))
+
+        # (8) the stats overlay toggles
+        r = ev("""() => {
+          const el = view.contentEl.querySelector('.nb-ink-stats'), hidden = el.style.display === 'none';
+          const shown = commands['toggle-ink-stats'].checkCallback(true);
+          commands['toggle-ink-stats'].checkCallback(false);
+          const visible = el.style.display !== 'none', text = el.textContent;
+          commands['toggle-ink-stats'].checkCallback(false);
+          return { hidden, shown, visible, text, hiddenAgain: el.style.display === 'none' };
+        }""")
+        check('stats overlay: hidden at first, toggled by "Toggle ink stats overlay"', r['hidden'] and r['shown'] and r['visible'] and r['hiddenAgain'], r)
+        check('stats overlay: shows the pen and the handler and frame times', 'pen: uniform, #000000, 2.5 px' in r['text'] and 'handler' in r['text'] and 'frame' in r['text'], r['text'])
+        ev("() => commands['toggle-ink-stats'].checkCallback(false)")
+        page.locator('#leaf').screenshot(path=os.path.join(OUT, 'pen_stats.png'))
+        ev("() => commands['toggle-ink-stats'].checkCallback(false)")
+
+        # (6) handler time with 300 strokes on the page, and a long scribble that freezes its head
+        r = ev("""async () => {
+          await app.workspace.getLeaf(false).openFile(app.vault.getFile('Big/Lecture.md'));
+          await T.sleep(300);
+          const strokes = view.store.slots[0].page.strokes.length;
+          await T.pen(0, T.loops(80, 120, 200, j => 0.05 + 0.3 * j / 200));
+          const a = { ...view.stats.pen.last };
+          const scribble = Array.from({ length: 3000 }, (_, j) => [400 + 200 * Math.sin(j / 97) + 30 * Math.sin(j / 7), 400 + 150 * Math.cos(j / 131) + 30 * Math.cos(j / 9), 0.2]);
+          await T.pen(0, scribble, { up: false, per: 8 });
+          const liveTail = view.input.live.trace.points.length - view.input.live.frozen;
+          const livePx = T.liveInk();
+          T.penUp(0, scribble[scribble.length - 1]);
+          const b = { ...view.stats.pen.last };
+          return { strokes, a, b, liveTail, livePx, median10: view.stats.pen.recent.length };
+        }""")
+        a, b2 = r['a'], r['b']
+        print(f"pen on a page with {r['strokes']} strokes: {a['points']} points, {a['events']} events, handler median {a['handlerMs']:.3f} ms "
+              f"(max {a['handlerMaxMs']:.3f}), frame median {a['frameMs']:.2f} ms (max {a['frameMaxMs']:.2f}), predicted up to {a['maxPredicted']}")
+        print(f"long scribble: {b2['points']} points, {b2['frozen']} frozen pieces, live tail {r['liveTail']} points, handler median {b2['handlerMs']:.3f} ms, "
+              f"frame median {b2['frameMs']:.2f} ms (max {b2['frameMaxMs']:.2f})")
+        check('pen perf: a 200-sample stroke on a page with 300 strokes', r['strokes'] >= 300 and a['samples'] >= 200 and a['events'] == 50, r)
+        check('pen perf: median handler time under 4 ms (Chromium)', a['handlerMs'] < 4, a['handlerMs'])
+        check('pen perf: coalesced and predicted events seen', a['maxPredicted'] == 2 and a['frames'] >= 40, a)
+        check('pen perf: a long scribble freezes its head; the live tail stays bounded', b2['frozen'] >= 10 and r['liveTail'] <= 192 and r['livePx'] > 5000, r)
+        check('pen perf: frame time does not grow with stroke length', b2['frameMs'] < max(4 * a['frameMs'], 4), (a['frameMs'], b2['frameMs']))
+
+        # the debug view's readout shows the ink view's pen stats
+        r = ev("""async () => {
+          await p.openDebugView();
+          await T.sleep(50);
+          view.renderHud();
+          return view.hud.textContent;
+        }""")
+        check('debug view: the readout includes the ink view pen stats', 'ink view last stroke:' in r and 'handler' in r, r)
 
         # --- unload removes the patch
         r = ev("""async () => {
