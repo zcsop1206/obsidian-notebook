@@ -14,9 +14,11 @@ export interface NotebookSettings {
   tools: ToolState;
   /** The favourite presets: MAX_PRESETS slots at most, null for an empty one (#10). */
   presets: (PenPreset | null)[];
+  /** Vault folder of PDF templates (#21). */
+  templatesFolder: string;
 }
 
-export const DEFAULT_SETTINGS: NotebookSettings = { paper: 'letter', template: 'blank', tools: DEFAULT_TOOL_STATE, presets: [...DEFAULT_PRESETS] };
+export const DEFAULT_SETTINGS: NotebookSettings = { paper: 'letter', template: 'blank', tools: DEFAULT_TOOL_STATE, presets: [...DEFAULT_PRESETS], templatesFolder: 'templates/ink' };
 
 /** Settings from saved data, ignoring unknown or invalid values (with a warning for a template). */
 export function parseSettings(data: unknown): NotebookSettings {
@@ -24,11 +26,13 @@ export function parseSettings(data: unknown): NotebookSettings {
   let template = DEFAULT_SETTINGS.template;
   if (typeof d.template === 'string' && isTemplateName(d.template)) template = d.template;
   else if (d.template !== undefined) console.warn('[notebook]', `Unknown template ${JSON.stringify(d.template)} in settings; using ${template}`);
+  const templatesFolder = typeof d.templatesFolder === 'string' && d.templatesFolder.trim() ? d.templatesFolder.trim() : DEFAULT_SETTINGS.templatesFolder;
   return {
     paper: d.paper === 'a4' || d.paper === 'letter' ? d.paper : DEFAULT_SETTINGS.paper,
     template,
     tools: parseToolState(d.tools),
     presets: parsePresets(d.presets),
+    templatesFolder,
   };
 }
 
@@ -67,5 +71,15 @@ export class NotebookSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         });
       });
+    new Setting(containerEl)
+      .setName('Templates folder')
+      .setDesc('Where "Add PDF template" saves PDF templates.')
+      .addText(t => t
+        .setPlaceholder(DEFAULT_SETTINGS.templatesFolder)
+        .setValue(this.plugin.settings.templatesFolder)
+        .onChange(async value => {
+          this.plugin.settings.templatesFolder = value.trim() || DEFAULT_SETTINGS.templatesFolder;
+          await this.plugin.saveSettings();
+        }));
   }
 }
