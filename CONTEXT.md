@@ -36,11 +36,11 @@ The end state: every device (iPad and laptop now, others later) holds a copy of 
 
 ## Proposed, not yet confirmed
 
-- **Ink file format:** one SVG per page.
-  - Each stroke is a filled path whose width follows pressure.
-  - Raw points are stored inside `<metadata>` as JSON (`format: notebook-ink/0`, strokes of `[x, y, pressure, ms]`).
-  - An inner `<style>` switches the fill for `prefers-color-scheme: dark`.
-  - Paper (grid, dots) is drawn by whatever displays the page, never stored in the file.
+- **Ink file format:** decided in outline, specified in issue #3 (which wins over anything here). One SVG per page; a note is a markdown index (frontmatter plus one standard markdown image embed per page) and a folder of page SVGs.
+  - Each stroke is a filled path whose width follows pressure. Raw points live in `<metadata>` as JSON (`notebook-ink/1`; the spike wrote `notebook-ink/0`) and are the source of truth.
+  - An inner `<style>` switches default black ink and template lines for `prefers-color-scheme: dark`.
+  - **Templates are stored in the page file** (owner, 2026-09-26): a `<g id="template">` layer holds the lines, grid, dots or PDF page image, so a page looks the same in Obsidian, on GitHub and on the site. The earlier idea of leaving paper out and letting each viewer draw it is dropped.
+  - File size is not a constraint for now: images and PDF page images are embedded in the page SVG at full resolution.
   - Why SVG: it renders in Obsidian, on GitHub and on the site with no converter, and a native app could read the same files later.
 - **Vault layout:**
   ```
@@ -129,11 +129,11 @@ In headless Chromium, through `test/run_spike_test.py`:
 
 1. **Read the iPad results.** Done: the basics work, so building continues. Ink and foreground audio numbers are recorded (see Verified so far); screen lock, app switching and force-quit recovery still need testing on the iPad (protocol steps 4–6).
 2. **GitHub API sync, as its own plugin and repo:** the first real feature, because everything else depends on it. It lives in `zcsop1206/obsidian-github-sync` (locally `Documents/obsidian-github-sync`), whose `CONTEXT.md` holds the design and status. It only needs to run on mobile, since the laptop uses plain git.
-3. **Ink:**
-   - The real page view: continuous vertical scroll, fixed page width, paper templates.
-   - Tools: pen, highlighter, stroke eraser, lasso-move, hold-to-straighten line, pasted photos.
-   - Stroke smoothing with pressure-shaped outlines (for example the approach of `perfect-freehand`).
-   - Embed in notes by linking the SVG.
+3. **Ink editor, meant to replace Notability on the iPad.** The GitHub issues are the spec; each has Goal, Scope, Out of scope, Acceptance criteria and Depends on. Build exactly what an issue scopes; file or edit an issue before building anything else. Milestone order (owner, 2026-09-26):
+   - **M1 Editor foundation:** #2 build setup and rename (done), #3 file format, #19 page templates, #4 ink view, #5 pen, #6 highlighter, #7 stroke eraser, #8 undo/redo, #9 pinch zoom and finger scrolling, #10 toolbar and presets. Order from the dependencies: #2 → #3 → #4 and #19 → #5 → #6, #7, #8 (parallel) → #9 → #10.
+   - **M2 Lasso** (#11), then **M3 Images** (#12), then **M4 PDF** (#14 import and write on a PDF, #21 PDF page templates), then **M5 Ruler** (#20).
+   - **Backlog, not started:** #1 audio stitching, #15 partial eraser, #16 shape recognition, #17 page management, #18 PDF export. **Not wanted:** #13 text boxes (closed), audio synced to ink.
+   - Releases go out for iPad checks after #4 and #5 and at the end of each milestone; an issue closes only when its iPad criteria are met too.
 4. **Audio:** turn the spike recorder into a feature, shaped by what the iPad test shows about backgrounding: recording is foreground-only; a lock or app switch splits it into segments.
    - `meta.json` now records each segment's `startMs` and, when known, `audioEndMs`, so segments can be placed on one timeline.
    - Playing split segments as one recording is an open, low-priority issue: https://github.com/zcsop1206/obsidian-notebook/issues/1. Workaround: keep Obsidian in front while recording.
