@@ -10,7 +10,7 @@ import type { NavStats } from './ink/navigate';
 import { InkView } from './ink/view';
 import { RenameHandler } from './ink/rename';
 import { importPdf, PdfNameModal, PdfSourceModal, type PdfChoice } from './ink/pdf-import';
-import { PdfPages } from './ink/pdf';
+import { PdfPages, type PdfNote } from './ink/pdf';
 import { setSharpPdfRenderer } from './ink/renderer';
 import type { PdfTemplate } from './format/template';
 import type { Paper } from './format/page';
@@ -221,12 +221,12 @@ export default class NotebookPlugin extends Plugin {
     }
   }
 
-  /** The path of the open ink note that has a page with this template object, or null. */
-  private noteOfTemplate(template: PdfTemplate): string | null {
+  /** The open ink note (index and page folder paths) that has a page with this template object, or null. */
+  private noteOfTemplate(template: PdfTemplate): PdfNote | null {
     for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_INK)) {
       const view = leaf.view;
       if (!(view instanceof InkView) || !view.store || !view.file) continue;
-      if (view.store.slots.some(s => s.page?.template === template)) return view.file.path;
+      if (view.store.slots.some(s => s.page?.template === template)) return { path: view.file.path, pages: view.store.folder };
     }
     return null;
   }
