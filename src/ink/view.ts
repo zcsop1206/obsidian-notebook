@@ -36,6 +36,8 @@ import { templateRegistry } from './templates';
 import type { Size } from '../format/page';
 import { newImageId } from '../format/ids';
 import { Modal } from 'obsidian';
+import { Platform } from 'obsidian';
+import { exportNotePdf } from './export-pdf';
 import type { PageImage } from '../format/page';
 import { objectImages } from './renderer';
 import {
@@ -1489,7 +1491,14 @@ export class InkView extends FileView {
       paste: () => this.pasteStrokes(),
       insertImage: asPage => this.insertImage(asPage),
       pasteImage: () => void this.pasteImage(),
+      exportPdf: () => void this.exportPdf(),
     });
+  }
+
+  /** Exports the note as a PDF next to it (#18); returns its path, or null. */
+  exportPdf(): Promise<string | null> {
+    if (!this.store || !this.file) return Promise.resolve(null);
+    return exportNotePdf(this.app.vault, this.store, this.file.path, this.file.basename, { notice: (m, t) => new Notice(m, t), ios: Platform.isIosApp });
   }
 
   /** The favourite presets: MAX_PRESETS slots, null for an empty one. */
