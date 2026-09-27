@@ -5,8 +5,9 @@
 // popover under the button, see picker.ts); so every tool, preset and picker option is at most
 // two taps away. The toolbar knows nothing of the store: the view hands it a ToolbarHost.
 //
-// Pencil taps: blockStylusTouch (input.ts) lets a stylus touchstart through only on `button`,
-// `input` or `.nb-ink-control`, so every element here is a button or carries that class.
+// Pencil taps (#53): the view's stylus blocker (blockStylusTouch, input.ts) is on the pages
+// scroller only, so the toolbar takes the Pencil as a finger; every element here is still a
+// button or carries `.nb-ink-control`, the mark of a control the Pencil must reach.
 import { setIcon } from 'obsidian';
 import {
   matchesPreset, MAX_PRESETS, type EraserSettings, type HighlighterSettings, type PenPreset, type PenSettings,

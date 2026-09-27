@@ -12,7 +12,8 @@
 // frame costs a clear and one fill per selected stroke, whatever the drag.
 //
 // The menu is a popover in the view (like the picker), under the box, or above it when there's
-// no room below; every element is a button (or .nb-ink-control) so Pencil taps reach it.
+// no room below; it's outside the pages scroller, where Pencil touches are blocked (#53), and
+// every element is a button or .nb-ink-control besides.
 import type { PageImage, Size, Stroke } from '../format/page';
 import { COLOR_PRESETS, DEFAULT_PEN } from './pen';
 import type { Box, Transform } from './lasso';

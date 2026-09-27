@@ -392,19 +392,24 @@ const CONTROLS = 'button, select, input, textarea, a, .nb-ink-control';
 const hasStylus = (e: TouchEvent) => Array.from(e.changedTouches).some(t => (t as Touch & { touchType?: string }).touchType === 'stylus');
 
 /**
- * Keeps a Pencil drag anywhere in the ink view from scrolling it or opening Obsidian's sidebars
- * (on the iPad the Pencil also sends touch events, with touchType "stylus"). Rules, for
- * touchstart and touchmove listeners (passive: false) on the whole view:
+ * Keeps a Pencil drag over the pages from scrolling them or opening Obsidian's sidebars, while
+ * leaving every control to the Pencil (#53; on the iPad the Pencil also sends touch events, with
+ * touchType "stylus"). For touchstart and touchmove listeners (passive: false) on the pages
+ * scroller only, so the toolbar, the pickers, the Pages panel, the selection menu, modals and the
+ * settings tab never see it, and during a gesture on the window (PenInput.track). Rules:
  * - a touch event with no stylus touch (fingers) is left alone here (see blockFingerTouch);
- * - a stylus touchstart on a control (button, select, input, textarea, a, .nb-ink-control) is
- *   left alone, so Pencil taps on "Add page" and the pen strip still click;
- * - any other stylus touchstart, and every stylus touchmove, is prevented and stopped.
- * Returns whether the event was prevented.
+ * - a stylus touchstart or touchmove on a control (button, select, input, textarea, a,
+ *   .nb-ink-control: the ruler's angle label and input, "Add page") is left alone, so a Pencil
+ *   tap clicks or focuses it and a Pencil drag in a text field selects;
+ * - any other stylus touchstart or touchmove (the pages, their overlays, the gaps) is prevented
+ *   and stopped: no scroll, no text selection, no sidebar swipe under the Pencil.
+ * A touch event's target is where the touch started, so the touchmoves of a stroke are never a
+ * control's. Returns whether the event was prevented.
  */
 export function blockStylusTouch(e: TouchEvent): boolean {
   if (!hasStylus(e)) return false;
   const el = e.target as Element | null;
-  if (e.type === 'touchstart' && el && typeof el.closest === 'function' && el.closest(CONTROLS)) return false;
+  if (el && typeof el.closest === 'function' && el.closest(CONTROLS)) return false;
   e.preventDefault();
   e.stopPropagation();
   return true;
@@ -414,10 +419,10 @@ export function blockStylusTouch(e: TouchEvent): boolean {
  * Keeps finger drags over the pages (`area`, the scroll container) away from Obsidian, which
  * would otherwise open its sidebars on a swipe (#9: the view pans and zooms from finger pointer
  * events itself, see navigate.ts, and the scroll container has `touch-action: none`). For a
- * touchmove listener (passive: false) on the whole view: a finger touchmove (no stylus touch)
- * inside `area` is prevented and stopped. Touchstarts are left alone, so finger taps on "Add
- * page" still click, and fingers outside `area` (the pen strip) scroll natively. Returns whether
- * the event was prevented.
+ * touchmove listener (passive: false) on the scroll container: a finger touchmove (no stylus
+ * touch) inside `area` is prevented and stopped. Touchstarts are left alone, so finger taps on
+ * "Add page" still click, and fingers outside `area` (the toolbar, the Pages panel) never reach
+ * it and scroll natively. Returns whether the event was prevented.
  */
 export function blockFingerTouch(e: TouchEvent, area: Element): boolean {
   if (e.type !== 'touchmove' || hasStylus(e)) return false;
