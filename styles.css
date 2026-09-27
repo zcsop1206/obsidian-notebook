@@ -44,12 +44,20 @@
 /* Ink view */
 
 .view-content.nb-ink-view {
+  position: relative;
+  display: flex;
+  flex-direction: column;
   padding: 0;
   overflow: hidden;
 }
 
+/*
+ * Touch rules (src/ink/input.ts, blockStylusTouch): touch-action stays default, so fingers
+ * scroll natively; Pencil touches are stopped by preventDefault on touchstart/touchmove.
+ */
 .nb-ink-scroll {
-  height: 100%;
+  flex: 1;
+  min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
   scrollbar-gutter: stable;
@@ -84,7 +92,7 @@
   height: 100%;
 }
 
-/* The stroke in progress. Input is handled on the pages container; this only draws. */
+/* The stroke in progress (head and tail overlays). Input is handled on the pages container; these only draw. */
 .nb-ink-page canvas.nb-ink-live {
   pointer-events: none;
   touch-action: none;
@@ -118,4 +126,93 @@
 .nb-ink-message {
   padding: 24px;
   color: var(--text-muted);
+}
+
+/* PROVISIONAL pen strip (#5); #10 replaces it with the toolbar. One compact row. */
+.nb-ink-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  padding: 4px 8px;
+  overflow-x: auto;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--background-modifier-border);
+  background: var(--background-primary, #fff);
+  scrollbar-width: none;
+}
+
+.nb-ink-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+
+.nb-ink-strip button {
+  height: 26px;
+  min-width: 26px;
+  margin: 0;
+  padding: 0 8px;
+  font-size: var(--font-ui-smaller, 12px);
+  box-shadow: none;
+  cursor: pointer;
+}
+
+.nb-ink-strip button.is-active {
+  background: var(--interactive-accent, #7b6cd9);
+  color: var(--text-on-accent, #fff);
+}
+
+.nb-ink-strip .nb-ink-swatch {
+  width: 22px;
+  min-width: 22px;
+  height: 22px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid rgba(0, 0, 0, 0.25);
+}
+
+/* Default black is drawn in the theme's ink colour (src/ink/renderer.ts, LIGHT.ink / DARK.ink). */
+.nb-ink-strip .nb-ink-swatch.is-default-ink {
+  background: #1f1f1f;
+}
+
+.theme-dark .nb-ink-strip .nb-ink-swatch.is-default-ink {
+  background: #e6e3de;
+}
+
+.nb-ink-strip .nb-ink-swatch.is-active {
+  box-shadow: 0 0 0 2px var(--background-primary, #fff), 0 0 0 4px var(--interactive-accent, #7b6cd9);
+}
+
+.nb-ink-size-value {
+  min-width: 44px;
+  text-align: center;
+  font-size: var(--font-ui-smaller, 12px);
+  font-variant-numeric: tabular-nums;
+}
+
+.nb-ink-provisional {
+  color: var(--text-faint, #999);
+  font-size: var(--font-ui-smaller, 11px);
+  font-style: italic;
+}
+
+/* Pen stats overlay ("Toggle ink stats overlay"). */
+.nb-ink-stats {
+  position: absolute;
+  top: 40px;
+  right: 12px;
+  z-index: 2;
+  max-width: calc(100% - 24px);
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.72);
+  color: #f2f2f2;
+  font-family: var(--font-monospace, monospace);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  pointer-events: none;
 }

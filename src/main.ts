@@ -4,6 +4,7 @@ import { DebugView, VIEW_TYPE_DEBUG } from './debug/view';
 import { LOG_PREFIX } from './debug/util';
 import { createInkNote, NewNoteModal, targetFolder } from './ink/new-note';
 import { cachedIsInk, installTakeover, VIEW_TYPE_INK } from './ink/takeover';
+import type { PenStats } from './ink/input';
 import { InkView } from './ink/view';
 import type { Paper } from './format/page';
 import { DEFAULT_SETTINGS, NotebookSettingTab, parseSettings, type NotebookSettings } from './settings';
@@ -37,6 +38,12 @@ export default class NotebookPlugin extends Plugin {
     });
     this.addTemplateCommand('change-page-template', 'Change template of this page', 'page');
     this.addTemplateCommand('change-all-templates', 'Change template of all pages', 'all');
+    // Pen commands for desktop testing until #10's toolbar; the provisional strip does the same.
+    this.addInkCommand('pen-nib-uniform', 'Use the uniform pen', view => view.setPen({ nib: 'uniform' }));
+    this.addInkCommand('pen-nib-pressure', 'Use the pressure pen', view => view.setPen({ nib: 'pressure' }));
+    this.addInkCommand('pen-next-color', 'Next pen colour', view => view.nextColor());
+    this.addInkCommand('pen-next-size', 'Next pen size', view => view.nextSize());
+    this.addInkCommand('toggle-ink-stats', 'Toggle ink stats overlay', view => view.toggleStats());
     this.registerEvent(this.app.workspace.on('file-menu', (menu, file, _source, leaf) => {
       if (!(file instanceof TFile) || !leaf || leaf.view.getViewType() !== 'markdown' || !cachedIsInk(this.app, file)) return;
       menu.addItem(item => item.setTitle('Open as ink note').setIcon('pencil').onClick(() => void this.openAsInk(file, leaf)));
@@ -58,6 +65,30 @@ export default class NotebookPlugin extends Plugin {
 
   async saveSettings() {
     await this.saveData(this.settings);
+  }
+
+  /** A command shown only when an ink view is active. */
+  private addInkCommand(id: string, name: string, run: (view: InkView) => void) {
+    this.addCommand({
+      id,
+      name,
+      checkCallback: checking => {
+        const view = this.app.workspace.getActiveViewOfType(InkView);
+        if (!view) return false;
+        if (!checking) run(view);
+        return true;
+      },
+    });
+  }
+
+  /** The pen stats of the ink view written in most recently, or null if there's none. */
+  inkPenStats(): PenStats | null {
+    let best: PenStats | null = null;
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_INK)) {
+      const view = leaf.view;
+      if (view instanceof InkView && (!best || view.stats.pen.at > best.at)) best = view.stats.pen;
+    }
+    return best;
   }
 
   /** A command, shown only in an open ink note, that opens the template chooser. */
