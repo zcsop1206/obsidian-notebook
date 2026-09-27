@@ -32,6 +32,16 @@
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async t => { clipboardWrites.push(t); } } });
   } catch (e) { /* left as the browser has it */ }
 
+  // The share sheet (#18 offers an exported PDF on iOS): navigator.share records each file's
+  // name, type and size in window.shares; canShare accepts files unless window.noShareFiles.
+  window.shares = [];
+  try {
+    Object.defineProperty(navigator, 'canShare', { configurable: true, value: data => !window.noShareFiles || !(data && data.files) });
+    Object.defineProperty(navigator, 'share', { configurable: true, value: async data => {
+      shares.push({ title: data.title, files: (data.files || []).map(f => ({ name: f.name, type: f.type, size: f.size })) });
+    } });
+  } catch (e) { /* left as the browser has it */ }
+
   window.notices = [];
   class Notice { constructor(m) { notices.push(m); } hide() {} setMessage(m) { notices.push(m); return this; } }
 
