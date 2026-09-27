@@ -4870,7 +4870,7 @@ try:
         }""")
         print('controls audit:', {'base': r['base']['n'], 'kinds': r['base']['kinds'], 'pickers': {k: v['n'] for k, v in r['pickers'].items()}, 'selmenu': r['selmenu']['n']})
         check('controls audit: toolbar, preset slots, Pages panel thumbnails and buttons, footer and ruler label: Pencil never prevented, all marked',
-              r['base']['n'] >= 24 and r['base']['bad'] == [] and r['base']['kinds']['toolbar'] == 15 and r['base']['kinds']['panel'] >= 6
+              r['base']['n'] >= 24 and r['base']['bad'] == [] and r['base']['kinds']['toolbar'] == 16 and r['base']['kinds']['panel'] >= 6
               and r['base']['kinds']['footer'] == 2 and r['base']['kinds']['ruler'] == 1, r['base'])
         check('controls audit: every picker (pen with the ruler row, highlighter, eraser, lasso, page settings): Pencil never prevented, all marked',
               all(v['bad'] == [] and v['n'] >= 1 and v['kind'] == k for k, v in r['pickers'].items()) and r['pickers']['pen']['n'] >= 20, r['pickers'])
@@ -5558,6 +5558,428 @@ try:
         check('pan at 400%: ink scrolled into view is drawn in the band', n > 2000, n)
         ev("() => view.setZoom(1)")
         # ======== end of 30. The pen at zoom and across a pointercancel (#52) ========
+
+        # ======== 31. Import menu, custom templates and favourites (#54); resizing asks first (#56) ========
+        # The toolbar's Import button and its menu; a PDF's pages into the open note (one undo step);
+        # a PDF page, an image and a page's background saved as templates (`tpl:` names); stars in
+        # the chooser, the new-note dialog, the page menu and the settings; renaming and deleting a
+        # template from the chooser; and the question before a template change resizes pages.
+        r = ev("""async () => {
+          T.rows = () => { const m = modals[modals.length - 1]; return [...m.contentEl.querySelectorAll('.suggestion-item')]; };
+          T.row = label => T.rows().find(e => e.querySelector('.nb-tpl-label')?.textContent === label || e.textContent === label);
+          T.label = e => (e.querySelector('.nb-tpl-label') || e).textContent;
+          T.top = () => modals[modals.length - 1];
+          T.importMenu = kind => {
+            if (view.toolbar.pickerOpen !== 'import') T.bar().querySelector('.nb-ink-import').click();
+            view.contentEl.querySelector(`.nb-ink-picker .nb-ink-import-${kind}`).click();
+          };
+          T.pickVault = async (path, title) => {
+            await T.waitFor(() => T.rows().some(e => e.textContent === path));
+            T.rows().find(e => e.textContent === path).click();
+            if (title) await T.waitFor(() => modals.length && T.top().titleEl.textContent === title);
+          };
+          T.name = (name, button) => {
+            const m = T.top();
+            m.contentEl.querySelector('input.nb-ink-name').value = name;
+            m.contentEl.querySelector('button.mod-cta').click();
+          };
+          T.tplFile = n => fs.get(`templates/ink/${n}.svg`);
+          fs.set('Slides/lecture3.pdf', new Uint8Array(fakePdf([[612, 792], [792, 612], [595.28, 841.89]])));
+          fs.set('Photos/cat.jpg', new Uint8Array(await (await T.photo(1600, 1200)).arrayBuffer()));
+          dirs.add('Slides'); dirs.add('Photos');
+          p.settings.favouriteTemplates = [];
+          await p.createInkNote('Imports', '', 'letter', 'lined-college');
+          await T.sleep(150);
+          view.setTool('pen');
+          await T.stroke(0, T.wave(100, 200));
+          view.addPage();
+          view.scrollToPage(0);
+          await T.sleep(100);
+          const btns = [...T.bar().querySelectorAll('.nb-ink-page-actions > button')].map(b => b.className.split(' ').find(c => c.startsWith('nb-ink-') && c !== 'nb-ink-control' && c !== 'nb-ink-button'));
+          const b = T.bar().querySelector('.nb-ink-import');
+          b.click();
+          const picker = view.contentEl.querySelector('.nb-ink-picker');
+          return { btns, icon: b.dataset.icon, label: b.getAttribute('aria-label'), kind: picker.dataset.kind, open: view.toolbar.pickerOpen,
+            items: [...picker.querySelectorAll('.nb-ink-menu-item')].map(e => e.textContent), expanded: b.getAttribute('aria-expanded'),
+            cmds: ['import-pdf-pages', 'save-page-template'].map(c => commands[c].checkCallback(true)).concat([!!commands['add-image-template'], !!commands['toggle-favourite-template']]) };
+        }""")
+        page.locator('#leaf').screenshot(path=os.path.join(OUT, 'import_menu.png'))
+        print('import menu:', r)
+        check('import: an Import button next to page settings opens a menu of PDFs and images, once or as templates',
+              r['btns'][r['btns'].index('nb-ink-page-settings') + 1] == 'nb-ink-import' and r['kind'] == 'import' and r['open'] == 'import' and r['expanded'] == 'true'
+              and r['items'] == ['PDF as pages in this note…', 'PDF page as a template…', 'Image as a page…', 'Image as a template…', 'Image onto this page…', 'Paste image'], r)
+        check('import: the new commands exist (import-pdf-pages, save-page-template, add-image-template, toggle-favourite-template)', r['cmds'] == [True, True, True, True], r['cmds'])
+
+        # A PDF's pages after the current page, the PDF copied into the page folder; one undo step.
+        r = ev("""async () => {
+          const before = view.store.slots.map(s => s.id), folder = view.store.folder;
+          T.importMenu('pdf-pages');
+          const placeholder = T.top().placeholder;
+          await T.pickVault('Slides/lecture3.pdf');
+          await T.waitFor(() => view.store.slots.length === 5, 5000);
+          await T.sleep(200);
+          const slots = view.store.slots, P = i => view.store.page(slots[i]);
+          const pages = slots.map((s, i) => { const pg = P(i); return [s.id === before[0] ? 'first' : s.id === before[1] ? 'second' : 'pdf', pg.size, pg.template.kind, pg.template.source || null, pg.template.page || null, (pg.template.image || '').length > 1000]; });
+          const copy = fs.get(`${folder}/lecture3.pdf`), src = fs.get('Slides/lecture3.pdf');
+          const labels = [...view.history.labels];
+          const current = view.currentPageIndex(), els = T.pages().length;
+          await view.save();
+          const ids = slots.slice(1, 4).map(s => s.id), paths = slots.slice(1, 4).map(s => s.path);
+          const written = paths.every(pth => fs.has(pth));
+          const md1 = ink.readNote(fs.get(view.file.path), 'Imports').pages.length;
+          view.undo();
+          await view.save();
+          await T.sleep(100);
+          const undone = { n: view.store.slots.length, els: T.pages().length, files: paths.filter(pth => fs.has(pth)).length, md: ink.readNote(fs.get(view.file.path), 'Imports').pages.length };
+          view.redo();
+          await view.save();
+          await T.sleep(100);
+          const redone = { n: view.store.slots.length, ids: view.store.slots.slice(1, 4).map(s => s.id).join() === ids.join(), files: paths.filter(pth => fs.has(pth)).length };
+          // Again: the copy gets a free name.
+          T.importMenu('pdf-pages');
+          await T.pickVault('Slides/lecture3.pdf');
+          await T.waitFor(() => view.store.slots.length === 8, 5000);
+          const again = view.store.page(view.store.slots[view.currentPageIndex()]).template.source;
+          view.undo();
+          await view.save();
+          return { placeholder, pages, copied: !!copy && copy.length === src.length && copy.every((x, i) => x === src[i]), labels, current, els, written, md1, undone, redone, again,
+            after: view.store.slots.length };
+        }""")
+        print('import pdf into note:', r)
+        check('import pdf: the pages go after the current page, each at its PDF page\'s size with its page as a pdf background',
+              [p[0] for p in r['pages']] == ['first', 'pdf', 'pdf', 'pdf', 'second']
+              and [p[1] for p in r['pages'][1:4]] == [{'width': 816, 'height': 1056}, {'width': 1056, 'height': 816}, {'width': 793.7, 'height': 1122.5}]
+              and all(p[2:] == ['pdf', 'lecture3.pdf', i + 1, True] for i, p in enumerate(r['pages'][1:4])) and r['current'] == 1 and r['els'] == 5, r)
+        check('import pdf: the PDF is copied into the note\'s page folder; a second import gets a free name', r['copied'] and r['again'] == 'lecture3 1.pdf', r)
+        check('import pdf: one undo step ("Import PDF") removes all the pages and their files; redo brings them back',
+              r['labels'][-1] == 'Import PDF' and r['written'] and r['md1'] == 5 and r['undone'] == {'n': 2, 'els': 2, 'files': 0, 'md': 2}
+              and r['redone'] == {'n': 5, 'ids': True, 'files': 3} and r['after'] == 5, r)
+
+        # A PDF page as a template, from the menu.
+        r = ev("""async () => {
+          T.importMenu('pdf-template');
+          const placeholder = T.top().placeholder;
+          await T.pickVault('Slides/lecture3.pdf', 'Add PDF template');
+          const m = T.top(), pg = m.contentEl.querySelector('input.nb-tpl-page');
+          pg.value = '2'; pg.dispatchEvent(new Event('input'));
+          T.name('Lecture slide');
+          await T.waitFor(() => p.templates.get('tpl:Lecture slide'));
+          const page = ink.readPage(T.tplFile('Lecture slide')), pdf = fs.get('templates/ink/Lecture slide.pdf');
+          return { placeholder, size: page.size, strokes: page.strokes.length, tpl: [page.template.kind, page.template.source, page.template.page],
+            pdf: !!pdf && pdf.length === fs.get('Slides/lecture3.pdf').length, names: p.templates.entries.map(e => e.name) };
+        }""")
+        print('pdf page as template:', r)
+        check('import: "PDF page as a template" saves page 2 as tpl:Lecture slide (page file without strokes, the PDF beside it)',
+              r['size'] == {'width': 1056, 'height': 816} and r['strokes'] == 0 and r['tpl'] == ['pdf', 'Lecture slide.pdf', 2] and r['pdf']
+              and 'tpl:Lecture slide' in r['names'] and 'tpl:engineering' in r['names'], r)
+
+        # An image as a page (from the vault), onto this page (from the device), and as a template.
+        r = ev("""async () => {
+          view.scrollToPage(0);
+          await T.sleep(100);
+          const n0 = view.store.slots.length, imgs0 = (view.store.page(view.store.slots[0]).images || []).length;
+          T.importMenu('image-page');
+          const placeholder = T.top().placeholder, rows = T.rows().map(e => e.textContent);
+          await T.pickVault('Photos/cat.jpg');
+          await T.waitFor(() => view.store.slots.length === n0 + 1, 5000);
+          const pg = view.store.page(view.store.slots[1]);
+          const asPage = [pg.template.kind, pg.size, pg.template.image.startsWith('data:image/jpeg'), view.history.labels[view.history.labels.length - 1]];
+          view.scrollToPage(0);
+          await T.sleep(100);
+          T.importMenu('image-here');
+          T.rows().find(e => e.textContent === 'Choose an image from this device…').click();
+          const input = document.querySelector('input.nb-image-file-input');
+          const dt = new DataTransfer();
+          dt.items.add(await T.photo(200, 100));
+          input.files = dt.files;
+          input.dispatchEvent(new Event('change'));
+          await T.waitFor(() => (view.store.page(view.store.slots[0]).images || []).length === imgs0 + 1, 5000);
+          const here = (view.store.page(view.store.slots[0]).images || []).length - imgs0;
+          view.clearSelection();
+          view.setTool('pen');
+          T.importMenu('image-template');
+          const tplPlaceholder = T.top().placeholder;
+          await T.pickVault('Photos/cat.jpg', 'Save image as a template');
+          const defaultName = T.top().contentEl.querySelector('input.nb-ink-name').value;
+          T.name('Cat photo');
+          await T.waitFor(() => p.templates.get('tpl:Cat photo'), 5000);
+          const t = ink.readPage(T.tplFile('Cat photo'));
+          return { placeholder, rows, asPage, here, tplPlaceholder, defaultName, tpl: [t.template.kind, t.size, t.strokes.length, t.template.image.length > 1000] };
+        }""")
+        print('images:', {k: r[k] for k in ('placeholder', 'rows', 'here', 'tplPlaceholder', 'defaultName', 'tpl')}, r['asPage'][:2])
+        check('import: images come from the device or the vault', r['rows'][0] == 'Choose an image from this device…' and 'Photos/cat.jpg' in r['rows'], r['rows'])
+        check('import: "Image as a page" inserts an image page after the current page, paper-wide at the image\'s aspect',
+              r['asPage'] == ['image', {'width': 816, 'height': 612}, True, 'Insert image as page'], r['asPage'])
+        check('import: "Image onto this page" puts the device\'s image on the current page', r['here'] == 1, r)
+        check('import: "Image as a template" saves tpl:Cat photo, an image page file without strokes', r['defaultName'] == 'cat' and r['tpl'] == ['image', {'width': 816, 'height': 612}, 0, True], r)
+
+        # This page's background as a template: a lined page with ink, and a pdf page.
+        r = ev("""async () => {
+          view.scrollToPage(0);
+          await T.sleep(100);
+          const strokes = view.store.page(view.store.slots[0]).strokes.length;
+          T.bar().querySelector('.nb-ink-page-settings').click();
+          const items = [...view.contentEl.querySelectorAll('.nb-ink-picker .nb-ink-menu-item')].map(e => e.textContent);
+          view.contentEl.querySelector('.nb-ink-picker .nb-ink-menu-save-template').click();
+          const title = T.top().titleEl.textContent, def = T.top().contentEl.querySelector('input.nb-ink-name').value;
+          T.name('My lined');
+          await T.waitFor(() => p.templates.get('tpl:My lined'));
+          const t = ink.readPage(T.tplFile('My lined'));
+          const pdfIndex = view.store.slots.findIndex(s => view.store.page(s).template.kind === 'pdf');
+          view.scrollToPage(pdfIndex);
+          await T.sleep(100);
+          const id = await view.saveBackgroundAsTemplate('From PDF');
+          const f = ink.readPage(T.tplFile('From PDF')), bytes = fs.get('templates/ink/From PDF.pdf');
+          return { strokes, items, title, def, tpl: [ink.templateName(t.template), t.size, t.strokes.length, (t.images || []).length], id,
+            pdf: [f.template.kind, f.template.source, f.template.page, f.size, !!bytes && bytes.length === fs.get('Slides/lecture3.pdf').length] };
+        }""")
+        print('save background:', r)
+        check('save background: the page menu offers it; the name defaults to the template\'s label',
+              "Save this page's background as a template…" in r['items'] and r['title'] == "Save this page's background as a template" and r['def'] == 'Lined, college rule', r)
+        check('save background: the template file has the background and size but none of the page\'s ink',
+              r['strokes'] >= 1 and r['tpl'] == ['lined-college', {'width': 816, 'height': 1056}, 0, 0], r)
+        check('save background: a pdf page\'s background keeps its PDF, copied beside the template', r['id'] == 'tpl:From PDF' and r['pdf'] == ['pdf', 'From PDF.pdf', 1, {'width': 816, 'height': 1056}, True], r)
+
+        # Stars: in the chooser (tapping a star doesn't choose the row), first next time, in the
+        # new-note dialog (the first favourite is its default), the page menu and the settings.
+        r = ev("""async () => {
+          const n0 = view.store.slots.length;
+          view.chooseTemplate('add');
+          const m = T.top(), plain = T.rows().map(T.label);
+          const previews = T.rows().filter(e => e.querySelector('canvas.nb-tpl-preview')).map(T.label);
+          const stars = T.rows().filter(e => e.querySelector('.nb-tpl-star')).length;
+          T.row('Lecture slide (PDF)').querySelector('.nb-tpl-star').click();
+          T.row('Sticky note 3 × 3 in').querySelector('.nb-tpl-star').click();
+          T.row('Grid, 5 mm').querySelector('.nb-tpl-star').click();
+          T.row('Grid, 5 mm').querySelector('.nb-tpl-star').click();
+          await T.sleep(200);  // previews draw once their images load
+          const stillOpen = modals.includes(m) && view.store.slots.length === n0;
+          const pressed = T.row('Lecture slide (PDF)').querySelector('.nb-tpl-star').getAttribute('aria-pressed');
+          const c = T.row('Lecture slide (PDF)').querySelector('canvas.nb-tpl-preview'), d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+          let red = 0;
+          for (let k = 0; k < d.length; k += 4) if (d[k] > 60 && d[k + 1] < 40 && d[k + 2] < 40) red++;
+          const lc = T.row('My lined (custom)').querySelector('canvas.nb-tpl-preview'), ld = lc.getContext('2d').getImageData(0, 0, lc.width, lc.height).data;
+          let lines = 0;
+          for (let k = 0; k < ld.length; k += 4) if (ld[k] < 235) lines++;
+          const fav = [...p.settings.favouriteTemplates], saved = [...(pluginData.favouriteTemplates || [])];
+          m.close();
+          view.chooseTemplate('add');
+          const ordered = T.rows().map(T.label);
+          return { plain, previews, stars, stillOpen, pressed, red, lines, cw: c.width, ch: c.height, fav, saved, ordered };
+        }""")
+        ev("""() => {
+          const s = document.createElement('style');
+          s.textContent = '.modal { position: fixed; top: 20px; left: 20px; width: 460px; max-height: 640px; overflow: auto; background: #fff; border: 1px solid #999; padding: 8px; font-size: 14px; z-index: 10; } .suggestion-item { padding: 2px 4px; }';
+          document.head.appendChild(s);
+        }""")
+        page.locator('.modal').last.screenshot(path=os.path.join(OUT, 'chooser_favourites.png'))
+        print('stars:', {k: r[k] for k in ('previews', 'stars', 'pressed', 'red', 'lines', 'fav', 'saved')}, r['ordered'][:3])
+        check('favourites: every template row has a star; custom templates have a drawn preview',
+              r['stars'] == len(r['plain']) - 1 and set(r['previews']) >= {'Lecture slide (PDF)', 'Cat photo (image)', 'My lined (custom)', 'engineering (PDF)'}
+              and not any(x in r['previews'] for x in ('Blank', 'Sticky note 3 × 3 in')) and r['red'] > 0 and r['lines'] > 50 and r['cw'] > r['ch'], r)
+        check('favourites: tapping stars (on, and on then off) keeps the chooser open and saves the favourites in order',
+              r['stillOpen'] and r['pressed'] == 'true' and r['fav'] == ['tpl:Lecture slide', 'sticky-3in'] and r['saved'] == r['fav'], r)
+        check('favourites: starred templates come first in the chooser, in the order starred',
+              r['plain'][0] == 'Blank' and r['ordered'][:3] == ['Lecture slide (PDF)', 'Sticky note 3 × 3 in', 'Blank'] and r['ordered'][-1] == 'Custom size…', r['ordered'])
+
+        r = ev("""async () => {
+          T.top().close();
+          commands['new-ink-note'].callback();
+          const nm = T.top(), sel = nm.contentEl.querySelectorAll('select')[1];
+          const opts = [...sel.options].map(o => [o.value, o.textContent]), value = sel.value;
+          nm.contentEl.querySelector('input.nb-ink-name').value = 'From favourite';
+          nm.contentEl.querySelector('button.mod-cta').click();
+          await T.waitFor(() => view.file && view.file.basename === 'From favourite' && view.store && T.pages().length);
+          await T.sleep(150);
+          const note = ink.readNote(fs.get(view.file.path), 'From favourite'), folder = view.store.folder;
+          view.addPage();
+          T.bar().querySelector('.nb-ink-page-settings').click();
+          const favItems = [...view.contentEl.querySelectorAll('.nb-ink-picker .nb-ink-menu-add-favourite')].map(e => e.textContent);
+          view.contentEl.querySelector('.nb-ink-picker .nb-ink-menu-add-favourite[data-template="sticky-3in"]').click();
+          await view.save();
+          const pages = view.store.slots.map(s => { const pg = view.store.page(s); return [pg.size, pg.template.kind, pg.template.page || null]; });
+          return { opts: opts.slice(0, 3), value, paper: note.paper, tpl: note.template, pages, copied: fs.has(`${folder}/Lecture slide.pdf`), favItems };
+        }""")
+        print('favourite note:', r)
+        check('favourites: the new-note dialog lists them first, starred, and starts with the first favourite',
+              r['opts'][:2] == [['tpl:Lecture slide', '★ Lecture slide (PDF)'], ['sticky-3in', '★ Sticky note 3 × 3 in']] and r['value'] == 'tpl:Lecture slide', r['opts'])
+        check('favourites: a note from the favourite PDF template: tpl: in the frontmatter, its size, the PDF copied; added pages have it',
+              r['tpl'] == 'tpl:Lecture slide' and r['paper'] == '1056x816' and r['copied']
+              and r['pages'][:2] == [[{'width': 1056, 'height': 816}, 'pdf', 2], [{'width': 1056, 'height': 816}, 'pdf', 2]], r)
+        check('favourites: the page menu adds a page from a favourite at its size',
+              r['favItems'] == ['Add page: ★ Lecture slide (PDF)', 'Add page: ★ Sticky note 3 × 3 in'] and r['pages'][2] == [{'width': 288, 'height': 288}, 'fill', None], r)
+
+        # The settings: the favourites as toggles; the default dropdown lists custom templates; the
+        # star command; saved pdf: names read as tpl: after a reload.
+        r = ev("""async () => {
+          const tab = p.settingTabs[0];
+          tab.display();
+          const toggles = [...tab.containerEl.querySelectorAll('.setting-item.nb-favourite-template')];
+          const on = toggles.filter(e => e.querySelector('input').checked).map(e => e.dataset.name);
+          const dots = toggles.find(e => e.dataset.name === 'Dots, 5 mm').querySelector('input');
+          dots.checked = true; dots.dispatchEvent(new Event('change'));
+          const afterOn = [...p.settings.favouriteTemplates];
+          dots.checked = false; dots.dispatchEvent(new Event('change'));
+          const def = [...tab.containerEl.querySelector('.setting-item[data-name="Default template for new notes"] select').options].map(o => o.value);
+          const heading = !!tab.containerEl.querySelector('.setting-item-heading[data-name="Favourite templates"]');
+          const useFav = tab.containerEl.querySelector('.setting-item[data-name="Start new notes with the first favourite"] input').checked;
+          commands['toggle-favourite-template'].callback();
+          await T.waitFor(() => modals.length && T.top().placeholder === 'Template to star or unstar');
+          T.row('Grid, 5 mm').click();
+          const starred = [...p.settings.favouriteTemplates];
+          commands['toggle-favourite-template'].callback();
+          await T.waitFor(() => modals.length && T.top().placeholder === 'Template to star or unstar');
+          T.row('Grid, 5 mm').click();
+          // Settings saved with #21's pdf: names read back as tpl:.
+          const data = JSON.parse(JSON.stringify(pluginData));
+          window.pluginData = { ...data, template: 'pdf:Lecture slide', favouriteTemplates: ['pdf:Lecture slide', 'nonsense', 'sticky-3in'] };
+          p.unload();
+          window.p = await loadPlugin();
+          await p.templates.load();
+          const reloaded = [p.settings.template, p.settings.favouriteTemplates, p.defaultTemplate()];
+          p.settings.favouriteDefault = false;
+          const off = p.defaultTemplate();
+          p.settings.favouriteDefault = true;
+          p.settings.template = 'blank';
+          return { on, afterOn, def: def.slice(10), heading, useFav, starred, final: [...p.settings.favouriteTemplates], reloaded, off };
+        }""")
+        print('favourite settings:', r)
+        check('settings: a toggle per template shows and changes the favourites; the default dropdown lists custom templates',
+              r['heading'] and r['on'] == ['Sticky note 3 × 3 in', 'Lecture slide'] and r['afterOn'] == ['tpl:Lecture slide', 'sticky-3in', 'dots-5mm']
+              and 'tpl:Lecture slide' in r['def'] and 'tpl:Cat photo' in r['def'] and r['useFav'], r)
+        check('favourites: the star command stars and unstars a template', r['starred'] == ['tpl:Lecture slide', 'sticky-3in', 'grid-5mm'], r['starred'])
+        check('settings: pdf: names saved earlier read as tpl:; unknown favourites dropped; the default follows favourites unless turned off',
+              r['reloaded'] == ['tpl:Lecture slide', ['tpl:Lecture slide', 'sticky-3in'], 'tpl:Lecture slide'] and r['off'] == 'tpl:Lecture slide', r)
+
+        # Rename and delete from the chooser: pages made from the templates stay as they are.
+        r = ev("""async () => {
+          // A new note: open views came from the plugin instance unloaded above.
+          await p.createInkNote('Made from templates', '', 'letter', 'blank');
+          await T.sleep(150);
+          view.addTemplatePage('tpl:Cat photo');
+          view.addTemplatePage('tpl:My lined');
+          await view.save();
+          const n = view.store.slots.length, catPage = view.store.slots[n - 2].path, linedPage = view.store.slots[n - 1].path;
+          const catBefore = fs.get(catPage), linedBefore = fs.get(linedPage);
+          p.settings.favouriteTemplates = ['tpl:My lined', 'sticky-3in'];
+          view.chooseTemplate('page');
+          T.row('My lined (custom)').querySelector('.nb-tpl-rename').click();
+          const title = T.top().titleEl.textContent, def = T.top().contentEl.querySelector('input.nb-ink-name').value;
+          T.name('Lined mine');
+          await T.waitFor(() => p.templates.get('tpl:Lined mine') && modals.length && T.top().placeholder === 'Template of this page');
+          const renamed = { svg: !!T.tplFile('Lined mine'), old: !!T.tplFile('My lined'), fav: [...p.settings.favouriteTemplates], rows: T.rows().map(T.label).slice(0, 2) };
+          T.row('Cat photo (image)').querySelector('.nb-tpl-delete').click();
+          const confirm = T.top(), text = confirm.contentEl.querySelector('.nb-confirm-text').textContent, cls = confirm.modalEl.classList.contains('nb-delete-template');
+          confirm.contentEl.querySelector('.nb-confirm-cancel').click();
+          await T.waitFor(() => modals.length && T.top().placeholder === 'Template of this page');
+          const kept = !!T.tplFile('Cat photo');
+          T.row('Cat photo (image)').querySelector('.nb-tpl-delete').click();
+          T.top().contentEl.querySelector('.nb-confirm-ok').click();
+          await T.waitFor(() => !p.templates.get('tpl:Cat photo') && modals.length && T.top().placeholder === 'Template of this page');
+          const rows = T.rows().map(T.label);
+          T.top().close();
+          await view.save();
+          return { title, def, renamed, text, cls, kept, gone: !T.tplFile('Cat photo'), rows: rows.filter(l => /Cat|lined|Lined/.test(l)),
+            pagesSame: fs.get(catPage) === catBefore && fs.get(linedPage) === linedBefore,
+            kinds: [view.store.page(view.store.slots[n - 2]).template.kind, ink.templateName(view.store.page(view.store.slots[n - 1]).template)] };
+        }""")
+        print('rename/delete:', r)
+        check('custom templates: rename from the chooser (a name dialog); the files follow, favourites too, the chooser reopens',
+              r['title'] == 'Rename template' and r['def'] == 'My lined' and r['renamed'] == {'svg': True, 'old': False, 'fav': ['tpl:Lined mine', 'sticky-3in'], 'rows': ['Lined mine (custom)', 'Sticky note 3 × 3 in']}, r)
+        check('custom templates: delete asks first; Cancel keeps it, Delete removes the file', r['cls'] and 'Cat photo' in r['text'] and r['kept'] and r['gone']
+              and 'Cat photo (image)' not in r['rows'], r)
+        check('custom templates: pages made from a renamed or deleted template are untouched', r['pagesSame'] and r['kinds'] == ['image', 'lined-college'], r)
+
+        # #56: a template of another size asks first, for one page and for all pages; Cancel changes
+        # nothing, Resize resizes as one undo step.
+        r = ev("""async () => {
+          await p.createInkNote('Resize56', '', 'letter', 'blank');
+          await T.sleep(150);
+          view.setTool('pen');
+          await T.stroke(0, T.wave(100, 200));
+          const state = () => view.store.slots.map(s => { const pg = view.store.page(s); return [pg.size.width, pg.size.height, ink.templateName(pg.template), pg.strokes.length]; });
+          const depth = () => view.history.labels.length;
+          const d0 = depth();
+          commands['change-page-template'].checkCallback(false);
+          await T.choose('Sticky note 3 × 3 in');
+          const q = T.top(), asked = { cls: q.modalEl.classList.contains('nb-resize-confirm'), title: q.titleEl.textContent, text: q.contentEl.querySelector('.nb-confirm-text').textContent,
+            buttons: [...q.contentEl.querySelectorAll('button')].map(b => b.textContent) };
+          q.contentEl.querySelector('.nb-confirm-cancel').click();
+          await T.sleep(100);
+          const cancelled = [state(), depth() - d0, modals.length];
+          commands['change-page-template'].checkCallback(false);
+          await T.choose('Sticky note 3 × 3 in');
+          T.top().contentEl.querySelector('.nb-confirm-ok').click();
+          await T.sleep(150);
+          const resized = [state(), depth() - d0, view.history.labels[view.history.labels.length - 1], Math.round(T.pages()[0].offsetWidth / T.pages()[0].offsetHeight * 100) / 100];
+          await view.save();
+          const disk = ink.readPage(fs.get(view.store.slots[0].path)).size;
+          view.undo();
+          await T.sleep(100);
+          const undone = state();
+          view.redo();
+          const redone = state();
+          view.undo();
+          // Same size: no question.
+          commands['change-page-template'].checkCallback(false);
+          await T.choose('Grid, 5 mm');
+          const noAsk = [modals.length, state()];
+          view.undo();
+          return { asked, cancelled, resized, disk, undone, redone, noAsk };
+        }""")
+        print('resize one page:', r)
+        check('resize (#56): a Letter page changed to the sticky note asks first, with both sizes and Resize / Cancel',
+              r['asked']['cls'] and r['asked']['text'] == "This page is Letter (8.5 × 11 in); the template is 3 × 3 in. Resize the page to the template's size? Ink outside the new size stays in the file but won't be visible."
+              and r['asked']['buttons'] == ['Resize', 'Cancel'], r['asked'])
+        check('resize (#56): Cancel changes nothing (no undo step)', r['cancelled'] == [[[816, 1056, 'blank', 1]], 0, 0], r['cancelled'])
+        check('resize (#56): Resize changes template and size as one undo step; undo restores both, redo again',
+              r['resized'][:3] == [[[288, 288, 'sticky-3in', 1]], 1, 'Change page template'] and r['resized'][3] == 1.0 and r['disk'] == {'width': 288, 'height': 288}
+              and r['undone'] == [[816, 1056, 'blank', 1]] and r['redone'] == [[288, 288, 'sticky-3in', 1]], r)
+        check('resize (#56): a template without its own size changes the page without asking', r['noAsk'] == [0, [[816, 1056, 'grid-5mm', 1]]], r['noAsk'])
+
+        r = ev("""async () => {
+          view.addPage();
+          view.addTemplatePage('sticky-3in');
+          const state = () => view.store.slots.map(s => { const pg = view.store.page(s); return [pg.size.width, pg.size.height, ink.templateName(pg.template)]; });
+          const before = state(), depth = view.history.labels.length;
+          commands['change-all-templates'].checkCallback(false);
+          await T.choose('Sticky note 3 × 3 in');
+          const q = T.top(), asked = [q.titleEl.textContent, q.contentEl.querySelector('.nb-confirm-text').textContent];
+          q.contentEl.querySelector('.nb-confirm-cancel').click();
+          await T.sleep(100);
+          const cancelled = [state(), view.history.labels.length - depth, view.store.index.template];
+          commands['change-all-templates'].checkCallback(false);
+          await T.choose('Sticky note 3 × 3 in');
+          T.top().contentEl.querySelector('.nb-confirm-ok').click();
+          await T.sleep(150);
+          const resized = [state(), view.history.labels.length - depth, view.store.index.template];
+          view.undo();
+          await T.sleep(100);
+          const undone = [state(), view.store.index.template];
+          // A custom template for all pages: the note's default is its tpl: name.
+          commands['change-all-templates'].checkCallback(false);
+          await T.choose('Lined mine (custom)');
+          const askedCustom = T.top().contentEl.querySelector('.nb-confirm-text').textContent;
+          T.top().contentEl.querySelector('.nb-confirm-ok').click();
+          await T.sleep(150);
+          await view.save();
+          const custom = [state(), view.store.index.template, ink.readNote(fs.get(view.file.path), 'Resize56').template];
+          view.addPage();
+          const added = state()[3];
+          return { before, asked, cancelled, resized, undone, askedCustom, custom, added };
+        }""")
+        page.locator('#leaf').screenshot(path=os.path.join(OUT, 'resize_all.png'))
+        print('resize all pages:', r)
+        check('resize (#56): "all pages" asks once, saying how many pages change size',
+              r['asked'][0] == 'Resize 2 pages?' and r['asked'][1].startswith('2 of 3 pages are a different size from the template, 3 × 3 in. Resize them'), r['asked'])
+        check('resize (#56): Cancel on "all pages" changes nothing', r['cancelled'] == [r['before'], 0, 'blank'], r['cancelled'])
+        check('resize (#56): Resize changes every page and the default in one undo step; undo restores sizes and templates',
+              r['resized'] == [[[288, 288, 'sticky-3in']] * 3, 1, 'sticky-3in'] and r['undone'] == [r['before'], 'blank'], r)
+        check('resize (#56): a custom template for all pages asks too and names the note\'s default tpl:<name>',
+              r['askedCustom'].startswith('1 of 3 pages is a different size') and r['custom'][1] == 'tpl:Lined mine' and r['custom'][2] == 'tpl:Lined mine'
+              and r['custom'][0] == [[816, 1056, 'lined-college']] * 3 and r['added'] == [816, 1056, 'lined-college'], r)
+        ev("() => { p.settings.favouriteTemplates = []; }")
+        # ======== end of 31. Import menu, custom templates and favourites (#54); resizing asks first (#56) ========
 
         # --- unload removes the patch
         r = ev("""async () => {
