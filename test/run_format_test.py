@@ -185,6 +185,37 @@ try:
             # The paper is the PDF's own white in both schemes, so default ink stays near-black.
             check(f'pdf page {scheme}: the default ink is drawn over it, near-black in both schemes', near(r['at'][2], INK['light'], 30), r['at'][2])
             page.close()
+
+        # ---- a sticky page (#27): 288 x 288, its pale yellow fill drawn in both schemes, and
+        # default ink near-black on it in dark mode too (the fill doesn't follow dark mode).
+        page = ctx.new_page()
+        page.goto(f'{base_url}/test/harness.html')
+        page.add_script_tag(url=f'{base_url}/test/out/view-fixture.js')
+        svg = page.evaluate("""() => {
+          const points = Array.from({ length: 30 }, (_, i) => ({ x: 40 + i * 7, y: 150, p: 0.5, t: i * 8 }));
+          return ink.writePage({ id: 'p-0e0e0e', size: { width: 288, height: 288 }, template: ink.parseTemplateName('sticky-3in'),
+            strokes: [{ id: '0000cafe', tool: 'pen', nib: 'uniform', color: '#000000', size: 6, points }] });
+        }""")
+        page.close()
+        with open(os.path.join(OUT, 'format_sticky_page.svg'), 'w', encoding='utf8') as f:
+            f.write(svg)
+        STICKY = (0xff, 0xf5, 0x9d)
+        for scheme in ['light', 'dark']:
+            page = ctx.new_page()
+            page.emulate_media(color_scheme=scheme)
+            page.goto(f'{base_url}/test/out/')
+            page.set_content(f"<body style='margin:0;background:{BG[scheme]}'><img id='p' src='{base_url}/test/out/format_sticky_page.svg'></body>")
+            page.wait_for_function("() => document.getElementById('p').complete")
+            size = page.evaluate("() => { const i = document.getElementById('p'); return [i.naturalWidth, i.naturalHeight]; }")
+            shot = page.locator('#p').screenshot(path=os.path.join(OUT, f'format_sticky_page_{scheme}.png'))
+            # Screenshot px are 2 per page px: the stroke is at y 150 from x 40 to 243.
+            r = page.evaluate(COUNT_JS, [base64.b64encode(shot).decode(), list(rgb(BG[scheme])), [list(STICKY), list(INK['light']), list(INK['dark'])],
+                                         [0, 0], [[20, 20], [300, 300], [560, 560]]])
+            near = lambda a, b, tol=12: all(abs(x - y) <= tol for x, y in zip(a, b))
+            print(f'sticky page {scheme}: natural {size}, samples {r["at"]}, counts [fill, light ink, dark ink] {r["counts"]}')
+            check(f'sticky page {scheme}: loads at 288 x 288', size == [288, 288], size)
+            check(f'sticky page {scheme}: the pale yellow fill covers the page', near(r['at'][0], STICKY) and near(r['at'][2], STICKY), r['at'])
+            check(f'sticky page {scheme}: the default ink is near-black on it', near(r['at'][1], INK['light'], 30) and r['counts'][2] == 0, r)
         b.close()
 finally:
     srv.terminate()

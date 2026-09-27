@@ -379,6 +379,12 @@
       cb(d);
       return this;
     }
+    addText(cb) {
+      const input = this.settingEl.createEl('input', { type: 'text' });
+      const t = { inputEl: input, setValue(v) { input.value = v; return t; }, getValue() { return input.value; }, setPlaceholder(p) { input.placeholder = p; return t; }, onChange(f) { input.addEventListener('input', () => f(input.value)); return t; } };
+      cb(t);
+      return this;
+    }
   }
 
   // ---- plugin

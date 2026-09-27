@@ -465,7 +465,7 @@ try:
         tpath = r['path']
         print('templates:', {k: r[k] for k in ('defaults', 'paper', 'noteTpl', 'tpl', 'line', 'dark', 'pink')})
         check('templates: the settings have a default template beside the paper size, saved on change',
-              r['names'] == ['Default paper size', 'Default template for new notes'] and len(r['options']) == 8 and r['saved'] == 'lined-college-margin', r)
+              r['names'][:2] == ['Default paper size', 'Default template for new notes'] and 'Templates folder' in r['names'] and len(r['options']) == 10 and r['saved'] == 'lined-college-margin', r)
         check('templates: the new-note dialog offers paper and template, defaulting to the settings', r['defaults'] == ['letter', 'lined-college-margin'], r['defaults'])
         check('templates: the note is A4 with the chosen template, in the index and its first page',
               r['paper'] == 'a4' and r['noteTpl'] == 'lined-college-margin' and r['tpl'] == 'lined-college-margin' and r['size'] == {'width': 794, 'height': 1123}, r)
@@ -502,8 +502,8 @@ try:
             prev: ink.templateName(prev), blankLines, again: T.templates()[0], gridAgain: T.near(0, [0xc9, 0xc9, 0xc9], 6) }};
         }}""")
         print('templates: change page:', {k: r[k] for k in ('strokes', 'after', 'disk', 'img', 'prev', 'blankLines', 'gridAgain')})
-        check('templates: "Change template of this page" is offered in an ink view and lists the eight templates',
-              r['shown'] is True and r['labels'][0] == 'Blank' and 'Lined, college rule, with margin' in r['labels'] and len(r['labels']) == 8, r['labels'])
+        check('templates: "Change template of this page" is offered in an ink view and lists the ten built-in templates (#19, #27)',
+              r['shown'] is True and r['labels'][0] == 'Blank' and 'Lined, college rule, with margin' in r['labels'] and r['labels'][8:] == ['Sticky note 3 × 3 in', 'Index card 5 × 3 in'], r['labels'])
         check('templates: lined to grid keeps the writing and redraws the page',
               r['strokes'] == 1 and r['after']['strokes'] == 1 and r['after']['tpl'] == 'grid-5mm' and r['after']['grid'] > 5000 and r['after']['pink'] == 0, r)
         check('templates: the page file says grid-5mm and still has the stroke', r['disk'] == {'tpl': 'grid-5mm', 'strokes': 1}, r['disk'])
@@ -3434,6 +3434,227 @@ try:
         check('lasso drag: 100 of 300 strokes dragged at a median frame under 8 ms', r['sel'] == 100 and d['frames'] >= 30 and d['frameMs'] < 8, r)
         ev("() => { view.clearSelection(); view.setTool('pen'); }")
         # ======== end of 22. The lasso (#11) ========
+
+        # ======== 23. Sized templates and page embeds (#27), PDF templates (#21) ========
+        ev("""() => {
+          T.light = async () => { document.body.classList.remove('theme-dark'); app.workspace.trigger('css-change'); await T.sleep(100); };
+          T.dark = async () => { document.body.classList.add('theme-dark'); app.workspace.trigger('css-change'); await T.sleep(100); };
+          /** Fills the new-note dialog (name, template value) and creates the note; waits for it to open. */
+          T.newNote = async (name, template, paper) => {
+            commands['new-ink-note'].callback();
+            const m = modals[modals.length - 1], selects = [...m.contentEl.querySelectorAll('select')];
+            const options = [...selects[1].options].map(o => o.value), papers = [...selects[0].options].map(o => o.textContent);
+            if (paper) { selects[0].value = paper; selects[0].dispatchEvent(new Event('change')); }
+            if (template) { selects[1].value = template; selects[1].dispatchEvent(new Event('change')); }
+            m.contentEl.querySelector('input.nb-ink-name').value = name;
+            m.contentEl.querySelector('button.mod-cta').click();
+            await T.waitFor(() => view.file && view.file.basename === name && view.store && T.pages().length);
+            await T.sleep(200);
+            return { options, papers };
+          };
+          T.dirOf = path => path.includes('/') ? path.slice(0, path.lastIndexOf('/') + 1) : '';
+        }""")
+        # A sticky note through the dialog: 288 x 288, its fill drawn, default ink dark in dark mode.
+        r = ev("""async () => {
+          await T.dark();
+          const { options } = await T.newNote('Sticky', 'sticky-3in');
+          const md = fs.get(view.file.path), note = ink.readNote(md, 'Sticky');
+          const pg = ink.readPage(fs.get(view.store.slots[0].path));
+          await T.pen(0, T.loops(40, 150, 300));
+          await T.sleep(50);
+          const fill = T.pixel(0, 5, 5), inkDark = T.near(0, [0x1f, 0x1f, 0x1f], 30), inkLight = T.near(0, [0xe6, 0xe3, 0xde], 30);
+          view.addPage();
+          await T.sleep(200);
+          await view.save();
+          const added = ink.readPage(fs.get(view.store.slots[1].path));
+          const saved = ink.readPage(fs.get(view.store.slots[0].path));
+          const el = T.pages()[0];
+          return { options, paper: note.paper, tpl: note.template, size: pg.size, kind: pg.template.kind, color: pg.template.color,
+            fill, inkDark, inkLight, ratio: el.offsetWidth / el.offsetHeight, added: [added.size, ink.templateName(added.template)],
+            strokes: saved.strokes.length, file: view.file.path };
+        }""")
+        print('sticky:', r)
+        check('sticky: the dialog offers the sticky note and index card', 'sticky-3in' in r['options'] and 'index-card' in r['options'], r['options'])
+        check('sticky: the note\'s paper is 288x288 and its template sticky-3in', r['paper'] == '288x288' and r['tpl'] == 'sticky-3in', r)
+        check('sticky: the first page is 288 x 288 with the pale yellow fill', r['size'] == {'width': 288, 'height': 288} and r['kind'] == 'fill' and r['color'] == '#fff59d' and abs(r['ratio'] - 1) < 0.01, r)
+        check('sticky: the fill is drawn in dark mode', abs(r['fill'][0] - 0xff) <= 4 and abs(r['fill'][1] - 0xf5) <= 4 and abs(r['fill'][2] - 0x9d) <= 6, r['fill'])
+        check('sticky: default ink is dark on it in dark mode', r['inkDark'] > 100 and r['inkLight'] < 10 and r['strokes'] == 1, r)
+        check('sticky: an added page inherits the size and the fill', r['added'] == [{'width': 288, 'height': 288}, 'sticky-3in'], r['added'])
+        sticky_file = r['file']
+
+        # Copy embed: the page's vault path as a standard markdown embed, on the clipboard.
+        r = ev("""async () => {
+          await T.light();
+          const clip = [], before = notices.length;
+          const orig = Object.getOwnPropertyDescriptor(Navigator.prototype, 'clipboard');
+          Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async t => { clip.push(t); } } });
+          view.scroller.scrollTop = 0;
+          await T.sleep(50);
+          const shown = commands['copy-page-embed'].checkCallback(true);
+          commands['copy-page-embed'].checkCallback(false);
+          await T.sleep(50);
+          const path = view.store.slots[view.currentPageIndex()].path;
+          const ok = notices.slice(before);
+          // A clipboard that throws: the text goes in a notice instead.
+          Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async () => { throw new Error('denied'); } } });
+          const text = await view.copyPageEmbed();
+          delete navigator.clipboard;
+          if (orig) Object.defineProperty(Navigator.prototype, 'clipboard', orig);
+          const img = await T.imageInk(path);
+          return { shown, clip, path, ok, fallback: notices.slice(before + ok.length), text, img };
+        }""")
+        print('copy embed:', r)
+        check('copy embed: offered in an ink view; writes ![](<page path>) to the clipboard with a notice',
+              r['shown'] is True and r['clip'] == [f"![]({r['path']})"] and any('Copied' in n for n in r['ok']), r)
+        check('copy embed: if the clipboard fails, a notice shows the embed', r['text'] == r['clip'][0] and any(r['text'] in n for n in r['fallback']), r)
+        check('copy embed: the page file renders at its own size as an image', r['img']['w'] == 288 and r['img']['h'] == 288 and r['img']['n'] > 100, r['img'])
+
+        # A Letter note with a sticky page added through the chooser saves and reopens.
+        r = ev("""async () => {
+          await T.newNote('Mixed', 'blank', 'letter');
+          view.chooseTemplate('add');
+          const labels = [...modals[modals.length - 1].contentEl.querySelectorAll('.suggestion-item')].map(e => e.textContent);
+          await T.choose('Sticky note 3 × 3 in');
+          await T.pen(1, T.loops(40, 150, 200));
+          await view.save();
+          const path = view.file.path;
+          await app.workspace.getLeaf(false).openFile(app.vault.getFile('Physics.md'));
+          await T.sleep(100);
+          await app.workspace.getLeaf(false).setViewState({ type: 'notebook-ink', state: { file: path }, active: true });
+          await T.waitFor(() => view.store && view.file.path === path && T.pages().length === 2);
+          await T.sleep(200);
+          const pages = view.store.slots.map(s => { const pg = view.store.page(s); return [pg.size, ink.templateName(pg.template), pg.strokes.length]; });
+          const note = ink.readNote(fs.get(path), 'Mixed');
+          return { labels, pages, paper: note.paper, ratios: T.pages().map(e => Math.round(e.offsetWidth / e.offsetHeight * 100) / 100),
+            widths: T.pages().map(e => e.offsetWidth) };
+        }""")
+        print('mixed:', r)
+        check('mixed: the add chooser lists the sized templates and "Custom size…"', 'Sticky note 3 × 3 in' in r['labels'] and r['labels'][-1] == 'Custom size…', r['labels'])
+        check('mixed: a Letter page and a sticky page save and reopen with their sizes, templates and ink',
+              r['paper'] == 'letter' and r['pages'] == [[{'width': 816, 'height': 1056}, 'blank', 0], [{'width': 288, 'height': 288}, 'sticky-3in', 1]], r)
+        check('mixed: each page element has its own shape', r['ratios'] == [round(816 / 1056, 2), 1.0], r)
+
+        # Custom size: from the chooser (100 x 50 mm), rejected out of range, and from the new-note dialog.
+        r = ev("""async () => {
+          view.chooseTemplate('add');
+          await T.choose('Custom size…');
+          const m = modals[modals.length - 1], title = m.titleEl.textContent;
+          const set = (cls, v) => { const i = m.contentEl.querySelector(cls); i.value = v; i.dispatchEvent(new Event('input')); };
+          set('.nb-size-width', '0.5');
+          m.contentEl.querySelector('button.mod-cta').click();
+          const error = m.contentEl.querySelector('.nb-size-error').textContent, stillOpen = modals.includes(m);
+          set('.nb-size-width', '100'); set('.nb-size-height', '50');
+          const unit = m.contentEl.querySelector('select'); unit.value = 'mm'; unit.dispatchEvent(new Event('change'));
+          m.contentEl.querySelector('button.mod-cta').click();
+          await T.sleep(150);
+          const last = view.store.page(view.store.slots[view.store.slots.length - 1]);
+          // The new-note dialog: Paper → Custom size… (3 x 2 in).
+          commands['new-ink-note'].callback();
+          const nm = modals[modals.length - 1], paperSel = nm.contentEl.querySelectorAll('select')[0];
+          paperSel.value = 'custom'; paperSel.dispatchEvent(new Event('change'));
+          const sm = modals[modals.length - 1];
+          const sset = (cls, v) => { const i = sm.contentEl.querySelector(cls); i.value = v; i.dispatchEvent(new Event('input')); };
+          sset('.nb-size-width', '3'); sset('.nb-size-height', '2');
+          sm.contentEl.querySelector('button.mod-cta').click();
+          const paperValue = paperSel.value, paperLabel = paperSel.selectedOptions[0].textContent;
+          nm.contentEl.querySelectorAll('select')[1].value = 'grid-5mm';
+          nm.contentEl.querySelectorAll('select')[1].dispatchEvent(new Event('change'));
+          nm.contentEl.querySelector('input.nb-ink-name').value = 'Card';
+          nm.contentEl.querySelector('button.mod-cta').click();
+          await T.waitFor(() => view.file && view.file.basename === 'Card' && view.store && T.pages().length);
+          await T.sleep(100);
+          const note = ink.readNote(fs.get(view.file.path), 'Card'), pg = view.store.page(view.store.slots[0]);
+          view.addPage();
+          const added = view.store.page(view.store.slots[1]);
+          return { title, error, stillOpen, size: last.size, kind: last.template.kind, paperValue, paperLabel, paper: note.paper,
+            first: [pg.size, ink.templateName(pg.template)], added: added.size };
+        }""")
+        print('custom size:', r)
+        check('custom size: the chooser asks for a size; under 1 in is refused with a message', r['title'] == 'Custom page size' and r['stillOpen'] and 'from 1 to 20 in' in r['error'], r)
+        check('custom size: 100 x 50 mm gives a blank 378 x 189 px page', r['size'] == {'width': 378, 'height': 189} and r['kind'] == 'blank', r)
+        check('custom size: the new-note dialog\'s paper takes a custom size; the note\'s paper and pages have it',
+              r['paperValue'] == '288x192' and r['paperLabel'] == '3 × 2 in' and r['paper'] == '288x192'
+              and r['first'] == [{'width': 288, 'height': 192}, 'grid-5mm'] and r['added'] == {'width': 288, 'height': 192}, r)
+
+        # Add PDF template: page 2 of a vault PDF, saved in the templates folder.
+        r = ev("""async () => {
+          fs.set('Slides/engineering.pdf', new Uint8Array(fakePdf([[612, 792], [595.28, 841.89]])));
+          const before = notices.length;
+          commands['add-pdf-template'].callback();
+          const m = modals[modals.length - 1], placeholder = m.placeholder;
+          [...m.contentEl.querySelectorAll('.suggestion-item')].find(e => e.textContent === 'Slides/engineering.pdf').click();
+          await T.waitFor(() => modals.length && modals[modals.length - 1].titleEl.textContent === 'Add PDF template');
+          const tm = modals[modals.length - 1];
+          const pageInput = tm.contentEl.querySelector('input.nb-tpl-page');
+          pageInput.value = '2'; pageInput.dispatchEvent(new Event('input'));
+          const name = tm.contentEl.querySelector('input.nb-ink-name').value;
+          tm.contentEl.querySelector('button.mod-cta').click();
+          await T.waitFor(() => fs.has('templates/ink/engineering.svg') && p.templates.entries.length);
+          const svg = fs.get('templates/ink/engineering.svg'), pg = ink.readPage(svg);
+          const pdf = fs.get('templates/ink/engineering.pdf'), src = fs.get('Slides/engineering.pdf');
+          return { placeholder, name, size: pg.size, strokes: pg.strokes.length, tpl: [pg.template.kind, pg.template.source, pg.template.page],
+            jpeg: pg.template.image.startsWith('data:image/jpeg;base64,') && pg.template.image.length > 1000,
+            same: pdf.length === src.length && pdf.every((b, i) => b === src[i]), entries: p.templates.entries.map(e => e.name),
+            notices: notices.slice(before), img: await T.imageInk('templates/ink/engineering.svg') };
+        }""")
+        print('pdf template:', {k: r[k] for k in ('placeholder', 'name', 'size', 'tpl', 'entries', 'notices')})
+        check('pdf template: the name defaults to the PDF\'s; files written in the templates folder',
+              r['name'] == 'engineering' and r['same'] and r['strokes'] == 0, r)
+        check('pdf template: an ink page with the PDF page (source, page 2, JPEG) at its size',
+              r['tpl'] == ['pdf', 'engineering.pdf', 2] and r['jpeg'] and r['size'] == {'width': 793.7, 'height': 1122.5}, r)
+        check('pdf template: the registry lists it as pdf:engineering, with a notice', r['entries'] == ['pdf:engineering'] and any('engineering' in n for n in r['notices']), r)
+        check('pdf template: its page file renders the PDF page as an image at its size', r['img']['n'] > 2000 and r['img']['w'] == 794, r['img'])
+
+        # A note started with it: every page gets the PDF page at its size, the PDF copied into the
+        # page folder, and a sharp render at 200%.
+        r = ev("""async () => {
+          const { options } = await T.newNote('Engineering log', 'pdf:engineering');
+          const path = view.file.path, dir = T.dirOf(path), note = ink.readNote(fs.get(path), 'Engineering log');
+          view.addPage();
+          view.insertPageAfter(0);
+          await view.save();
+          await T.sleep(100);
+          const pages = view.store.slots.map(s => { const pg = ink.readPage(fs.get(s.path)); return [pg.size, pg.template.kind, pg.template.source, pg.template.page, pg.template.image.length > 1000]; });
+          const pdf = fs.get(`${dir}Engineering log/engineering.pdf`), src = fs.get('templates/ink/engineering.pdf');
+          const imgs = [];
+          for (const s of view.store.slots) imgs.push((await T.imageInk(s.path)).n);
+          view.scroller.scrollTop = 0;
+          const n = pdfjsStats.renders.length;
+          view.setZoom(2);
+          const c = () => T.pages()[0].querySelector('canvas.nb-ink-bitmap');
+          const sharp = await T.waitFor(() => c() && pdfjsStats.renders.slice(n).some(([pg, w]) => pg === 2 && w === c().width), 4000);
+          view.resetZoom();
+          return { options, paper: note.paper, tpl: note.template, pages, copied: !!pdf && pdf.length === src.length, sharp, imgs,
+            md: fs.get(path).slice(0, 80) };
+        }""")
+        print('pdf template note:', r)
+        check('pdf template note: the dialog offers pdf:engineering after the built-ins', r['options'][-1] == 'pdf:engineering', r['options'])
+        check('pdf template note: the note\'s template is pdf:engineering and its paper the PDF page\'s size',
+              r['tpl'] == 'pdf:engineering' and r['paper'] == '793.7x1122.5', r)
+        check('pdf template note: every page (first, added, inserted) has the PDF page as its background',
+              len(r['pages']) == 3 and all(pg == [{'width': 793.7, 'height': 1122.5}, 'pdf', 'engineering.pdf', 2, True] for pg in r['pages']), r['pages'])
+        check('pdf template note: the PDF is copied into the page folder', r['copied'], r)
+        check('pdf template note: each page file renders its background (GitHub, reading view)', all(n > 2000 for n in r['imgs']), r['imgs'])
+        check('pdf template note: a sharp render of the PDF page at 200%', r['sharp'], r)
+
+        # The chooser lists PDF templates after the built-ins; "Custom size…" only when adding.
+        r = ev("""async () => {
+          await app.workspace.getLeaf(false).setViewState({ type: 'notebook-ink', state: { file: '""" + sticky_file + """' }, active: true });
+          await T.waitFor(() => view.store && view.file.path === '""" + sticky_file + """' && T.pages().length);
+          commands['change-page-template'].checkCallback(false);
+          const labels = [...modals[modals.length - 1].contentEl.querySelectorAll('.suggestion-item')].map(e => e.textContent);
+          await T.choose('engineering (PDF)');
+          await T.sleep(200);
+          await view.save();
+          const pg = ink.readPage(fs.get(view.store.slots[0].path)), dir = T.dirOf(view.file.path);
+          return { labels, tpl: [pg.template.kind, pg.template.page], strokes: pg.strokes.length, copied: fs.has(`${dir}Sticky/engineering.pdf`) };
+        }""")
+        print('chooser:', r)
+        check('chooser: PDF templates are listed after the built-ins; no "Custom size…" when changing a page',
+              len(r['labels']) == 11 and r['labels'][8] == 'Sticky note 3 × 3 in' and r['labels'][10:] == ['engineering (PDF)'], r['labels'])
+        check('chooser: a page changed to the PDF template keeps its ink and gets the PDF copied beside it',
+              r['tpl'] == ['pdf', 2] and r['strokes'] == 1 and r['copied'], r)
+        # ======== end of 23. Sized templates and page embeds (#27), PDF templates (#21) ========
 
         # --- unload removes the patch
         r = ev("""async () => {
