@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import {
   defaultTemplateName, isFavourite, MAX_FAVOURITES, orderFavourites, parseFavourites, renameFavourite, settingsPrefs, toggleFavourite,
 } from '../../src/ink/favourites';
-import { templateItems, pdfCopyName, pdfPages } from '../../src/ink/template-changes';
+import { inchesLabel, templateItems, pdfCopyName, pdfPages, resizeAllMessage, resizedCount, resizeMessage, sizeLabel } from '../../src/ink/template-changes';
 
 const quiet = <T>(fn: () => T): { value: T; warnings: unknown[][] } => {
   const warn = console.warn, warnings: unknown[][] = [];
@@ -78,6 +78,20 @@ test('settings: the favourites host stars, unstars and follows renames and delet
   assert.deepEqual([s.favouriteTemplates, s.template], [['sticky-3in'], 'blank']);
   await new Promise(r => setTimeout(r, 0));
   assert.equal(saves, 4);
+});
+
+test('resize question (#56): sizes in inches, one page or how many of all', () => {
+  assert.equal(sizeLabel({ width: 816, height: 1056 }), 'Letter (8.5 × 11 in)');
+  assert.equal(sizeLabel({ width: 794, height: 1123 }), 'A4 (8.27 × 11.7 in)');
+  assert.equal(sizeLabel({ width: 288, height: 288 }), '3 × 3 in');
+  assert.equal(inchesLabel({ width: 793.7, height: 1122.5 }), '8.27 × 11.69 in');
+  assert.equal(resizeMessage({ width: 816, height: 1056 }, { width: 288, height: 288 }),
+    "This page is Letter (8.5 × 11 in); the template is 3 × 3 in. Resize the page to the template's size? Ink outside the new size stays in the file but won't be visible.");
+  const sizes = [{ width: 816, height: 1056 }, { width: 288, height: 288 }, { width: 816, height: 1056 }];
+  assert.equal(resizedCount(sizes, { width: 288, height: 288 }), 2);
+  assert.match(resizeAllMessage(2, 3, { width: 288, height: 288 }), /^2 of 3 pages are a different size from the template, 3 × 3 in\. Resize them/);
+  assert.match(resizeAllMessage(3, 3, { width: 288, height: 288 }), /^All 3 pages are/);
+  assert.match(resizeAllMessage(1, 1, { width: 288, height: 288 }), /^The page is .* Resize it/);
 });
 
 test('PDF into an open note (#54): one pdf page per PDF page at its size; the copy gets a free name', () => {

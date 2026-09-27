@@ -84,6 +84,12 @@ HELPERS = """() => {
       [...m.contentEl.querySelectorAll('.suggestion-item')].find(e => (e.querySelector('.nb-tpl-label') || e).textContent === label).click();
       await sleep(150);  // the template image loads, then the page is redrawn
     },
+    /** Answers the newest modal's question (#56: resize to the template's size?): its OK button, or Cancel. */
+    async answer(ok = true) {
+      const m = modals[modals.length - 1];
+      m.contentEl.querySelector(ok ? '.nb-confirm-ok' : '.nb-confirm-cancel').click();
+      await sleep(150);
+    },
     /** The template name of each page of the open note. */
     templates: () => view.store.slots.map(s => ink.templateName(view.store.page(s).template)),
     /** Pixels on the live overlays (head and tail) with at least `min` alpha. */
@@ -3660,13 +3666,14 @@ try:
           const ratio = () => Math.round(T.pages()[0].offsetWidth / T.pages()[0].offsetHeight * 1000) / 1000;
           commands['change-page-template'].checkCallback(false);
           await T.choose('engineering (PDF)');
-          await T.sleep(100);
+          await T.answer();  // Resize (#56)
           const after = [size(), kind(), ratio()];
           view.undo();
           await T.sleep(100);
           const undone = [size(), kind(), ratio()];
           view.chooseTemplate('all');
           await T.choose('Sticky note 3 × 3 in');
+          await T.answer();  // Resize (#56)
           const all = [size(), kind()];
           view.undo();
           await view.save();
@@ -3686,7 +3693,8 @@ try:
           commands['change-page-template'].checkCallback(false);
           const labels = [...modals[modals.length - 1].contentEl.querySelectorAll('.suggestion-item')].map(e => (e.querySelector('.nb-tpl-label') || e).textContent);
           await T.choose('engineering (PDF)');
-          await T.sleep(200);
+          await T.answer();  // Resize (#56)
+          await T.sleep(50);
           await view.save();
           const pg = ink.readPage(fs.get(view.store.slots[0].path)), dir = T.dirOf(view.file.path);
           return { labels, tpl: [pg.template.kind, pg.template.page], strokes: pg.strokes.length, copied: fs.has(`${dir}Sticky/engineering.pdf`) };

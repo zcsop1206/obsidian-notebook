@@ -27,8 +27,8 @@ import { SpatialIndex } from './spatial';
 import { PagesPanel } from './pages-panel';
 import { NoteStore, type NoteFiles, type PageSlot, type TemplatesBefore } from './store';
 import { VIEW_TYPE_INK } from './takeover';
-import { NameModal, TemplateChooser, templateItems } from './template-chooser';
-import { pdfCopyName, pdfPages, type RenderedPdfPage } from './template-changes';
+import { confirm, NameModal, TemplateChooser, templateItems } from './template-chooser';
+import { pdfCopyName, pdfPages, resizeAllMessage, resizedCount, resizeMessage, sameSize, type RenderedPdfPage } from './template-changes';
 import { isFavourite } from './favourites';
 import { addImageTemplateFlow, addPdfTemplateFlow } from './pdf-template';
 import { ImageSourceModal, PdfSourceModal, renderPdfPages, stripPdf, type PdfChoice } from './pdf-import';
@@ -1160,15 +1160,53 @@ export class InkView extends FileView {
     return i >= 0 ? i : pageAtY(this.layout, top);
   }
 
-  /** Opens the template chooser to add a page, or to change this page's or every page's template. */
+  /**
+   * Opens the template chooser to add a page, or to change this page's or every page's template.
+   * A change that resizes pages asks first (#56).
+   */
   chooseTemplate(scope: 'add' | 'page' | 'all') {
     if (!this.store) return;
     const placeholder = scope === 'add' ? 'Template of the new page' : scope === 'page' ? 'Template of this page' : 'Template of all pages';
     new TemplateChooser(this.app, placeholder, (template, size, name) => {
       if (scope === 'add') this.addPage(template, size);
-      else if (scope === 'page') this.setPageTemplate(this.currentPageIndex(), template, size);
-      else this.setAllTemplates(template, size, name);
+      else if (scope === 'page') void this.changePageTemplate(this.currentPageIndex(), template, size);
+      else void this.changeAllTemplates(template, size, name);
     }, templateRegistry()?.entries ?? [], scope === 'add').open();
+  }
+
+  /**
+   * Changes page `index`'s template as the chooser does (#56): if the template's size differs
+   * from the page's, asks first ("Resize the page…?") and changes nothing on Cancel. Resolves
+   * whether it changed. One undo step restores template and size.
+   */
+  async changePageTemplate(index: number, template: Template, size?: Size): Promise<boolean> {
+    const store = this.store, pv = this.pages[index];
+    if (!store || !pv) return false;
+    if (size && !sameSize(size, pv.slot.size)) {
+      const ok = await confirm(this.app, { title: 'Resize the page?', text: resizeMessage(pv.slot.size, size), ok: 'Resize', cls: 'nb-resize-confirm' });
+      if (!ok || this.store !== store || !this.pages.includes(pv)) return false;
+    }
+    return this.setPageTemplate(this.pages.indexOf(pv), template, size) !== null;
+  }
+
+  /**
+   * Changes every page's template as the chooser does (#56): if it resizes any page, asks once,
+   * saying how many, and changes nothing on Cancel. `name` is the template's name (a custom
+   * template's, #54) for the note's default. Resolves whether it changed.
+   */
+  async changeAllTemplates(template: Template, size?: Size, name?: string): Promise<boolean> {
+    const store = this.store;
+    if (!store) return false;
+    const sizes = store.slots.filter(s => !s.error).map(s => s.size);
+    const changed = size ? resizedCount(sizes, size) : 0;
+    if (size && changed) {
+      const ok = await confirm(this.app, {
+        title: changed === 1 ? 'Resize a page?' : `Resize ${changed} pages?`, text: resizeAllMessage(changed, sizes.length, size), ok: 'Resize',
+        cls: 'nb-resize-confirm',
+      });
+      if (!ok || this.store !== store) return false;
+    }
+    return this.setAllTemplates(template, size, name) !== null;
   }
 
   /**
@@ -1191,7 +1229,8 @@ export class InkView extends FileView {
 
   /**
    * Changes page `index`'s template, keeping its ink, and redraws it. Returns the template it
-   * had, or null if there's no such page or it can't be read.
+   * had, or null if there's no such page or it can't be read. Doesn't ask before resizing
+   * (changePageTemplate does).
    */
   setPageTemplate(index: number, template: Template, size?: Size): Template | null {
     const pv = this.pages[index];
@@ -1213,7 +1252,7 @@ export class InkView extends FileView {
   /**
    * Changes every page's template and the note's default (`name`, if given, is the default's
    * `template:` name, e.g. a custom template's `tpl:<name>`, #54), and redraws. Returns what it
-   * replaced.
+   * replaced. Doesn't ask (changeAllTemplates does).
    */
   setAllTemplates(template: Template, size?: Size, name?: string): TemplatesBefore | null {
     if (!this.store) return null;

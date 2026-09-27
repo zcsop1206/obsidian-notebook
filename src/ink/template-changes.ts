@@ -1,6 +1,8 @@
-// Pure pieces of choosing and importing templates (#54), unit-tested: the rows of every template
-// list (favourites first), and the pages a PDF imported into an open note becomes.
-import type { Size } from '../format/page';
+// Pure pieces of choosing, changing and importing templates (#54, #56), unit-tested: the rows of
+// every template list (favourites first), page sizes as the owner reads them, the question asked
+// before a template change resizes pages (#56), and the pages a PDF imported into an open note
+// becomes (#54).
+import { A4, LETTER, type Size } from '../format/page';
 import { BUILT_IN_TEMPLATES, type PdfTemplate, type Template } from '../format/template';
 import { orderFavourites } from './favourites';
 import type { TemplateEntry } from './templates';
@@ -36,6 +38,37 @@ export function templateItems(entries: readonly TemplateEntry[], custom: boolean
   return ordered;
 }
 
+
+export const sameSize = (a: Size, b: Size): boolean => a.width === b.width && a.height === b.height;
+
+/** A length in px as inches, to 0.01 in (96 px per inch). */
+const inches = (px: number) => String(Math.round(px / 96 * 100) / 100);
+
+/** A size in inches: `3 × 3 in`. */
+export const inchesLabel = (size: Size): string => `${inches(size.width)} × ${inches(size.height)} in`;
+
+/** A size as the owner knows it: `Letter (8.5 × 11 in)`, `A4 (8.27 × 11.69 in)` or `3 × 3 in`. */
+export function sizeLabel(size: Size): string {
+  const name = sameSize(size, LETTER) ? 'Letter' : sameSize(size, A4) ? 'A4' : null;
+  return name ? `${name} (${inchesLabel(size)})` : inchesLabel(size);
+}
+
+const INK_OUTSIDE = "Ink outside the new size stays in the file but won't be visible.";
+
+/** The question before one page is resized to a template's size (#56). */
+export function resizeMessage(page: Size, template: Size): string {
+  return `This page is ${sizeLabel(page)}; the template is ${sizeLabel(template)}. Resize the page to the template's size? ${INK_OUTSIDE}`;
+}
+
+/** The pages (of `sizes`) whose size isn't `size`. */
+export const resizedCount = (sizes: readonly Size[], size: Size): number => sizes.filter(s => !sameSize(s, size)).length;
+
+/** The question before a template change of every page resizes `changed` of `total` pages (#56). */
+export function resizeAllMessage(changed: number, total: number, template: Size): string {
+  const which = changed === total ? (total === 1 ? 'The page' : `All ${total} pages`) : `${changed} of ${total} pages`;
+  const are = changed === 1 ? 'is' : 'are';
+  return `${which} ${are} a different size from the template, ${sizeLabel(template)}. Resize ${changed === 1 ? 'it' : 'them'} to the template's size? ${INK_OUTSIDE}`;
+}
 
 /** A rendered PDF page: its size in px and its image (a JPEG data URL, or '' if it didn't render). */
 export interface RenderedPdfPage {
