@@ -1,5 +1,5 @@
 // The ink view: an ink note's pages stacked like paper in a native scrolling container, with
-// the pen (input.ts) and its provisional controls, finger panning and zoom (navigate.ts),
+// the pen (input.ts) and the toolbar (toolbar.ts), finger panning and zoom (navigate.ts),
 // autosave and reloading after changes on disk. The note's data lives in NoteStore; page
 // bitmaps in PageBitmap; this file ties them to Obsidian and the DOM.
 import { FileView, Notice, TAbstractFile, TFile, TFolder, type App, type WorkspaceLeaf } from 'obsidian';
@@ -12,12 +12,13 @@ import type { Stroke } from '../format/page';
 import { listenForUndoTaps } from './gestures';
 import { History } from './history';
 import { blockFingerTouch, blockStylusTouch, eraseStatsLines, newPenStats, PenInput, penStatsLines, type EraseTally, type NewStroke, type PageTarget, type PenStats, type StrokeStyle } from './input';
-import { COLOR_PRESETS, DEFAULT_PEN, nextColor, nextSize, SIZE_PRESETS, SIZE_STEP, withPen, type PenSettings } from './pen';
-import {
-  DEFAULT_HIGHLIGHTER, HIGHLIGHTER_COLORS, HIGHLIGHTER_SIZES, nextHighlighterColor, nextHighlighterSize, withHighlighter,
-  type HighlighterSettings, type ToolKind,
-} from './pen';
-import { DEFAULT_ERASER, ERASER_SIZES, nextEraserSize, withEraser, type EraserMode, type EraserSettings } from './pen';
+import { DEFAULT_PEN, nextColor, nextSize, withPen, type PenSettings } from './pen';
+import { DEFAULT_HIGHLIGHTER, nextHighlighterColor, nextHighlighterSize, withHighlighter, type HighlighterSettings, type ToolKind } from './pen';
+import { DEFAULT_ERASER, nextEraserSize, withEraser, type EraserMode, type EraserSettings } from './pen';
+import { DEFAULT_PRESETS, MAX_PRESETS, parseToolState, presetOf, type PenPreset } from './pen';
+import { A4, LETTER } from '../format/page';
+import type { NotebookSettings } from '../settings';
+import { Toolbar } from './toolbar';
 import { splitStroke } from './split';
 import { layoutPages, MARGIN, mostVisiblePage, pageAtY, pagesInBand, type Layout } from './layout';
 import { anchorAt, clampZoom, navStatsLines, Navigator, newNavStats, scrollToKeep, zoomStep, type NavStats } from './navigate';
@@ -30,6 +31,8 @@ import { TemplateChooser } from './template-chooser';
 
 /** How long the view waits after a resize before redrawing bitmaps at the new size. */
 const RESIZE_DELAY = 150;
+/** Wait after a tool change before saving the settings, in ms. */
+const SAVE_TOOLS_DELAY = 400;
 /** Time per frame for computing the outlines of a page about to be drawn, in ms. */
 const PUMP_BUDGET = 4;
 /** Pen strokes the pump draws into a bitmap per frame. */
@@ -51,6 +54,12 @@ export interface InkStats {
   pen: PenStats;
   /** Finger navigation: zoom and the last gesture's frame times (navigate.ts). */
   nav: NavStats;
+}
+
+/** Where the view keeps the tools and favourite presets (#10): the plugin and its settings. */
+export interface ToolSettingsHost {
+  settings: NotebookSettings;
+  saveSettings(): Promise<void>;
 }
 
 interface PageView {
@@ -133,8 +142,9 @@ export class InkView extends FileView {
   private footer!: HTMLElement;
   private messageEl!: HTMLElement;
   private input!: PenInput;
-  /** The provisional pen strip (#10 replaces it with the toolbar). */
-  private strip!: HTMLElement;
+  /** The toolbar (#10): tools, favourite presets, undo and redo, pages. */
+  toolbar: Toolbar | null = null;
+  private saveToolsTimer = 0;
   private statsEl!: HTMLElement;
   private pages: PageView[] = [];
   private layout: Layout | null = null;
@@ -149,7 +159,7 @@ export class InkView extends FileView {
   private width = 0;
   private loads = 0;
 
-  constructor(leaf: WorkspaceLeaf) {
+  constructor(leaf: WorkspaceLeaf, private settingsHost: ToolSettingsHost | null = null) {
     super(leaf);
   }
 
@@ -173,9 +183,8 @@ export class InkView extends FileView {
     const root = this.contentEl;
     root.empty();
     root.addClass('nb-ink-view');
-    this.strip = root.createDiv({ cls: 'nb-ink-strip' });
-    this.buildStrip();
-    this.buildHistoryGroup();
+    this.restoreTools();
+    this.buildToolbar(root);
     this.buildPagesPanel(root);
     this.scroller = root.createDiv({ cls: 'nb-ink-scroll' });
     this.sizer = this.scroller.createDiv({ cls: 'nb-ink-sizer' });
@@ -228,9 +237,6 @@ export class InkView extends FileView {
     this.resizeObserver.observe(this.scroller);
 
     this.addAction('file-text', 'Open as markdown', () => void this.openAsMarkdown());
-    // Until #10's toolbar: also reachable from the view header on the iPad.
-    this.addAction('layers', 'Change template of all pages', () => this.chooseTemplate('all'));
-    this.addAction('layout-template', 'Change template of this page', () => this.chooseTemplate('page'));
 
     // Save at once when the app goes to the background or the page is torn down: on the iPad
     // that's the last chance before iOS may kill Obsidian.
@@ -266,6 +272,8 @@ export class InkView extends FileView {
     this.input.destroy();
     this.templates.clear();
     this.pagesPanel?.destroy();
+    this.toolbar?.destroy();
+    if (this.saveToolsTimer) this.saveTools();
     releaseScratch();
     await super.onClose();
   }
@@ -311,6 +319,7 @@ export class InkView extends FileView {
     this.relayout();
     this.scroller.scrollTop = this.scroller.scrollLeft = 0;
     this.update();
+    this.toolbar?.render(); // the page buttons need a note
     this.stats.openMs = performance.now() - t0;
   }
 
@@ -349,6 +358,8 @@ export class InkView extends FileView {
     store.close();
     this.clearPages();
     this.layout = null;
+    this.toolbar?.closePicker();
+    this.toolbar?.render();
     await saved;
   }
 
@@ -625,7 +636,7 @@ export class InkView extends FileView {
     this.recordStrokes('Add stroke', pv.slot.id, [{ index: page.strokes.length - 1, stroke }], true);
   }
 
-  // ---- pen settings and the provisional pen strip
+  // ---- pen settings
 
   /**
    * Changes the pen for the next stroke. Sizes are clamped to 0.5-16 px in 0.5 px steps; an
@@ -633,7 +644,7 @@ export class InkView extends FileView {
    */
   setPen(change: Partial<PenSettings>) {
     this.pen = withPen(this.pen, change);
-    this.renderStrip();
+    this.toolsChanged();
     this.renderStats();
   }
 
@@ -643,57 +654,6 @@ export class InkView extends FileView {
 
   nextSize() {
     this.setPen({ size: nextSize(this.pen.size) });
-  }
-
-  /**
-   * PROVISIONAL (#10 replaces it with the toolbar): one small row with the nib toggle, the
-   * eight colour swatches, the three sizes and a size stepper.
-   */
-  private buildStrip() {
-    const strip = this.strip;
-    strip.setAttribute('aria-label', 'Pen (provisional controls)');
-    const button = (parent: HTMLElement, cls: string, text: string, label: string, fn: () => void) => {
-      const b = parent.createEl('button', { cls: `nb-ink-control ${cls}`, text, attr: { 'aria-label': label, type: 'button' } });
-      b.addEventListener('click', fn);
-      return b;
-    };
-    const group = (cls: string) => strip.createDiv({ cls: `nb-ink-control nb-ink-group ${cls}` });
-    const nibs = group('nb-ink-nibs');
-    button(nibs, 'nb-ink-nib', 'Uniform', 'Uniform pen', () => this.setPen({ nib: 'uniform' })).dataset.nib = 'uniform';
-    button(nibs, 'nb-ink-nib', 'Pressure', 'Pressure pen', () => this.setPen({ nib: 'pressure' })).dataset.nib = 'pressure';
-    const colors = group('nb-ink-colors');
-    for (const { color, name } of COLOR_PRESETS) {
-      const b = button(colors, 'nb-ink-swatch', '', name, () => this.setPen({ color }));
-      b.dataset.color = color;
-      if (color === DEFAULT_PEN.color) b.addClass('is-default-ink');
-      else b.style.backgroundColor = color;
-    }
-    const sizes = group('nb-ink-sizes');
-    for (const size of SIZE_PRESETS) button(sizes, 'nb-ink-size', String(size), `Size ${size} px`, () => this.setPen({ size })).dataset.size = String(size);
-    const stepper = group('nb-ink-stepper');
-    button(stepper, 'nb-ink-step', '−', 'Thinner', () => this.setPen({ size: this.pen.size - SIZE_STEP })).dataset.step = '-1';
-    stepper.createSpan({ cls: 'nb-ink-control nb-ink-size-value' });
-    button(stepper, 'nb-ink-step', '+', 'Thicker', () => this.setPen({ size: this.pen.size + SIZE_STEP })).dataset.step = '1';
-    strip.createSpan({ cls: 'nb-ink-control nb-ink-provisional', text: 'provisional' });
-    this.buildToolGroups(button);
-    this.buildEraserStrip(button);
-    this.renderStrip();
-  }
-
-  private renderStrip() {
-    if (!this.strip) return;
-    const pen = this.pen;
-    const mark = (sel: string, on: (el: HTMLElement) => boolean) => this.strip.querySelectorAll<HTMLElement>(sel).forEach(el => {
-      const active = on(el);
-      el.toggleClass('is-active', active);
-      el.setAttribute('aria-pressed', String(active));
-    });
-    mark('.nb-ink-nib', el => el.dataset.nib === pen.nib);
-    mark('.nb-ink-swatch', el => el.dataset.color === pen.color);
-    mark('.nb-ink-size', el => Number(el.dataset.size) === pen.size);
-    this.strip.querySelector<HTMLElement>('.nb-ink-size-value')?.setText(`${pen.size} px`);
-    this.renderToolGroups();
-    this.renderEraserStrip();
   }
 
   // ---- tools and the highlighter (#6)
@@ -716,7 +676,7 @@ export class InkView extends FileView {
    */
   setHighlighter(change: Partial<HighlighterSettings>) {
     this.highlighter = withHighlighter(this.highlighter, change);
-    this.renderStrip();
+    this.toolsChanged();
   }
 
   nextHighlighterColor() {
@@ -727,49 +687,12 @@ export class InkView extends FileView {
     this.setHighlighter({ size: nextHighlighterSize(this.highlighter.size) });
   }
 
-  /**
-   * PROVISIONAL (#10): the tool group (first in the strip) and the highlighter's group of five
-   * swatches and two sizes (before the "provisional" label), shown while the highlighter is in use.
-   */
-  private buildToolGroups(button: (parent: HTMLElement, cls: string, text: string, label: string, fn: () => void) => HTMLElement) {
-    const strip = this.strip;
-    const tools = strip.createDiv({ cls: 'nb-ink-control nb-ink-group nb-ink-tools' });
-    strip.prepend(tools);
-    button(tools, 'nb-ink-tool', 'Pen', 'Pen', () => this.setTool('pen')).dataset.tool = 'pen';
-    button(tools, 'nb-ink-tool', 'Highlighter', 'Highlighter', () => this.setTool('highlighter')).dataset.tool = 'highlighter';
-    const hl = strip.createDiv({ cls: 'nb-ink-control nb-ink-group nb-ink-highlighter' });
-    strip.insertBefore(hl, strip.querySelector('.nb-ink-provisional'));
-    for (const { color, name } of HIGHLIGHTER_COLORS) {
-      const b = button(hl, 'nb-ink-hl-swatch', '', `${name} highlighter`, () => this.setHighlighter({ color }));
-      b.dataset.color = color;
-      b.style.backgroundColor = color;
-    }
-    for (const size of HIGHLIGHTER_SIZES) {
-      button(hl, 'nb-ink-hl-size', String(size), `Highlighter size ${size} px`, () => this.setHighlighter({ size })).dataset.size = String(size);
-    }
-  }
-
-  private renderToolGroups() {
-    const strip = this.strip, { pen, highlighter } = this;
-    const mark = (sel: string, on: (el: HTMLElement) => boolean) => strip.querySelectorAll<HTMLElement>(sel).forEach(el => {
-      const active = on(el);
-      el.toggleClass('is-active', active);
-      el.setAttribute('aria-pressed', String(active));
-    });
-    mark('.nb-ink-tool', el => el.dataset.tool === pen.tool);
-    mark('.nb-ink-hl-swatch', el => el.dataset.color === highlighter.color);
-    mark('.nb-ink-hl-size', el => Number(el.dataset.size) === highlighter.size);
-    const show = (sel: string, on: boolean) => strip.querySelectorAll<HTMLElement>(sel).forEach(el => (on ? el.show() : el.hide()));
-    show('.nb-ink-nibs, .nb-ink-colors, .nb-ink-sizes, .nb-ink-stepper', pen.tool === 'pen');
-    show('.nb-ink-highlighter', pen.tool === 'highlighter');
-  }
-
   // ---- the eraser (#7)
 
   /** Changes the eraser's size (snapped to one of ERASER_SIZES) or mode; an unknown mode throws. */
   setEraser(change: Partial<EraserSettings>) {
     this.eraser = withEraser(this.eraser, change);
-    this.renderStrip();
+    this.toolsChanged();
   }
 
   nextEraserSize() {
@@ -874,38 +797,6 @@ export class InkView extends FileView {
 
   /** Reused for the ids each eraser frame hits. */
   private eraseHits: string[] = [];
-
-  /**
-   * PROVISIONAL (#10): the Eraser button, third in the tool group, and the eraser's two sizes
-   * and its two modes, Partial and Whole strokes (before the "provisional" label), shown while
-   * the eraser is in use.
-   */
-  private buildEraserStrip(button: (parent: HTMLElement, cls: string, text: string, label: string, fn: () => void) => HTMLElement) {
-    const strip = this.strip;
-    const tools = strip.querySelector<HTMLElement>('.nb-ink-tools');
-    if (tools) button(tools, 'nb-ink-tool nb-ink-eraser', 'Eraser', 'Eraser', () => this.setTool('eraser')).dataset.tool = 'eraser';
-    const sizes = strip.createDiv({ cls: 'nb-ink-control nb-ink-group nb-ink-eraser-sizes' });
-    strip.insertBefore(sizes, strip.querySelector('.nb-ink-provisional'));
-    ERASER_SIZES.forEach((size, i) => {
-      button(sizes, 'nb-ink-eraser-size', i ? 'Large' : 'Small', `Eraser size ${size} px`, () => this.setEraser({ size })).dataset.eraserSize = String(size);
-    });
-    const modes: [EraserMode, string, string][] = [['partial', 'Partial', 'Erase only the part under the eraser'], ['stroke', 'Whole strokes', 'Erase whole strokes']];
-    for (const [mode, text, label] of modes) {
-      button(sizes, 'nb-ink-eraser-mode', text, label, () => this.setEraser({ mode })).dataset.eraserMode = mode;
-    }
-  }
-
-  private renderEraserStrip() {
-    const sizes = this.strip.querySelector<HTMLElement>('.nb-ink-eraser-sizes');
-    if (!sizes) return;
-    if (this.pen.tool === 'eraser') sizes.show();
-    else sizes.hide();
-    sizes.querySelectorAll<HTMLElement>('.nb-ink-eraser-size, .nb-ink-eraser-mode').forEach(el => {
-      const active = el.dataset.eraserMode ? el.dataset.eraserMode === this.eraser.mode : Number(el.dataset.eraserSize) === this.eraser.size;
-      el.toggleClass('is-active', active);
-      el.setAttribute('aria-pressed', String(active));
-    });
-  }
 
   // ---- zoom (#9)
 
@@ -1287,28 +1178,8 @@ export class InkView extends FileView {
     else this.undo();
   }
 
-  /** The Undo and Redo buttons, in their own group of the pen strip. */
-  private buildHistoryGroup() {
-    const strip = this.strip;
-    const group = strip.createDiv({ cls: 'nb-ink-control nb-ink-group nb-ink-history' });
-    strip.insertBefore(group, strip.querySelector('.nb-ink-provisional'));
-    const button = (what: 'undo' | 'redo', text: string, fn: () => boolean) => {
-      const b = group.createEl('button', { cls: `nb-ink-control nb-ink-${what}`, text, attr: { 'aria-label': text, type: 'button' } });
-      b.addEventListener('click', () => void fn());
-    };
-    button('undo', 'Undo', () => this.undo());
-    button('redo', 'Redo', () => this.redo());
-    this.renderHistory();
-  }
-
   private renderHistory() {
-    if (!this.strip) return;
-    const set = (sel: string, on: boolean) => {
-      const b = this.strip.querySelector<HTMLButtonElement>(sel);
-      if (b) b.disabled = !on;
-    };
-    set('.nb-ink-undo', this.history.canUndo);
-    set('.nb-ink-redo', this.history.canRedo);
+    this.toolbar?.render();
   }
 
   // ---- page management (#17)
@@ -1328,12 +1199,12 @@ export class InkView extends FileView {
   togglePagesPanel(open = !this.pagesPanelOpen) {
     const panel = this.pagesPanel;
     if (!panel) return;
-    // Below the strip; the pages area narrows beside it (relaid out through the ResizeObserver).
-    panel.el.style.top = `${this.strip.offsetTop + this.strip.offsetHeight}px`;
+    // Below the toolbar; the pages area narrows beside it (relaid out through the ResizeObserver).
+    const bar = this.toolbar?.el;
+    panel.el.style.top = bar ? `${bar.offsetTop + bar.offsetHeight}px` : '0';
     this.contentEl.toggleClass('nb-pages-open', open);
     panel.setOpen(open);
-    this.strip.querySelector('.nb-ink-pages-toggle')?.toggleClass('is-active', open);
-    this.strip.querySelector('.nb-ink-pages-toggle')?.setAttribute('aria-pressed', String(open));
+    this.toolbar?.render();
   }
 
   /** The panel's stats (thumbnails drawn, frame times), for tests. */
@@ -1361,12 +1232,6 @@ export class InkView extends FileView {
       remove: i => this.deletePage(i),
       move: (from, to) => this.movePage(from, to),
     });
-    // PROVISIONAL (#10): one button in the strip, before the "provisional" label.
-    const b = this.strip.createEl('button', {
-      cls: 'nb-ink-control nb-ink-pages-toggle', text: 'Pages', attr: { 'aria-label': 'Toggle pages panel', 'aria-pressed': 'false', type: 'button' },
-    });
-    this.strip.insertBefore(b, this.strip.querySelector('.nb-ink-provisional'));
-    b.addEventListener('click', () => this.togglePagesPanel());
   }
 
   /** Scrolls so page `index` is at the top of the view. */
@@ -1489,5 +1354,108 @@ export class InkView extends FileView {
     for (const pv of this.pages) this.pagesEl.insertBefore(pv.el, this.footer);
     this.relayout();
     this.update();
+  }
+
+  // ---- the toolbar (#10)
+  // The toolbar (toolbar.ts) and its picker (picker.ts) talk to the view through a host. The
+  // tool in use, each tool's settings and the favourite presets live in the plugin settings:
+  // restored when the view opens, saved SAVE_TOOLS_DELAY ms after the last change.
+
+  private buildToolbar(root: HTMLElement) {
+    this.toolbar = new Toolbar(root, {
+      pen: () => this.pen,
+      highlighter: () => this.highlighter,
+      eraser: () => this.eraser,
+      setTool: tool => this.setTool(tool),
+      setPen: change => this.setPen(change),
+      setHighlighter: change => this.setHighlighter(change),
+      setEraser: change => this.setEraser(change),
+      presets: () => this.presets,
+      applyPreset: i => this.applyPreset(i),
+      savePreset: i => this.savePreset(i),
+      canUndo: () => this.history.canUndo,
+      canRedo: () => this.history.canRedo,
+      undo: () => void this.undo(),
+      redo: () => void this.redo(),
+      hasNote: () => !!this.store,
+      addPage: () => this.addPage(),
+      chooseTemplate: scope => this.chooseTemplate(scope),
+      paperLabel: () => this.paperLabel(),
+      pagesOpen: () => this.pagesPanelOpen,
+      togglePages: () => this.togglePagesPanel(),
+      theme: () => this.theme,
+    });
+  }
+
+  /** The favourite presets: MAX_PRESETS slots, null for an empty one. */
+  get presets(): readonly (PenPreset | null)[] {
+    const saved = this.settingsHost?.settings.presets ?? this.localPresets;
+    return Array.from({ length: MAX_PRESETS }, (_, i) => saved[i] ?? null);
+  }
+
+  /** The presets when the view has no settings host (never in the plugin). */
+  private localPresets: (PenPreset | null)[] = DEFAULT_PRESETS.map(p => ({ ...p }));
+
+  /** Switches to preset `index`'s tool with its colour, size and nib. */
+  applyPreset(index: number) {
+    const p = this.presets[index];
+    if (!p) return;
+    if (p.tool === 'highlighter') {
+      this.highlighter = withHighlighter(this.highlighter, { color: p.color, size: p.size });
+      this.setPen({ tool: 'highlighter' });
+    } else this.setPen({ tool: 'pen', color: p.color, size: p.size, nib: p.nib ?? 'uniform' });
+  }
+
+  /** Saves the pen or highlighter in use as preset `index`; returns false for the eraser or a bad slot. */
+  savePreset(index: number): boolean {
+    const preset = presetOf(this.pen, this.highlighter);
+    if (!preset || index < 0 || index >= MAX_PRESETS) return false;
+    const list = [...this.presets];
+    list[index] = preset;
+    if (this.settingsHost) this.settingsHost.settings.presets = list;
+    else this.localPresets = list;
+    this.toolsChanged();
+    return true;
+  }
+
+  /** Opens the picker of the tool in use under its toolbar button. */
+  openPicker() {
+    this.toolbar?.openPicker();
+  }
+
+  /** The current page's paper for the page settings menu. */
+  private paperLabel(): string | null {
+    const pv = this.pages[Math.max(0, this.currentPageIndex())];
+    if (!pv) return null;
+    const { width, height } = pv.slot.size;
+    const is = (s: { width: number; height: number }) => s.width === width && s.height === height;
+    if (is(LETTER)) return 'Letter, 8.5 × 11 in';
+    if (is(A4)) return 'A4, 210 × 297 mm';
+    return `${width} × ${height} px`;
+  }
+
+  private restoreTools() {
+    const saved = this.settingsHost?.settings.tools;
+    if (!saved) return;
+    // Parsed again: the settings object may have been changed since it was read.
+    const t = parseToolState(JSON.parse(JSON.stringify(saved)));
+    this.pen = t.pen;
+    this.highlighter = t.highlighter;
+    this.eraser = t.eraser;
+  }
+
+  /** A tool, its settings or a preset changed: redraw the toolbar and save soon. */
+  private toolsChanged() {
+    this.toolbar?.render();
+    if (!this.settingsHost) return;
+    this.settingsHost.settings.tools = { pen: { ...this.pen }, highlighter: { ...this.highlighter }, eraser: { ...this.eraser } };
+    window.clearTimeout(this.saveToolsTimer);
+    this.saveToolsTimer = window.setTimeout(() => this.saveTools(), SAVE_TOOLS_DELAY);
+  }
+
+  private saveTools() {
+    window.clearTimeout(this.saveToolsTimer);
+    this.saveToolsTimer = 0;
+    this.settingsHost?.saveSettings().catch(e => console.error('[notebook]', 'saving tool settings', e));
   }
 }
