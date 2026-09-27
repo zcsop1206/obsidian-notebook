@@ -2,8 +2,9 @@
 // finished strokes: paper colour, the template layer, highlighter strokes composited at 40%,
 // then pen strokes, the same layers and colours as the page's SVG. A new stroke is drawn onto
 // the existing bitmap; the whole page is redrawn only on load, resize, theme change or when
-// strokes are removed.
-import { DEFAULT_INK, type Page, type Size, type Stroke } from '../format/page';
+// strokes are removed. Images placed on the page (#12) are drawn over the template, under the
+// highlighter layer, from decoded <img>s cached per image (ObjectImages).
+import { DEFAULT_INK, type Page, type PageImage, type Size, type Stroke } from '../format/page';
 import { strokePath } from '../format/outline';
 import { fixedPaper, renderTemplate, type PdfTemplate, type Template } from '../format/template';
 
@@ -90,6 +91,7 @@ export class TemplateImages {
    */
   get(template: Template, size: Size, width: number, height: number, theme: Theme, onReady: () => void): HTMLImageElement | null {
     if (template.kind === 'pdf') return this.pdf.get(template, size, width, height, onReady);
+    if (template.kind === 'image') return template.image ? objectImages.get(template.image, onReady) : null; // #12: the image itself
     const items = renderTemplate(template, size);
     if (!items.length) return null;
     const key = `${JSON.stringify(template)} ${size.width}x${size.height} ${width}x${height} ${theme.line}`;
@@ -245,6 +247,69 @@ function touch<V>(cache: Map<string, V>, key: string): V | undefined {
   return v;
 }
 
+// ---- images on pages (#12)
+
+/**
+ * Decoded images for the objects layer (and image pages), keyed by their data, least recently
+ * used first out. Decoding happens off the pen's path: `get` returns null until the image is
+ * ready and calls `onReady` then (the page is drawn with a placeholder meanwhile).
+ */
+export class ObjectImages {
+  static MAX = 24;
+  private cache = new Map<string, { img: HTMLImageElement; ready: boolean; failed: boolean; waiting: (() => void)[] }>();
+  /** Images decoded, for tests. */
+  decoded = 0;
+
+  get(data: string, onReady?: () => void): HTMLImageElement | null {
+    if (!data) return null;
+    const key = `${data.length} ${data.slice(0, 40)} ${data.slice(-40)}`;
+    let e = touch(this.cache, key);
+    if (!e) {
+      const img = new Image();
+      const entry: { img: HTMLImageElement; ready: boolean; failed: boolean; waiting: (() => void)[] } = e = { img, ready: false, failed: false, waiting: [] };
+      img.onload = () => {
+        entry.ready = true;
+        this.decoded++;
+        entry.waiting.splice(0).forEach(f => f());
+      };
+      img.onerror = () => {
+        console.error('[notebook] image failed to load');
+        entry.failed = true;
+        entry.waiting.length = 0;
+      };
+      img.decoding = 'async';
+      img.src = data;
+      this.cache.set(key, entry);
+      while (this.cache.size > ObjectImages.MAX) {
+        const [k, old] = this.cache.entries().next().value!;
+        this.cache.delete(k);
+        old.waiting.length = 0;
+        releaseImage(old.img);
+      }
+    }
+    if (e.ready) return e.img;
+    if (onReady && !e.failed && !e.waiting.includes(onReady)) e.waiting.push(onReady);
+    return null;
+  }
+}
+
+/** The one cache of decoded page images. */
+export const objectImages = new ObjectImages();
+
+/** Draws page images (page px transform set) under `skip`: each decoded one, or a placeholder box. */
+export function drawImages(ctx: CanvasRenderingContext2D, images: readonly PageImage[] | undefined, skip?: ReadonlySet<string> | null, onReady?: () => void) {
+  if (!images) return;
+  for (const im of images) {
+    if (skip?.has(im.id)) continue;
+    const img = objectImages.get(im.data, onReady);
+    if (img) ctx.drawImage(img, im.x, im.y, im.width, im.height);
+    else {
+      ctx.fillStyle = 'rgba(128, 128, 128, 0.25)';
+      ctx.fillRect(im.x, im.y, im.width, im.height);
+    }
+  }
+}
+
 /** The shared offscreen canvas for compositing highlighter strokes. */
 let scratch: HTMLCanvasElement | null = null;
 
@@ -288,8 +353,8 @@ export class PageBitmap {
    * Draws the whole page. `template` is the rasterised template layer, if any. Strokes whose id
    * is in `skip` are left out (the lasso's selection while it's dragged, #11).
    */
-  render(page: Page, theme: Theme, template: CanvasImageSource | null, skip?: ReadonlySet<string> | null) {
-    this.renderBase(page, theme, template, skip);
+  render(page: Page, theme: Theme, template: CanvasImageSource | null, skip?: ReadonlySet<string> | null, onImage?: () => void) {
+    this.renderBase(page, theme, template, skip, onImage);
     this.renderPen(page, theme, 0, Infinity, skip);
   }
 
@@ -297,7 +362,7 @@ export class PageBitmap {
    * Draws the page without its pen strokes: paper, template and highlighter layer. With
    * renderPen, a page can be drawn over several frames (#9), each rasterising only part of it.
    */
-  renderBase(page: Page, theme: Theme, template: CanvasImageSource | null, skip?: ReadonlySet<string> | null) {
+  renderBase(page: Page, theme: Theme, template: CanvasImageSource | null, skip?: ReadonlySet<string> | null, onImage?: () => void) {
     theme = pageTheme(page, theme);
     const { ctx, canvas } = this;
     const w = canvas.width, h = canvas.height;
@@ -306,6 +371,12 @@ export class PageBitmap {
     ctx.fillStyle = theme.paper;
     ctx.fillRect(0, 0, w, h);
     if (template) ctx.drawImage(template, 0, 0, w, h);
+    if (page.images?.length) {
+      // The objects layer (#12); `onImage` redraws once an image not yet decoded is.
+      this.pageTransform(ctx, page.size);
+      drawImages(ctx, page.images, skip, onImage);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+    }
     // Highlighters at full opacity on their own canvas, then composited once at 40%, so
     // crossing highlighter strokes don't darken (as in the SVG).
     const highlights = page.strokes.filter(s => s.tool === 'highlighter' && !skip?.has(s.id));

@@ -1,6 +1,7 @@
 // The toolbar's popover (#10): the picker of the tool in use (pen: nib, colours, custom colour,
 // size in 0.5 px steps, a live preview and "Save as favourite"; highlighter: the same without
-// the nib; eraser: sizes and mode; lasso, #11: a hint and Paste) and the page settings menu. A plain positioned div inside the
+// the nib; eraser: sizes and mode; lasso, #11: a hint and Paste) and the page settings menu
+// (with, #12, inserting and pasting images). A plain positioned div inside the
 // ink view, not a Modal, so the page stays visible; closed by a tap elsewhere (starting to
 // write included), Escape, or tapping its button again. Choosing an option leaves it open so
 // that colour, nib and size can all be set in one visit.
@@ -29,6 +30,9 @@ export interface PickerHost {
   /** Whether strokes were copied (#11), and pasting them into the current page. */
   canPaste(): boolean;
   paste(): void;
+  /** Images (#12): pick one for the current page, or (asPage) a page of its own; paste one from the clipboard. */
+  insertImage?(asPage: boolean): void;
+  pasteImage?(): void;
 }
 
 /** Preview canvas size in CSS px. */
@@ -196,7 +200,7 @@ export class Picker {
 
   private buildLasso() {
     this.el.createDiv({ cls: 'nb-ink-control nb-ink-lasso-hint',
-      text: 'Draw a loop around strokes to select them. Drag the selection to move it, its corner to resize it.' });
+      text: 'Draw a loop around strokes to select them, or tap an image. Drag the selection to move it, its corner to resize it.' });
     const b = this.option(this.el, 'nb-ink-menu-item nb-ink-lasso-paste', 'Paste', 'Paste strokes', () => {
       this.close();
       this.host.paste();
@@ -215,6 +219,11 @@ export class Picker {
     item('nb-ink-menu-page-template', 'Template of this page…', () => h.chooseTemplate('page'));
     item('nb-ink-menu-all-templates', 'Template of all pages…', () => h.chooseTemplate('all'));
     item('nb-ink-menu-add-with', 'Add page with template…', () => h.chooseTemplate('add'));
+    if (h.insertImage) {
+      item('nb-ink-menu-insert-image', 'Insert image…', () => h.insertImage!(false));
+      item('nb-ink-menu-insert-image-page', 'Insert image as page…', () => h.insertImage!(true));
+    }
+    if (h.pasteImage) item('nb-ink-menu-paste-image', 'Paste image', () => h.pasteImage!());
     const paper = h.paperLabel();
     this.el.createDiv({ cls: 'nb-ink-control nb-ink-paper', text: `Paper size: ${paper ?? 'unknown'}` });
   }

@@ -34,6 +34,14 @@ import type { Point } from '../format/page';
 import type { SelectionHit } from './input';
 import { templateRegistry } from './templates';
 import type { Size } from '../format/page';
+import { newImageId } from '../format/ids';
+import { Modal } from 'obsidian';
+import type { PageImage } from '../format/page';
+import { objectImages } from './renderer';
+import {
+  imageAt, imageFromTransfer, imagePageSize, imagesBounds, imagesInLoop, inkOn, offImage, pickImageFile, placeImage, prepareImage,
+  transformImage, unionBox, withImageIds,
+} from './images';
 
 /** How long the view waits after a resize before redrawing bitmaps at the new size. */
 const RESIZE_DELAY = 150;
@@ -73,6 +81,8 @@ export interface ToolSettingsHost {
 /** Strokes copied or cut with the lasso (#11): copies, in page px of the page they came from, in drawing order. */
 export interface InkClipboard {
   strokes: Stroke[];
+  /** Images copied with them (#12), with the strokes written on them. */
+  images?: PageImage[];
 }
 
 /** The clipboard of views without a plugin (never in the plugin). */
@@ -231,6 +241,7 @@ export class InkView extends FileView {
       lassoSelect: (target, loop) => this.selectLoop(target, loop),
       dragSelection: (kind, from, to, x, y) => this.dragSelection(kind, from, to, x, y),
       endSelectionDrag: cancelled => this.endSelectionDrag(cancelled),
+      lassoTap: (target, point) => this.selectImageAt(target, point),
     }, (type, fn, options) => this.registerDomEvent(this.pagesEl, type, fn, options), this.stats.pen);
     // A Pencil drag anywhere in the view, on a page or not, never scrolls it (blockStylusTouch);
     // finger drags over the pages move it through the navigator, never natively, and never
@@ -261,6 +272,7 @@ export class InkView extends FileView {
       canPaste: () => this.canPaste,
       theme: () => this.theme,
     });
+    this.listenForImagePaste();
     this.registerDomEvent(this.containerEl, 'keydown', e => {
       if (e.key !== 'Escape' || !this.sel) return;
       e.preventDefault();
@@ -594,7 +606,7 @@ export class InkView extends FileView {
   private renderStep(pv: PageView, page: Page) {
     if (pv.pending == null || !pv.bitmap) {
       if (!this.bitmapFor(pv)) return;
-      pv.bitmap!.renderBase(page, this.theme, this.template(pv, page), this.hiddenOn(pv));
+      pv.bitmap!.renderBase(page, this.theme, this.template(pv, page), this.hiddenOn(pv), this.imageReady(pv));
       pv.pending = 0;
     }
     const next = pv.bitmap!.renderPen(page, this.theme, pv.pending!, PUMP_STROKES, this.hiddenOn(pv));
@@ -624,7 +636,7 @@ export class InkView extends FileView {
     }
     if (!this.bitmapFor(pv)) return;
     const t0 = performance.now();
-    pv.bitmap!.render(page, this.theme, this.template(pv, page), this.hiddenOn(pv));
+    pv.bitmap!.render(page, this.theme, this.template(pv, page), this.hiddenOn(pv), this.imageReady(pv));
     pv.pending = null;
     this.stats.lastRenderMs = performance.now() - t0;
   }
@@ -677,7 +689,7 @@ export class InkView extends FileView {
     if (!store || !this.pages.includes(pv)) return;
     const page = store.page(pv.slot);
     if (!page) return;
-    const stroke = { id: newStrokeId(page.strokes.map(s => s.id)), ...drawn };
+    const stroke: Stroke = { id: newStrokeId(page.strokes.map(s => s.id)), ...drawn, ...this.writtenOn(page, drawn) };
     store.addStroke(pv.slot, stroke);
     pv.spatial?.add(stroke);
     if (pv.bitmap && pv.pending == null) pv.bitmap.addStroke(page, stroke, this.theme, this.template(pv, page));
@@ -1475,6 +1487,8 @@ export class InkView extends FileView {
       theme: () => this.theme,
       canPaste: () => this.canPaste,
       paste: () => this.pasteStrokes(),
+      insertImage: asPage => this.insertImage(asPage),
+      pasteImage: () => void this.pasteImage(),
     });
   }
 
@@ -1561,11 +1575,13 @@ export class InkView extends FileView {
   // them, duplicate and paste append copies with new ids, selected.
 
   /** The selected strokes: their page, ids (in drawing order) and ink box (page px). */
-  private sel: { pv: PageView; ids: string[]; box: Box } | null = null;
+  private sel: { pv: PageView; ids: string[]; box: Box; images: string[] } | null = null;
   /** A drag of the selection in progress. */
   private selDrag: {
     kind: 'move' | 'resize';
     strokes: Stroke[];
+    /** Selected images (#12): they stay on their page. */
+    images: PageImage[];
     /** The page the preview is over, and the move from the selection's page onto it (page px). */
     to: PageView;
     ox: number;
@@ -1578,9 +1594,9 @@ export class InkView extends FileView {
   private selMenu: SelectionMenu | null = null;
 
   /** The selection, for tests and commands: page index, stroke ids and box (page px). */
-  get selection(): { page: number; ids: string[]; box: Box } | null {
+  get selection(): { page: number; ids: string[]; box: Box; images: string[] } | null {
     const s = this.sel;
-    return s ? { page: this.pages.indexOf(s.pv), ids: [...s.ids], box: [...s.box] } : null;
+    return s ? { page: this.pages.indexOf(s.pv), ids: [...s.ids], box: [...s.box], images: [...s.images] } : null;
   }
 
   /** The last selection drag's frame times (input.ts), for tests. */
@@ -1613,23 +1629,28 @@ export class InkView extends FileView {
   }
 
   get canPaste(): boolean {
-    return !!this.clipboard?.strokes.length;
+    return !!(this.clipboard?.strokes.length || this.clipboard?.images?.length);
   }
 
-  /** Selects these strokes of page `pageIndex` (the lasso's tool is switched to); an empty list deselects. */
-  select(pageIndex: number, ids: readonly string[]) {
+  /**
+   * Selects these strokes and images (#12) of page `pageIndex` (the lasso's tool is switched to);
+   * nothing deselects. The box includes the ink written on the images.
+   */
+  select(pageIndex: number, ids: readonly string[], images: readonly string[] = []) {
     const pv = this.pages[pageIndex];
     const page = pv && this.store?.page(pv.slot);
     if (!pv || !page) return;
     if (this.pen.tool !== 'lasso') this.setTool('lasso');
     const want = new Set(ids);
     const strokes = page.strokes.filter(s => want.has(s.id));
-    const box = strokesBounds(strokes);
+    const wantImages = new Set(images);
+    const ims = (page.images ?? []).filter(im => wantImages.has(im.id));
+    const box = unionBox(strokesBounds([...strokes, ...inkOn(page.strokes, wantImages)]), imagesBounds(ims));
     if (!box) {
       this.clearSelection();
       return;
     }
-    this.sel = { pv, ids: strokes.map(s => s.id), box };
+    this.sel = { pv, ids: strokes.map(s => s.id), box, images: ims.map(im => im.id) };
     this.showSelection();
   }
 
@@ -1661,12 +1682,12 @@ export class InkView extends FileView {
     }, bar ? bar.offsetTop + bar.offsetHeight : 0);
   }
 
-  /** The selected strokes, in drawing order. */
+  /** The selected strokes and the ink written on the selected images (#12), in drawing order. */
   private selectedStrokes(): Stroke[] {
     const sel = this.sel, page = sel && this.store?.page(sel.pv.slot);
     if (!sel || !page) return [];
-    const ids = new Set(sel.ids);
-    return page.strokes.filter(s => ids.has(s.id));
+    const ids = new Set(sel.ids), on = new Set(sel.images);
+    return page.strokes.filter(s => ids.has(s.id) || (s.on !== undefined && on.has(s.on)));
   }
 
   private selectionHit(target: PageTarget, point: Point): SelectionHit {
@@ -1679,7 +1700,7 @@ export class InkView extends FileView {
     const pv = target.key as PageView;
     const page = this.store && this.pages.includes(pv) ? this.store.page(pv.slot) : null;
     if (!page) return;
-    this.select(this.pages.indexOf(pv), lassoSelect(page.strokes, loop));
+    this.select(this.pages.indexOf(pv), lassoSelect(page.strokes, loop), imagesInLoop(page.images, loop));
   }
 
   /** The page under a client point, or null (a gap, the margin, a page that can't be read). */
@@ -1698,16 +1719,16 @@ export class InkView extends FileView {
     let d = this.selDrag;
     if (!d) {
       // Start: the page without the selection; the selection on the overlay.
-      d = this.selDrag = { kind, strokes: this.selectedStrokes(), to: sel.pv, ox: 0, oy: 0, t: moveBy(0, 0) };
+      d = this.selDrag = { kind, strokes: this.selectedStrokes(), images: this.selectedImages(), to: sel.pv, ox: 0, oy: 0, t: moveBy(0, 0) };
       this.selMenu?.hide();
-      this.hidden = { pv: sel.pv, ids: new Set(sel.ids) };
+      this.hidden = { pv: sel.pv, ids: new Set([...d.strokes.map(s => s.id), ...sel.images]) };
       if (sel.pv.bitmap) this.renderPage(sel.pv);
     }
     let dest = sel.pv;
     if (kind === 'resize') d.t = resizeBy(sel.box, resizeScale(sel.box, from, to));
     else {
       d.t = moveBy(roundXY(to.x - from.x), roundXY(to.y - from.y));
-      dest = this.pageUnder(clientX, clientY) ?? sel.pv;
+      dest = sel.images.length ? sel.pv : this.pageUnder(clientX, clientY) ?? sel.pv; // images stay on their page
     }
     const a = layout.pages[this.pages.indexOf(sel.pv)], b = layout.pages[this.pages.indexOf(dest)];
     d.ox = roundXY((a.left - b.left) / layout.scale);
@@ -1715,7 +1736,7 @@ export class InkView extends FileView {
     const page = store.page(dest.slot)!;
     if (d.to !== dest || overlay.canvas.parentElement !== dest.el) overlay.place(dest.el, page.size);
     d.to = dest;
-    overlay.drawDrag(d.strokes, d.t, d.ox, d.oy, sel.box, pageTheme(page, this.theme));
+    overlay.drawDrag(d.strokes, d.t, d.ox, d.oy, sel.box, pageTheme(page, this.theme), d.images);
   }
 
   private endSelectionDrag(cancelled: boolean) {
@@ -1728,13 +1749,17 @@ export class InkView extends FileView {
       return;
     }
     const same = d.to === sel.pv;
-    if (cancelled || (same && isIdentity(d.t)) || !d.strokes.length) {
+    if (cancelled || (same && isIdentity(d.t)) || (!d.strokes.length && !d.images.length)) {
       if (sel.pv.bitmap) this.renderPage(sel.pv);
       this.showSelection();
       return;
     }
     if (same) {
       const entries = d.strokes.map(s => ({ id: s.id, stroke: transformStroke(s, d.t) }));
+      if (d.images.length) {
+        this.transformImagesRecorded(d.kind === 'move' ? 'Move selection' : 'Resize selection', sel, entries, d.images.map(im => ({ id: im.id, image: transformImage(im, d.t) })));
+        return;
+      }
       this.replaceRecorded(d.kind === 'move' ? 'Move selection' : 'Resize selection', sel.pv, entries);
       this.select(this.pages.indexOf(sel.pv), entries.map(e => e.stroke.id));
       return;
@@ -1794,7 +1819,7 @@ export class InkView extends FileView {
     const store = this.store, dst = store?.page(to.slot);
     if (!store || !dst) return;
     const src = from.slot.id, dstId = to.slot.id, ids = strokes.map(s => s.id);
-    const moved = withIds(strokes.map(s => transformStroke(s, t)), new Set(dst.strokes.map(s => s.id)), false);
+    const moved = withIds(strokes.map(s => offImage(transformStroke(s, t))), new Set(dst.strokes.map(s => s.id)), false);
     const entries = moved.map((stroke, i) => ({ index: dst.strokes.length + i, stroke }));
     const movedIds = moved.map(s => s.id);
     let removed: { index: number; stroke: Stroke }[] = [];
@@ -1839,6 +1864,7 @@ export class InkView extends FileView {
   deleteSelection(label = 'Delete selection') {
     const sel = this.sel, store = this.store;
     if (!sel || !store) return;
+    if (sel.images.length) return this.deleteWithImages(label, sel, null);
     const pageId = sel.pv.slot.id;
     this.clearSelection();
     const removed = store.removeStrokes(pageId, sel.ids);
@@ -1854,8 +1880,9 @@ export class InkView extends FileView {
    */
   copySelection() {
     const strokes = withIds(this.selectedStrokes(), new Set(), false);
-    if (!strokes.length) return;
-    this.clipboard = { strokes };
+    const images = this.selectedImages().map(im => ({ ...im }));
+    if (!strokes.length && !images.length) return;
+    this.clipboard = images.length ? { strokes, images } : { strokes };
     try {
       const done = navigator.clipboard?.writeText(encodeClip(strokes));
       if (done && typeof done.catch === 'function') done.catch(() => {});
@@ -1867,6 +1894,7 @@ export class InkView extends FileView {
 
   cutSelection() {
     this.copySelection();
+    if (this.sel?.images.length) return this.deleteWithImages('Cut selection', this.sel, 'delete'); // the ink went with the copy
     this.deleteSelection('Cut selection');
   }
 
@@ -1876,6 +1904,11 @@ export class InkView extends FileView {
     if (!sel || !page) return;
     const taken = new Set(page.strokes.map(s => s.id));
     const copies = withIds(this.selectedStrokes().map(s => transformStroke(s, moveBy(24, 24))), taken, true);
+    if (sel.images.length) {
+      const both = withImageIds(this.selectedImages().map(im => transformImage(im, moveBy(24, 24))), copies, new Set((page.images ?? []).map(im => im.id)), true);
+      this.appendWithImages('Duplicate selection', sel.pv, both.strokes, both.images);
+      return;
+    }
     this.appendRecorded('Duplicate selection', sel.pv, copies);
   }
 
@@ -1887,14 +1920,19 @@ export class InkView extends FileView {
   pasteStrokes(): boolean {
     const clip = this.clipboard, store = this.store;
     const pv = this.pages[this.currentPageIndex()], page = pv && store?.page(pv.slot);
-    const box = clip && strokesBounds(clip.strokes);
+    const box = clip && unionBox(strokesBounds(clip.strokes), imagesBounds(clip.images ?? []));
     if (!clip || !pv || !page || !box) return false;
     const r = pv.el.getBoundingClientRect(), sc = this.scroller.getBoundingClientRect(), k = page.size.width / r.width;
     const cx = (sc.left + this.scroller.clientWidth / 2 - r.left) * k, cy = (sc.top + this.scroller.clientHeight / 2 - r.top) * k;
     const t = centreOn(box, cx, cy);
     const copies = withIds(clip.strokes.map(s => transformStroke(s, t)), new Set(page.strokes.map(s => s.id)), true);
     this.clearSelection();
-    this.appendRecorded('Paste', pv, copies);
+    if (clip.images?.length) {
+      const both = withImageIds(clip.images.map(im => transformImage(im, t)), copies, new Set((page.images ?? []).map(im => im.id)), true);
+      this.appendWithImages('Paste', pv, both.strokes, both.images);
+      return true;
+    }
+    this.appendRecorded('Paste', pv, copies.map(offImage)); // pasted ink belongs to no image
     return true;
   }
 
@@ -2036,5 +2074,266 @@ export class InkView extends FileView {
     });
     for (const id of emptyGhostPages(pages, this.fromGhost)) store.deletePage(id);
     this.fromGhost.clear();
+  }
+
+  // ---- images (#12)
+  // An image is inserted from a file (the picker: on the iPad, Photos or Files), the clipboard
+  // (a paste event, or "Paste image" through the async clipboard) onto the current page, fitted
+  // to half the page and centred in the visible area, selected; or as a page of its own (an
+  // `image` template, sized to the paper's width and the image's aspect). images.ts reads and
+  // encodes it; page.ts stores it. The lasso selects images (a tap on one, or a loop around its
+  // centre); the selection's move, resize, copy, cut, duplicate, paste and delete take them and
+  // the ink written on them (strokes whose `on` is their id: a stroke is written on the topmost
+  // image under its first point) along. Images stay on their page. Deleting an image with ink
+  // on it that isn't selected too asks whether to keep that ink. Every edit is one undo step.
+
+  /** The last insert's size and times (ms), for tests and the owner's check. */
+  imageStats: { width: number; height: number; sourceWidth: number; sourceHeight: number; bytes: number; decodeMs: number; encodeMs: number; totalMs: number } | null = null;
+  private imageCallbacks = new WeakMap<PageView, () => void>();
+
+  /** Redraws the page once an image it shows is decoded (one callback per page, so it's asked once). */
+  private imageReady(pv: PageView): () => void {
+    let f = this.imageCallbacks.get(pv);
+    if (!f) {
+      f = () => {
+        if (pv.bitmap && this.pages.includes(pv) && this.store) this.renderPage(pv);
+      };
+      this.imageCallbacks.set(pv, f);
+    }
+    return f;
+  }
+
+  /** `{ on }` for a stroke whose first point is on an image of the page, else nothing. */
+  private writtenOn(page: Page, drawn: NewStroke): { on?: string } {
+    const a = drawn.points[0], im = a && imageAt(page.images, a.x, a.y);
+    return im ? { on: im.id } : {};
+  }
+
+  /** The selected images, in drawing order. */
+  private selectedImages(): PageImage[] {
+    const sel = this.sel, page = sel && this.store?.page(sel.pv.slot);
+    if (!sel || !page || !sel.images.length) return [];
+    const ids = new Set(sel.images);
+    return (page.images ?? []).filter(im => ids.has(im.id));
+  }
+
+  /** A lasso tap: selects the topmost image under it, if any. */
+  private selectImageAt(target: PageTarget, point: Point) {
+    const pv = target.key as PageView;
+    const page = this.store && this.pages.includes(pv) ? this.store.page(pv.slot) : null;
+    const im = page && imageAt(page.images, point.x, point.y);
+    if (im) this.select(this.pages.indexOf(pv), [], [im.id]);
+  }
+
+  /** Opens the picker for an image to put on the current page, or (asPage) on a new page after it. */
+  insertImage(asPage = false) {
+    if (!this.store) return;
+    pickImageFile(file => void this.insertImageFile(file, asPage));
+  }
+
+  /** Inserts the image on the clipboard (the async clipboard; asks the system's permission). */
+  async pasteImage(): Promise<boolean> {
+    try {
+      for (const item of await navigator.clipboard.read()) {
+        const type = item.types.find(t => t.startsWith('image/'));
+        if (type) return this.insertImageFile(await item.getType(type));
+      }
+    } catch (e) {
+      console.warn('[notebook] reading the clipboard', e);
+    }
+    new Notice('There is no image on the clipboard.');
+    return false;
+  }
+
+  /**
+   * Inserts an image file: on the current page, fitted and centred in the visible area and
+   * selected, or with `asPage` as a new page after the current one. One undo step. Returns false
+   * if there's no note or the file can't be read (a notice says why).
+   */
+  async insertImageFile(file: Blob, asPage = false): Promise<boolean> {
+    const store = this.store;
+    if (!store) return false;
+    const t0 = performance.now();
+    const progress = new Notice('Inserting image…', 0);
+    let im;
+    try {
+      im = await prepareImage(file);
+    } catch (e) {
+      progress.hide();
+      new Notice(`Couldn't insert the image: ${(e as Error).message}`);
+      return false;
+    }
+    progress.hide();
+    if (this.store !== store) return false;
+    this.imageStats = {
+      width: im.width, height: im.height, sourceWidth: im.sourceWidth, sourceHeight: im.sourceHeight, bytes: im.data.length,
+      decodeMs: im.decodeMs, encodeMs: im.encodeMs, totalMs: performance.now() - t0,
+    };
+    objectImages.get(im.data); // start decoding it for the bitmap now
+    if (asPage) {
+      const index = this.currentPageIndex();
+      const slot = store.insertPage(index + 1, { kind: 'image', image: im.data }, imagePageSize(im.width, im.height, store.paperSize));
+      this.clearSelection();
+      this.syncPageViews();
+      this.scrollToPage(store.slots.indexOf(slot));
+      this.recordNewPage('Insert image as page', slot.id);
+      return true;
+    }
+    const pv = this.pages[this.currentPageIndex()], page = pv && store.page(pv.slot);
+    if (!pv || !page) return false;
+    const r = pv.el.getBoundingClientRect(), sc = this.scroller.getBoundingClientRect(), k = page.size.width / Math.max(1, r.width);
+    const cx = (sc.left + this.scroller.clientWidth / 2 - r.left) * k, cy = (sc.top + this.scroller.clientHeight / 2 - r.top) * k;
+    const box = placeImage(im.width, im.height, page.size, cx, cy);
+    const image: PageImage = { id: newImageId((page.images ?? []).map(i => i.id)), ...box, data: im.data };
+    this.clearSelection();
+    this.appendWithImages('Insert image', pv, [], [image]);
+    return true;
+  }
+
+  /** Pasting an image file (a screenshot, a copied photo) while the view has focus inserts it. */
+  private listenForImagePaste() {
+    this.registerDomEvent(document, 'paste', (e: ClipboardEvent) => {
+      if (!this.store) return;
+      const t = e.target as Node | null;
+      const here = t && this.containerEl.contains(t);
+      const idle = (t === document.body || t === document.documentElement) && this.app.workspace.getActiveViewOfType(InkView) === this;
+      if (!here && !idle) return;
+      if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement) return;
+      const file = imageFromTransfer(e.clipboardData);
+      if (!file) return;
+      e.preventDefault();
+      void this.insertImageFile(file);
+    });
+  }
+
+  /** Adds images (on top) and strokes (at the end) to a page as one undo step, and selects them. */
+  private appendWithImages(label: string, pv: PageView, strokes: Stroke[], images: PageImage[]) {
+    const store = this.store, page = store?.page(pv.slot);
+    if (!store || !page || (!strokes.length && !images.length)) return;
+    const pageId = pv.slot.id, ids = strokes.map(s => s.id), imageIds = images.map(im => im.id);
+    const entries = strokes.map((stroke, i) => ({ index: page.strokes.length + i, stroke }));
+    const add = () => {
+      if (this.store !== store) return;
+      for (const im of images) store.addImage(pageId, im);
+      store.insertStrokes(pageId, entries);
+      this.reindex(pageId, [], strokes);
+      this.redrawPage(pageId);
+    };
+    const remove = () => {
+      if (this.store !== store) return;
+      store.removeStrokes(pageId, ids);
+      store.removeImages(pageId, imageIds);
+      this.reindex(pageId, ids, []);
+      this.redrawPage(pageId);
+    };
+    add();
+    this.history.push({ label, undo: remove, redo: add });
+    const onThem = new Set(imageIds);
+    this.select(this.pages.indexOf(pv), strokes.filter(s => s.on === undefined || !onThem.has(s.on)).map(s => s.id), imageIds);
+  }
+
+  /** Moves or resizes selected images and strokes in place as one undo step; keeps them selected. */
+  private transformImagesRecorded(label: string, sel: { pv: PageView; ids: string[]; images: string[] }, strokes: { id: string; stroke: Stroke }[],
+    images: { id: string; image: PageImage }[]) {
+    const store = this.store;
+    if (!store) return;
+    const pageId = sel.pv.slot.id;
+    const apply = (se: { id: string; stroke: Stroke }[], ie: { id: string; image: PageImage }[]) => {
+      const old = store.replaceStrokes(pageId, se);
+      const oldImages = store.replaceImages(pageId, ie);
+      this.reindex(pageId, old.map(o => o.stroke.id), se.map(e => e.stroke));
+      this.redrawPage(pageId);
+      return { se: old.map(o => ({ id: o.stroke.id, stroke: o.stroke })), ie: oldImages };
+    };
+    const before = apply(strokes, images);
+    this.history.push({
+      label,
+      undo: () => {
+        if (this.store === store) apply(before.se, before.ie);
+      },
+      redo: () => {
+        if (this.store === store) apply(strokes, images);
+      },
+    });
+    this.select(this.pages.indexOf(sel.pv), sel.ids, sel.images);
+  }
+
+  /**
+   * Deletes the selection with its images. Ink written on them that isn't selected is deleted
+   * too, or kept (no longer on an image), as `answer` says; with no answer, asks when there is
+   * such ink. One undo step.
+   */
+  private deleteWithImages(label: string, sel: { pv: PageView; ids: string[]; images: string[] }, answer: 'keep' | 'delete' | null) {
+    const store = this.store, page = store?.page(sel.pv.slot);
+    if (!store || !page) return;
+    const selected = new Set(sel.ids);
+    const onInk = inkOn(page.strokes, sel.images).filter(s => !selected.has(s.id));
+    if (onInk.length && !answer) {
+      new KeepInkModal(this.app, onInk.length, a => {
+        if (a && this.store === store) this.deleteWithImages(label, sel, a);
+      }).open();
+      return;
+    }
+    const pageId = sel.pv.slot.id;
+    const removeIds = answer === 'delete' ? [...sel.ids, ...onInk.map(s => s.id)] : [...sel.ids];
+    const keep = answer === 'keep' ? onInk.map(s => ({ id: s.id, stroke: offImage(s) })) : [];
+    this.clearSelection();
+    let removed: { index: number; stroke: Stroke }[] = [], kept: { index: number; stroke: Stroke }[] = [], images: { index: number; image: PageImage }[] = [];
+    const apply = () => {
+      removed = store.removeStrokes(pageId, removeIds);
+      kept = store.replaceStrokes(pageId, keep);
+      images = store.removeImages(pageId, sel.images);
+      this.reindex(pageId, [...removeIds, ...keep.map(e => e.id)], keep.map(e => e.stroke));
+      this.redrawPage(pageId);
+    };
+    apply();
+    this.history.push({
+      label,
+      undo: () => {
+        if (this.store !== store) return;
+        for (const { index, image } of images) store.addImage(pageId, image, index);
+        store.insertStrokes(pageId, removed);
+        store.replaceStrokes(pageId, kept.map(o => ({ id: o.stroke.id, stroke: o.stroke })));
+        this.reindex(pageId, keep.map(e => e.id), [...removed.map(r => r.stroke), ...kept.map(o => o.stroke)]);
+        this.redrawPage(pageId);
+      },
+      redo: () => {
+        if (this.store === store) apply();
+      },
+    });
+  }
+}
+
+/** Asks whether to keep the writing on images being deleted. Answers 'keep', 'delete', or null (cancelled). */
+class KeepInkModal extends Modal {
+  private answered = false;
+
+  constructor(app: App, private strokes: number, private onAnswer: (answer: 'keep' | 'delete' | null) => void) {
+    super(app);
+  }
+
+  onOpen() {
+    this.titleEl.setText('Keep the ink written on it?');
+    this.contentEl.createEl('p', {
+      text: `${this.strokes} stroke${this.strokes === 1 ? ' was' : 's were'} written on the image. Keep ${this.strokes === 1 ? 'it' : 'them'} on the page, or delete ${this.strokes === 1 ? 'it' : 'them'} with the image?`,
+    });
+    const buttons = this.contentEl.createDiv({ cls: 'modal-button-container' });
+    const answer = (a: 'keep' | 'delete' | null) => {
+      if (this.answered) return;
+      this.answered = true;
+      this.close();
+      this.onAnswer(a);
+    };
+    buttons.createEl('button', { text: 'Keep the ink', cls: 'mod-cta nb-keep-ink' }).addEventListener('click', () => answer('keep'));
+    buttons.createEl('button', { text: 'Delete the ink too', cls: 'mod-warning nb-delete-ink' }).addEventListener('click', () => answer('delete'));
+    buttons.createEl('button', { text: 'Cancel', cls: 'nb-cancel-delete' }).addEventListener('click', () => answer(null));
+  }
+
+  onClose() {
+    this.contentEl.empty();
+    if (!this.answered) {
+      this.answered = true;
+      this.onAnswer(null);
+    }
   }
 }
