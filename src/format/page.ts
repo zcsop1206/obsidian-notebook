@@ -18,7 +18,7 @@
 // and y can be negative or beyond the page's width and height; the outline near the edge keeps
 // its true shape, and the drawing is clipped by the page (the SVG's viewBox, the view's canvases).
 import { isImageId, isPageId, isStrokeId } from './ids';
-import { fmt1, strokePath } from './outline';
+import { fmt1, strokePathCached, type OutlineInput } from './outline';
 import { fixedPaper, IMAGE_RE, metadataTemplate, parseTemplate, renderTemplate, type Size, type Template } from './template';
 
 export type { Size } from './template';
@@ -258,9 +258,57 @@ const STYLE =
  */
 const PDF_STYLE = '<style>.i{fill:#1f1f1f}.t{stroke:#c9c9c9}</style>';
 
-function layer(id: string, attrs: string, items: string[]): string {
-  const open = `<g id="${id}"${attrs}>`;
-  return items.length ? `${open}\n${items.join('\n')}\n</g>` : `${open}</g>`;
+/** A stroke's points as the file stores them, and the inputs of its outline (#37). */
+interface Encoded {
+  points: readonly Point[];
+  n: number;
+  first: Point;
+  last: Point;
+  /** The points' JSON: encodePoints, stringified. */
+  json: string;
+  /** Whether the points are already as stored (decodePoints(encodePoints(points)) equals them). */
+  canonical: boolean;
+  /** The outline's input when the points aren't canonical: the stored points. */
+  decoded: Point[];
+}
+const encoded = new WeakMap<object, Encoded>();
+
+/**
+ * A stroke's encoded points and outline `d`, memoised per stroke object so a save only encodes
+ * and outlines new or changed strokes (#37). Validates the points on a miss. The cache is
+ * keyed by the points array (identity, length, first and last point), and the outline by
+ * strokePathCached (tool, nib, size too), so the bytes are those of an uncached write.
+ */
+function encodedStroke(s: Stroke, head: StrokeHead): { json: string; d: string } {
+  const points = s.points;
+  let e = Array.isArray(points) ? encoded.get(s) : undefined;
+  const n = Array.isArray(points) ? points.length : 0;
+  if (!e || e.points !== points || e.n !== n || e.first !== points[0] || e.last !== points[n - 1]) {
+    if (!Array.isArray(points) || n === 0) fail(`stroke ${head.id} has no points`);
+    for (const pt of points) {
+      if (!isNum(pt.x) || !isNum(pt.y) || !isNum(pt.p) || !isNum(pt.t)) fail(`stroke ${head.id} has a non-numeric point`);
+    }
+    const flat = encodePoints(points);
+    const decoded = decodePoints(flat);
+    const canonical = decoded.every((q, i) => q.x === points[i].x && q.y === points[i].y && q.p === points[i].p && q.t === points[i].t);
+    e = { points, n, first: points[0], last: points[n - 1], json: JSON.stringify(flat), canonical, decoded };
+    encoded.set(s, e);
+  }
+  const input: OutlineInput = head.tool === 'pen'
+    ? { tool: 'pen', nib: head.nib, size: head.size, points: e.decoded }
+    : { tool: 'highlighter', size: head.size, points: e.decoded };
+  // Canonical points and size: the stroke's own outline, which the renderer shares.
+  const same = e.canonical && s.size === head.size && s.tool === head.tool && (s.tool !== 'pen' || head.tool !== 'pen' || s.nib === head.nib);
+  return { json: e.json, d: strokePathCached(same ? s : outlineKey(e, input)) };
+}
+
+/** One stable outline input per encoded entry and head, so strokePathCached can hit on it. */
+const inputs = new WeakMap<Encoded, OutlineInput>();
+function outlineKey(e: Encoded, input: OutlineInput): OutlineInput {
+  const c = inputs.get(e);
+  if (c && c.tool === input.tool && c.size === input.size && (c.tool !== 'pen' || input.tool !== 'pen' || c.nib === input.nib)) return c;
+  inputs.set(e, input);
+  return input;
 }
 
 /**
@@ -277,47 +325,52 @@ export function writePage(page: Page): string {
   const strokes = page.strokes.map((s, i) => {
     const head = checkStroke(s, i, seen);
     const on = onImage(s, imageIds);
-    if (!Array.isArray(s.points) || s.points.length === 0) fail(`stroke ${head.id} has no points`);
-    for (const pt of s.points) {
-      if (!isNum(pt.x) || !isNum(pt.y) || !isNum(pt.p) || !isNum(pt.t)) fail(`stroke ${head.id} has a non-numeric point`);
-    }
-    const flat = encodePoints(s.points);
-    return { ...head, on, flat, points: decodePoints(flat) };
+    const enc = encodedStroke(s, head);
+    return { ...head, on, pointsJson: enc.json, d: enc.d };
   });
 
   const json = (v: unknown) => JSON.stringify(v);
   const strokeJson = strokes.map(s =>
     `{"id":${json(s.id)},"tool":${json(s.tool)},` + (s.tool === 'pen' ? `"nib":${json(s.nib)},` : '') +
-    `"color":${json(s.color)},"size":${json(s.size)},` + (s.on ? `"on":${json(s.on)},` : '') + `"points":${json(s.flat)}}`);
+    `"color":${json(s.color)},"size":${json(s.size)},` + (s.on ? `"on":${json(s.on)},` : '') + `"points":${s.pointsJson}}`);
   const imageJson = images.map(im => json({ id: im.id, x: im.x, y: im.y, width: im.width, height: im.height }));
   const meta =
     `{"format":${json(FORMAT)},"id":${json(page.id)},"size":${json(size)},"template":${json(metadataTemplate(template))},` +
     (images.length ? `"images":[\n${imageJson.join(',\n')}\n],` : '') + `"strokes":[` +
     (strokeJson.length ? '\n' + strokeJson.join(',\n') + '\n' : '') + ']}';
 
-  const path = (s: Stroke) => {
-    const paint = s.color === DEFAULT_INK ? 'class="i"' : `fill="${s.color}"`;
-    return `<path data-id="${s.id}" ${paint} d="${strokePath(s)}"/>`;
-  };
   const w = fmt1(size.width), h = fmt1(size.height);
   const image = (im: PageImage) =>
     `<image data-id="${im.id}" x="${fmt1(im.x)}" y="${fmt1(im.y)}" width="${fmt1(im.width)}" height="${fmt1(im.height)}" preserveAspectRatio="none" href="${im.data}"/>`;
-  // With images, the objects layer sits under the ink; without, it stays last and empty (#12).
-  const objects = images.length ? [layer('objects', '', images.filter(im => im.data).map(image))] : [];
-  return [
-    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">`,
-    fixedPaper(template) ? PDF_STYLE : STYLE,
+  // One array of pieces joined once: the paths of a dense page are megabytes, and joining each
+  // layer first and then the file copied them twice (#37).
+  const out: string[] = [
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">\n`,
+    fixedPaper(template) ? PDF_STYLE : STYLE, '\n',
     // `]]>` could only occur inside a JSON string, where `>` may be escaped instead.
-    `<metadata><![CDATA[${meta.replace(/]]>/g, ']]\\u003e')}]]></metadata>`,
-    layer('template', '', renderTemplate(template, size)),
-    ...objects,
-    // Highlighter paths are opaque and the layer is translucent, so crossing strokes don't darken.
-    layer('highlight', ' opacity="0.4"', strokes.filter(s => s.tool === 'highlighter').map(path)),
-    layer('ink', '', strokes.filter(s => s.tool === 'pen').map(path)),
-    ...(images.length ? [] : [layer('objects', '', [])]),
-    '</svg>',
-    '',
-  ].join('\n');
+    `<metadata><![CDATA[${meta.replace(/]]>/g, ']]\\u003e')}]]></metadata>\n`,
+  ];
+  // A layer of items, each on its own line; an item is one or more pieces.
+  const layer = (id: string, attrs: string, items: readonly (string | readonly string[])[]) => {
+    out.push(`<g id="${id}"${attrs}>`);
+    for (const item of items) {
+      out.push('\n');
+      if (typeof item === 'string') out.push(item);
+      else for (const piece of item) out.push(piece);
+    }
+    out.push(items.length ? '\n</g>\n' : '</g>\n');
+  };
+  const paths = (tool: Stroke['tool']) => strokes.filter(s => s.tool === tool).map(s =>
+    [`<path data-id="${s.id}" ${s.color === DEFAULT_INK ? 'class="i"' : `fill="${s.color}"`} d="`, s.d, '"/>']);
+  layer('template', '', renderTemplate(template, size));
+  // With images, the objects layer sits under the ink; without, it stays last and empty (#12).
+  if (images.length) layer('objects', '', images.filter(im => im.data).map(image));
+  // Highlighter paths are opaque and the layer is translucent, so crossing strokes don't darken.
+  layer('highlight', ' opacity="0.4"', paths('highlighter'));
+  layer('ink', '', paths('pen'));
+  if (!images.length) layer('objects', '', []);
+  out.push('</svg>\n');
+  return out.join('');
 }
 
 // ---- reading

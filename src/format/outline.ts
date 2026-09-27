@@ -200,3 +200,44 @@ function dot(x: number, y: number, r: number): string {
   const rs = fmt1(r);
   return `M${fmt1(x - r)} ${fmt1(y)}A${rs} ${rs} 0 1 0 ${fmt1(x + r)} ${fmt1(y)}A${rs} ${rs} 0 1 0 ${fmt1(x - r)} ${fmt1(y)}Z`;
 }
+
+/** What strokePathCached last computed for a stroke object, and the fields it depended on. */
+interface CachedPath {
+  tool: string;
+  nib: string | undefined;
+  size: number;
+  points: readonly Point[];
+  n: number;
+  first: Point;
+  last: Point;
+  d: string;
+}
+const paths = new WeakMap<object, CachedPath>();
+
+/**
+ * strokePath(stroke), memoised per stroke object (#37): the same string, computed again only
+ * if the stroke's tool, nib, size or points (array identity, length, first or last point)
+ * changed since. Strokes are replaced, not mutated, by every edit, so this is a hit for every
+ * stroke but new ones; the key is a guard against in-place edits. Pure in output: the cache
+ * only saves time. Shared by the renderer (Path2D) and writePage (the file's `d`).
+ */
+export function strokePathCached(stroke: OutlineInput): string {
+  const { tool, size, points } = stroke;
+  const nib = stroke.tool === 'pen' ? stroke.nib : undefined;
+  const n = points.length, first = points[0], last = points[n - 1];
+  const c = paths.get(stroke);
+  if (c && c.tool === tool && c.nib === nib && c.size === size && c.points === points && c.n === n && c.first === first && c.last === last) return c.d;
+  const d = flat(strokePath(stroke));
+  paths.set(stroke, { tool, nib, size, points, n, first, last, d });
+  return d;
+}
+
+/**
+ * The string as one flat buffer. strokePath builds `d` by appending, which V8 keeps as a tree
+ * of pieces (a rope); joining a thousand cached ropes into the file walked every tree again on
+ * each save (about 60 ms for 1,000 strokes). Number() of a non-numeric string flattens it.
+ */
+function flat(s: string): string {
+  Number(s);
+  return s;
+}

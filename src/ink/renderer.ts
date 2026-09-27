@@ -5,7 +5,7 @@
 // strokes are removed. Images placed on the page (#12) are drawn over the template, under the
 // highlighter layer, from decoded <img>s cached per image (ObjectImages).
 import { DEFAULT_INK, type Page, type PageImage, type Size, type Stroke } from '../format/page';
-import { strokePath } from '../format/outline';
+import { strokePathCached } from '../format/outline';
 import { fixedPaper, renderTemplate, type PdfTemplate, type Template } from '../format/template';
 
 export interface Theme {
@@ -53,7 +53,7 @@ const outlines = new WeakMap<Stroke, Path2D>();
 export function strokePath2D(stroke: Stroke): Path2D {
   let p = outlines.get(stroke);
   if (!p) {
-    p = new Path2D(strokePath(stroke));
+    p = new Path2D(strokePathCached(stroke));
     outlines.set(stroke, p);
   }
   return p;
