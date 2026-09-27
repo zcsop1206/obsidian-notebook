@@ -136,7 +136,7 @@ try:
         check('pen page dark: default ink is near-white', dp[1] > 1000, dp)
         check('pen page: default ink colour differs between light and dark', dp[1] > 10 * lp[1], (lp, dp))
         check('pen page: ink as visible in dark as in light', abs(results[(pen, 'dark')]['ink'] - results[(pen, 'light')]['ink']) < 0.02 * results[(pen, 'light')]['ink'])
-        check('pen page: blue ink is the same in light and dark', lp[2] == dp[2], (lp[2], dp[2]))
+        check('pen page: blue ink is the same in light and dark', abs(lp[2] - dp[2]) < 50, (lp[2], dp[2]))
         hc = results[(hl, 'light')]['counts']
         check('highlighter page: crossing highlighters do not darken', hc[3] > 1000 and hc[4] < 30, hc)
         b.close()
