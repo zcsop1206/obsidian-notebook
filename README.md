@@ -8,6 +8,10 @@ The ink editor isn't built yet. For now the plugin has one tool, the **ink debug
 
 Planned: a page view with paper templates, pen, highlighter and eraser tools, pressure-shaped strokes (with [`perfect-freehand`](https://github.com/steveruizok/perfect-freehand)), ink notes embedded in markdown, and audio recording. Syncing the vault through GitHub is handled by a separate plugin.
 
+## Page templates
+
+Each page of an ink note has its own paper: blank, lined (college or wide rule, with or without a pink margin line), grid (5 mm or ¼ in) or dots (5 mm). The lines are drawn into the page's SVG, in a light grey that turns dark grey in dark mode, so a page looks the same in Obsidian's reading view and on GitHub. Choose the paper size and template in the **New ink note** dialog (the defaults are in the plugin settings), add a page with another template with **Add page with template…** under the last page, and change the template of the current page or of every page with the commands (or header buttons) **Change template of this page** and **Change template of all pages**. The writing is never touched. A note's `template:` frontmatter names the template for new pages, e.g. `lined-college-margin`.
+
 ## Install on the iPad
 
 1. Install **BRAT** from Community plugins and enable it.
