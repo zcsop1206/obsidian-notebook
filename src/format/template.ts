@@ -4,7 +4,8 @@
 // `renderTemplate`, and names in BUILT_IN_TEMPLATES.
 //
 // The `pdf` kind (#14) is a page of an imported PDF: `source` (the PDF's path relative to the
-// note's folder, e.g. `lecture/lecture.pdf`), `page` (1-based) and `image`, a data URL of the
+// folder holding the page file, the note's page folder, e.g. `lecture.pdf` for the PDF copied
+// beside the pages, so moving or renaming the page folder never breaks it), `page` (1-based) and `image`, a data URL of the
 // page rendered at about 150 dpi. It is the one exception to "the metadata is the source of
 // truth": to store the image once, the metadata holds only kind, source and page, and the image
 // bytes live in the drawing, as the <image> of the template layer, which readPage reads back
@@ -52,7 +53,7 @@ export interface DotsTemplate {
  */
 export interface PdfTemplate {
   kind: 'pdf';
-  /** The PDF's vault path relative to the note's folder, `/`-separated, e.g. `lecture/lecture.pdf`. */
+  /** The PDF's path relative to the page file's folder (the page folder), `/`-separated, e.g. `lecture.pdf`. */
   source: string;
   /** 1-based page number in the PDF. */
   page: number;
@@ -125,7 +126,7 @@ export function parseTemplate(value: unknown): Template {
     }
     case 'pdf': {
       if (!isPdfSource(v.source)) {
-        throw new Error(`Invalid page template: pdf source ${JSON.stringify(v.source)} (expected a relative path like "lecture/lecture.pdf")`);
+        throw new Error(`Invalid page template: pdf source ${JSON.stringify(v.source)} (expected a path relative to the page folder, like "lecture.pdf")`);
       }
       if (typeof v.page !== 'number' || !Number.isInteger(v.page) || v.page < 1) {
         throw new Error(`Invalid page template: pdf page ${JSON.stringify(v.page)} (expected a whole number from 1)`);
