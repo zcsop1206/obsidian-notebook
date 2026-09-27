@@ -1,7 +1,7 @@
 name: Release
 
-# Push a tag equal to the manifest version (e.g. 0.0.2) to publish a release
-# that BRAT can install on the iPad.
+# Push a tag equal to the manifest version (e.g. 0.0.3) to build the plugin and publish a
+# release that BRAT can install on the iPad.
 on:
   push:
     tags: ['*']
@@ -14,6 +14,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Build main.js
+        run: npm run build
       - name: Check tag matches manifest version
         run: test "$(jq -r .version manifest.json)" = "${GITHUB_REF_NAME}"
       - name: Publish release
