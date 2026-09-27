@@ -152,20 +152,21 @@ function sampled(n: number): Point[] {
   return trace.points;
 }
 
-test('live: the live outline of finished points is the saved stroke\'s outline', () => {
+test('live: the live outline of finished points is the saved stroke\'s outline without the refit (#32)', () => {
   for (const nib of ['uniform', 'pressure'] as const) {
     const points = sampled(150);
     assert.ok(points.length < LIVE_MAX);
     const plan = livePlan(points.length, 0);
-    const live = strokePath({ tool: 'pen', nib, size: 2.5, points: points.slice(plan.tail) });
+    const live = strokePath({ tool: 'pen', nib, size: 2.5, points: points.slice(plan.tail) }, true);
     const stroke: PenStroke = { id: '0000abcd', tool: 'pen', nib, color: '#1e6fff', size: 2.5, points };
     const page = newPage('p-00aa11');
     page.strokes.push(stroke);
     const text = writePage(page);
     const saved = readPage(text).strokes[0];
     assert.deepEqual(saved.points, points, 'sampled points survive the file unchanged');
-    assert.equal(live, strokePath(saved));
-    assert.ok(text.includes(`d="${live}"`), 'the file draws the same path');
+    assert.equal(live, strokePath(saved, true));
+    assert.notEqual(live, strokePath(saved), 'the committed stroke is refitted');
+    assert.ok(text.includes(`d="${strokePath(stroke)}"`), 'the file draws the committed (refitted) path');
   }
 });
 

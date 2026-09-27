@@ -1,7 +1,7 @@
 // Stroke outlines: each stroke is drawn as one filled path computed from its points with
 // perfect-freehand. The paths are derived data; a page's <metadata> is the source of truth.
 import { getStroke, type StrokeOptions } from 'perfect-freehand';
-import type { HighlighterStroke, Nib, PenStroke } from './page';
+import type { HighlighterStroke, Nib, PenStroke, Point } from './page';
 
 /**
  * How far each smoothed point moves toward the next sample (perfect-freehand's streamline;
@@ -92,17 +92,73 @@ export function fmt1(n: number): string {
  * curved rather than a polygon's straight segments; the highlighter's stays a polygon, to keep
  * its flat ends square.
  */
-export function strokePath(stroke: OutlineInput): string {
+export function strokePath(stroke: OutlineInput, live = false): string {
   const { points, size } = stroke;
   if (points.length === 0) return '';
   if (points.length === 1) return dot(points[0].x, points[0].y, size / 2);
-  const outline = strokeOutline(stroke);
+  const outline = strokeOutline(stroke, live);
   return stroke.tool === 'pen' ? smoothCurve(outline) : polygon(outline);
 }
 
-/** The outline's points, as perfect-freehand computes them. */
-export function strokeOutline(stroke: OutlineInput): number[][] {
-  return getStroke(stroke.points.map(pt => [pt.x, pt.y, pt.p]), { ...outlineOptions(stroke), size: stroke.size });
+/**
+ * The outline's points, as perfect-freehand computes them: of the refitted points for a
+ * finished pen stroke, of the raw points for a live one (`live`) and for the highlighter.
+ */
+export function strokeOutline(stroke: OutlineInput, live = false): number[][] {
+  const points = stroke.tool === 'pen' && !live ? refit(stroke.points) : stroke.points;
+  return getStroke(points.map(pt => [pt.x, pt.y, pt.p]), { ...outlineOptions(stroke), size: stroke.size });
+}
+
+/**
+ * The refit's strength (#32). A finished pen stroke is drawn from its points smoothed over
+ * REFIT_RADIUS px of arc length on each side (a triangular weighting, narrowed near the ends so
+ * the ends stay where they were drawn) and then thinned so that kept points are at least
+ * REFIT_STEP px apart. This takes out the 0.5 px steps and hand tremor the Pencil reports,
+ * which the live stroke shows; the stroke "settles" when the pen lifts. Larger values settle
+ * more (and round tight corners more: a corner moves inward by at most about REFIT_RADIUS / 3).
+ * Set REFIT_RADIUS to 0 to turn the refit off. The file keeps the raw points; the refit is
+ * derived, like the outline.
+ */
+const REFIT_RADIUS = 1.5;
+const REFIT_STEP = 0.3;
+
+/**
+ * The points a finished pen stroke is drawn from: smoothed and thinned (see REFIT_RADIUS),
+ * first and last points unchanged, pressure smoothed the same way. Fewer than 3 points are
+ * returned as they are. Linear in the number of points for a given sample spacing.
+ */
+export function refit(points: readonly Point[]): Point[] {
+  const n = points.length;
+  if (n < 3 || REFIT_RADIUS <= 0) return points.slice();
+  // Arc length at each point.
+  const s = new Float64Array(n);
+  for (let i = 1; i < n; i++) s[i] = s[i - 1] + Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y);
+  const total = s[n - 1];
+  const smooth: Point[] = new Array(n);
+  smooth[0] = points[0];
+  smooth[n - 1] = points[n - 1];
+  let lo = 0, hi = 0;
+  for (let i = 1; i < n - 1; i++) {
+    // Symmetric window, no wider than the distance to the nearer end, so the ends don't pull in.
+    const r = Math.min(REFIT_RADIUS, s[i], total - s[i]);
+    while (s[lo] < s[i] - r) lo++;
+    while (hi < n - 1 && s[hi + 1] <= s[i] + r) hi++;
+    let w = 0, x = 0, y = 0, p = 0;
+    for (let j = lo; j <= hi; j++) {
+      const k = r > 0 ? 1 - Math.abs(s[j] - s[i]) / (r + 1e-9) : 1;
+      if (k <= 0) continue;
+      w += k; x += k * points[j].x; y += k * points[j].y; p += k * points[j].p;
+    }
+    smooth[i] = w > 0 ? { x: x / w, y: y / w, p: p / w, t: points[i].t } : points[i];
+  }
+  // Thin: keep points at least REFIT_STEP from the last kept one; always keep the last.
+  const out: Point[] = [smooth[0]];
+  for (let i = 1; i < n - 1; i++) {
+    const a = out[out.length - 1], b = smooth[i];
+    if (Math.hypot(b.x - a.x, b.y - a.y) >= REFIT_STEP) out.push(b);
+  }
+  out.push(smooth[n - 1]);
+  return out;
 }
 
 /** A closed polygon as `M x y L x y … Z`, dropping points that round onto the previous one. */
