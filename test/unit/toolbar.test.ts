@@ -6,6 +6,7 @@ import {
   DEFAULT_ERASER, DEFAULT_HIGHLIGHTER, DEFAULT_PEN, DEFAULT_PRESETS, matchesPreset, MAX_PRESETS, parsePreset, parsePresets,
   parseToolState, presetOf, stepSize,
 } from '../../src/ink/pen';
+import { previewPoints } from '../../src/ink/picker';
 
 /** Runs fn with console.warn captured; returns the warnings. */
 function warnings(fn: () => void): string[] {
@@ -108,4 +109,10 @@ test('toolbar: the tool state round-trips and each bad field falls back on its o
   assert.equal(w.length, 4); // tool, colour, highlighter size, eraser mode
   assert.equal(warnings(() => (got = parseToolState('x'))).length, 1);
   assert.deepEqual(got!.pen, DEFAULT_PEN);
+});
+
+test('toolbar: the preview curve stays inside its canvas', () => {
+  const pts = previewPoints(220, 60);
+  assert.ok(pts.length > 10);
+  for (const p of pts) assert.ok(p.x > 0 && p.x < 220 && p.y > 0 && p.y < 60 && p.p > 0 && p.p <= 1);
 });

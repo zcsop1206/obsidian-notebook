@@ -30,7 +30,7 @@ export default class NotebookPlugin extends Plugin {
   async onload() {
     this.settings = parseSettings(await this.loadData());
 
-    this.registerView(VIEW_TYPE_INK, leaf => new InkView(leaf));
+    this.registerView(VIEW_TYPE_INK, leaf => new InkView(leaf, this));
     this.register(installTakeover(this.app));
     // Renaming or moving an ink note moves its page folder along (#26).
     const renames = new RenameHandler(this.app);
@@ -50,7 +50,7 @@ export default class NotebookPlugin extends Plugin {
     });
     this.addTemplateCommand('change-page-template', 'Change template of this page', 'page');
     this.addTemplateCommand('change-all-templates', 'Change template of all pages', 'all');
-    // Pen commands for desktop testing until #10's toolbar; the provisional strip does the same.
+    // Pen commands for desktop and the tests; the toolbar (#10) does the same.
     this.addInkCommand('pen-nib-uniform', 'Use the uniform pen', view => view.setPen({ nib: 'uniform' }));
     this.addInkCommand('pen-nib-pressure', 'Use the pressure pen', view => view.setPen({ nib: 'pressure' }));
     this.addInkCommand('pen-next-color', 'Next pen colour', view => view.nextColor());
@@ -62,7 +62,7 @@ export default class NotebookPlugin extends Plugin {
     this.addInkCommand('toggle-ink-stats', 'Toggle ink stats overlay', view => view.toggleStats());
     this.addHistoryCommand('undo', 'Undo', { modifiers: ['Mod'], key: 'z' }, view => view.undo());
     this.addHistoryCommand('redo', 'Redo', { modifiers: ['Mod', 'Shift'], key: 'z' }, view => view.redo());
-    // The eraser (#7), also until #10's toolbar.
+    // The eraser (#7), also in the toolbar.
     this.addInkCommand('tool-eraser', 'Use the eraser', view => view.setTool('eraser'));
     this.addInkCommand('eraser-next-size', 'Next eraser size', view => view.nextEraserSize());
     // The partial eraser (#15): erase only the part under the eraser, or whole strokes.
@@ -73,6 +73,8 @@ export default class NotebookPlugin extends Plugin {
     this.addInkCommand('zoom-out', 'Zoom out', view => view.zoomOut());
     this.addInkCommand('zoom-reset', 'Reset zoom to 100%', view => view.resetZoom());
     this.addInkCommand('toggle-pages-panel', 'Toggle pages panel', view => view.togglePagesPanel());
+    // The toolbar (#10): the picker of the tool in use, as a second tap on its button opens it.
+    this.addInkCommand('open-tool-picker', 'Open the picker of the tool in use', view => view.openPicker());
     this.registerEvent(this.app.workspace.on('file-menu', (menu, file, _source, leaf) => {
       if (!(file instanceof TFile) || !leaf || leaf.view.getViewType() !== 'markdown' || !cachedIsInk(this.app, file)) return;
       menu.addItem(item => item.setTitle('Open as ink note').setIcon('pencil').onClick(() => void this.openAsInk(file, leaf)));
