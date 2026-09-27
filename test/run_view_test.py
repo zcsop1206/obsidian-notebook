@@ -5411,11 +5411,13 @@ try:
               f"live vs committed {seam['diff']} of {seam['ink']} px ({100 * seam['frac']:.2f}%), worst 32 px cell {seam['worstCell']}")
         check('seam: at 400% the live overlays are at full device resolution and the centre line is solid ink across the frozen pieces (no gap)',
               r['pieces'] >= 3 and r['ratio'] == 2 and r['n'] > 500 and r['gaps'] == 0, r)
-        # Each frozen piece restarts perfect-freehand's outline, so its edges may differ from the
-        # committed outline's by a device pixel (thin slivers, about 1% of the ink; 1.6% before #52,
-        # when the live stroke was also unrefitted); a gap or a doubled band would be a cluster.
-        check('seam: ... and the long live stroke matches the committed one (under 2% of ink pixels differ, no cluster over 128 px)',
-              seam['frac'] < 0.02 and seam['worstCell'] <= 128, seam)
+        # Each frozen piece's outline is computed with context on both sides and clipped to the
+        # piece, so its ends match the committed outline (1.6% of ink pixels differed before #52,
+        # 0.8-1.4% with plain slices of the refit points, 0.1-0.7% now: what's left is where
+        # perfect-freehand spaces a piece's outline points differently from the whole's); a gap or
+        # a doubled band would be a cluster.
+        check('seam: ... and the long live stroke matches the committed one (under 1% of ink pixels differ, no cluster over 64 px)',
+              seam['frac'] < 0.01 and seam['worstCell'] <= 64, seam)
         r = ev("""async () => {
           view.setTool('highlighter');
           T.z52pts = T.z52pts.map(([x, y]) => [x, y + 120]);

@@ -743,11 +743,14 @@ export class PenInput {
     // The pen is drawn from its refit points (#52; LiveFit: refit of the points so far, the same
     // points the committed stroke's outline is of), the highlighter from its points.
     const count = this.drawnCount(live);
+    const pen = live.style.tool === 'pen';
     let plan = livePlan(count, live.frozen);
-    // Only points that no longer change are frozen (the refit's last 1.5 px still move).
-    if (plan.freeze && live.style.tool === 'pen' && plan.freeze[1] > live.fit.settled) plan = livePlan(live.frozen, live.frozen);
+    // Only points that no longer change are frozen (the refit's last 1.5 px still move), with
+    // the pen's context after them (see piece).
+    if (plan.freeze && pen && this.contextEnd(live, plan.frozen, count) > live.fit.settled) plan = livePlan(live.frozen, live.frozen);
     if (plan.freeze) {
-      this.fill(this.headCtx, live, this.drawn(live, plan.freeze[0], plan.freeze[1]));
+      if (pen) this.piece(this.headCtx, live, live.frozen, plan.frozen, count);
+      else this.fill(this.headCtx, live, this.drawn(live, plan.freeze[0], plan.freeze[1]));
       live.frozen = plan.frozen;
       live.pieces++;
       live.head = true;
@@ -760,7 +763,7 @@ export class PenInput {
         const [x0, y0, x1, y1] = live.tailBox;
         ctx.clearRect(x0, y0, x1 - x0, y1 - y0);
       }
-      this.livePath = this.fill(ctx, live, tail);
+      this.livePath = pen && live.frozen > 0 ? this.piece(ctx, live, live.frozen, count, count, live.predicted) : this.fill(ctx, live, tail);
     }
     live.tailBox = box(tail, live.style.size);
     if (live.map.edge && pts.length) this.host.rulerMeasure?.(live.target, pts[0], pts[pts.length - 1]);
@@ -858,6 +861,48 @@ export class PenInput {
     }
     this.livePath = d;
     live.tailBox = [0, 0, live.target.size.width, live.target.size.height];
+  }
+
+  /**
+   * Fills the part of a pen stroke from drawn point `from` to `to` as the whole stroke's outline
+   * would draw it (#52). perfect-freehand's outline of a slice differs from the whole's near
+   * the slice's ends (it drops the first `size` px, restarts its streamline and the spacing of
+   * its outline points, and drops the last 3 px), which showed as thin slivers along the edges
+   * where frozen pieces met. So the outline is computed over the piece plus SEAM_CONTEXT of
+   * points on each side (of arc length), where it has converged to the whole's, and drawn
+   * clipped to the piece's own neighbourhood: a wider outline of the piece's points alone.
+   * Returns the path `d` drawn.
+   */
+  private piece(ctx: CanvasRenderingContext2D, live: Live, from: number, to: number, count: number, extra: Point[] = []): string {
+    const a = this.contextStart(live, from), b = this.contextEnd(live, to, count);
+    const d = strokePath({ ...live.style, points: this.drawn(live, a, b).concat(extra) }, true);
+    if (!d) return d;
+    const size = live.style.size;
+    const own = this.drawn(live, from, to).concat(extra);
+    ctx.save();
+    if (a < from || b > to) ctx.clip(new Path2D(strokePath({ tool: 'pen', nib: 'uniform', size: size * 1.5 + 2, points: own }, true)));
+    ctx.fillStyle = live.color;
+    ctx.fill(new Path2D(d));
+    ctx.restore();
+    return d;
+  }
+
+  /** The drawn point SEAM_CONTEXT (twice the size plus 8 px of arc length) before point i, or 0. */
+  private contextStart(live: Live, i: number): number {
+    if (i <= 0) return 0;
+    const pts = this.drawn(live, Math.max(0, i - 400), i + 1), want = 2 * live.style.size + 8;
+    let len = 0, j = pts.length - 1;
+    for (; j > 0 && len < want; j--) len += Math.hypot(pts[j].x - pts[j - 1].x, pts[j].y - pts[j - 1].y);
+    return Math.max(0, i - 400) + j;
+  }
+
+  /** The drawn point after point i by the context and 3 px more (the outline drops a stroke's last 3 px), or `count`. */
+  private contextEnd(live: Live, i: number, count: number): number {
+    if (i >= count) return count;
+    const pts = this.drawn(live, i, Math.min(count, i + 400)), want = 2 * live.style.size + 11;
+    let len = 0, j = 0;
+    for (; j < pts.length - 1 && len < want; j++) len += Math.hypot(pts[j + 1].x - pts[j].x, pts[j + 1].y - pts[j].y);
+    return j < pts.length - 1 ? i + j + 1 : count;
   }
 
   /** Fills the outline of these points in the stroke's settings; returns the path `d`. */
