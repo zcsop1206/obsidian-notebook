@@ -40,3 +40,78 @@
   -webkit-user-select: none;
   -webkit-touch-callout: none;
 }
+
+/* Ink view */
+
+.view-content.nb-ink-view {
+  padding: 0;
+  overflow: hidden;
+}
+
+.nb-ink-scroll {
+  height: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  -webkit-overflow-scrolling: touch;
+  background: var(--background-secondary);
+}
+
+.nb-ink-pages {
+  position: relative;
+}
+
+.nb-ink-page {
+  position: absolute;
+  overflow: hidden;
+  background: #ffffff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+/* Matches the dark paper in src/ink/renderer.ts (DARK.paper). */
+.theme-dark .nb-ink-page {
+  background: #1e1e1e;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12);
+}
+
+.nb-ink-page canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+/* The stroke in progress. Input is handled on the pages container; this only draws. */
+.nb-ink-page canvas.nb-ink-live {
+  pointer-events: none;
+  touch-action: none;
+}
+
+.nb-ink-page.is-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed var(--text-error, #c33);
+}
+
+.nb-ink-error {
+  max-width: 80%;
+  color: var(--text-error, #c33);
+  font-size: var(--font-ui-small, 13px);
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.nb-ink-add {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.nb-ink-message {
+  padding: 24px;
+  color: var(--text-muted);
+}
