@@ -1,6 +1,7 @@
 // The ink view: an ink note's pages stacked like paper in a native scrolling container, with
-// the pen (input.ts) and its provisional controls, autosave and reloading after changes on disk. The note's data lives in
-// NoteStore; page bitmaps in PageBitmap; this file ties them to Obsidian and the DOM.
+// the pen (input.ts) and its provisional controls, finger panning and zoom (navigate.ts),
+// autosave and reloading after changes on disk. The note's data lives in NoteStore; page
+// bitmaps in PageBitmap; this file ties them to Obsidian and the DOM.
 import { FileView, Notice, TAbstractFile, TFile, TFolder, type App, type WorkspaceLeaf } from 'obsidian';
 import { newStrokeId } from '../format/ids';
 import { isInkNote } from '../format/note';
@@ -10,7 +11,7 @@ import { parseTemplate, templateName } from '../format/template';
 import type { Stroke } from '../format/page';
 import { listenForUndoTaps } from './gestures';
 import { History } from './history';
-import { blockStylusTouch, newPenStats, PenInput, penStatsLines, type NewStroke, type PageTarget, type PenStats, type StrokeStyle } from './input';
+import { blockFingerTouch, blockStylusTouch, newPenStats, PenInput, penStatsLines, type NewStroke, type PageTarget, type PenStats, type StrokeStyle } from './input';
 import { COLOR_PRESETS, DEFAULT_PEN, nextColor, nextSize, SIZE_PRESETS, SIZE_STEP, withPen, type PenSettings } from './pen';
 import {
   DEFAULT_HIGHLIGHTER, HIGHLIGHTER_COLORS, HIGHLIGHTER_SIZES, nextHighlighterColor, nextHighlighterSize, withHighlighter,
@@ -18,6 +19,7 @@ import {
 } from './pen';
 import { DEFAULT_ERASER, ERASER_SIZES, nextEraserSize, withEraser, type EraserSettings } from './pen';
 import { layoutPages, MARGIN, mostVisiblePage, pageAtY, pagesInBand, type Layout } from './layout';
+import { anchorAt, clampZoom, navStatsLines, Navigator, newNavStats, scrollToKeep, zoomStep, type NavStats } from './navigate';
 import { currentTheme, PageBitmap, releaseScratch, strokeColor, TemplateImages, type Theme } from './renderer';
 import { SpatialIndex } from './spatial';
 import { NoteStore, type NoteFiles, type PageSlot, type TemplatesBefore } from './store';
@@ -41,6 +43,8 @@ export interface InkStats {
   saves: number;
   /** Pen input measurements (input.ts). */
   pen: PenStats;
+  /** Finger navigation: zoom and the last gesture's frame times (navigate.ts). */
+  nav: NavStats;
 }
 
 interface PageView {
@@ -89,7 +93,7 @@ export function vaultFiles(app: App): NoteFiles {
 }
 
 export class InkView extends FileView {
-  stats: InkStats = { pagesLoaded: 0, pagesRendered: 0, lastRenderMs: 0, openMs: 0, saves: 0, pen: newPenStats() };
+  stats: InkStats = { pagesLoaded: 0, pagesRendered: 0, lastRenderMs: 0, openMs: 0, saves: 0, pen: newPenStats(), nav: newNavStats() };
   /** The settings of the next stroke. */
   pen: PenSettings = { ...DEFAULT_PEN };
   /** The highlighter's colour and size (the pen's `tool` says which one is in use). */
@@ -101,6 +105,14 @@ export class InkView extends FileView {
   readonly history = new History(() => this.renderHistory());
   private scroller!: HTMLElement;
   private pagesEl!: HTMLElement;
+  /**
+   * Holds the scroll size while a pinch scales the pages layer (a transform changes the
+   * layer's scrollable overflow, and a smaller one would move the scroll position).
+   */
+  private sizer!: HTMLElement;
+  private nav!: Navigator;
+  /** Zoom on top of the fitted width (1 = 100%), kept while the note is open (#9). */
+  private zoomLevel = 1;
   /** The "Add page" controls below the last page. */
   private footer!: HTMLElement;
   private messageEl!: HTMLElement;
@@ -147,6 +159,7 @@ export class InkView extends FileView {
     this.buildStrip();
     this.buildHistoryGroup();
     this.scroller = root.createDiv({ cls: 'nb-ink-scroll' });
+    this.sizer = this.scroller.createDiv({ cls: 'nb-ink-sizer' });
     this.pagesEl = this.scroller.createDiv({ cls: 'nb-ink-pages' });
     this.messageEl = this.scroller.createDiv({ cls: 'nb-ink-message' });
     this.messageEl.hide();
@@ -169,12 +182,21 @@ export class InkView extends FileView {
       eraser: () => this.eraser,
       erase: (target, path, radius, start) => this.eraseAlong(target, path, radius, start),
     }, (type, fn, options) => this.registerDomEvent(this.pagesEl, type, fn, options), this.stats.pen);
-    // A Pencil drag anywhere in the view, on a page or not, never scrolls it; fingers do. The
-    // rules are in blockStylusTouch.
+    // A Pencil drag anywhere in the view, on a page or not, never scrolls it (blockStylusTouch);
+    // finger drags over the pages move it through the navigator, never natively, and never
+    // reach Obsidian's sidebar swipes (blockFingerTouch).
     this.registerDomEvent(root, 'touchstart', e => blockStylusTouch(e), { passive: false });
-    this.registerDomEvent(root, 'touchmove', e => blockStylusTouch(e), { passive: false });
-    // Two fingers tapped undo, three redo; passive, so finger scrolling is untouched.
+    this.registerDomEvent(root, 'touchmove', e => blockStylusTouch(e) || blockFingerTouch(e, this.scroller), { passive: false });
+    // Two fingers tapped undo, three redo (a tap never pans: see NAV_SLOP in navigate.ts).
     listenForUndoTaps((type, fn, options) => this.registerDomEvent(this.pagesEl, type, fn, options), () => this.undo(), () => this.redo());
+    // One or two fingers pan with momentum, two pinch-zoom; Ctrl/Cmd+wheel zooms.
+    this.nav = new Navigator(this.scroller, {
+      zoom: () => this.zoomLevel,
+      preview: (k, x, y) => this.preview(k, x, y),
+      commit: (z, x, y, vx, vy) => this.commitZoom(z, x, y, vx, vy),
+      moved: () => this.input.viewMoved(),
+      statsChanged: () => this.renderStats(),
+    }, (type, fn, options) => this.registerDomEvent(this.scroller, type, fn, options), this.stats.nav);
     // Ctrl/Cmd+Z and Shift+Ctrl/Cmd+Z when focus is in the view, if the commands' hotkeys didn't take them.
     this.registerDomEvent(this.containerEl, 'keydown', e => this.historyKey(e));
 
@@ -219,6 +241,7 @@ export class InkView extends FileView {
     window.clearTimeout(this.resizeTimer);
     cancelAnimationFrame(this.updateFrame);
     cancelAnimationFrame(this.pumpFrame);
+    this.nav.reset();
     this.input.destroy();
     this.templates.clear();
     releaseScratch();
@@ -259,8 +282,11 @@ export class InkView extends FileView {
     this.store = store;
     this.theme = currentTheme();
     this.messageEl.hide();
+    // Another note starts at 100%, at the top.
+    this.zoomLevel = this.stats.nav.zoom = 1;
     this.buildPages();
     this.relayout();
+    this.scroller.scrollTop = this.scroller.scrollLeft = 0;
     this.update();
     this.stats.openMs = performance.now() - t0;
   }
@@ -294,6 +320,8 @@ export class InkView extends FileView {
     this.store = null;
     this.history.clear();
     this.input.cancel();
+    this.nav.reset();
+    this.preview(1, 0, 0);
     const saved = store.flush();
     store.close();
     this.clearPages();
@@ -316,7 +344,8 @@ export class InkView extends FileView {
     }
     this.pages = [];
     this.footer.hide();
-    this.pagesEl.style.height = '';
+    this.pagesEl.style.height = this.pagesEl.style.width = '';
+    this.sizer.style.height = this.sizer.style.width = '';
     this.updateStats();
   }
 
@@ -347,22 +376,29 @@ export class InkView extends FileView {
     }
   }
 
-  /** Positions page elements for the current width. Returns false if the view has no width yet. */
-  private relayout(): boolean {
+  /**
+   * Positions page elements for the current width and zoom. When the scale changed, the scroll
+   * position is kept on the same part of the page at the top of the view, unless `keep` is false
+   * (a zoom places it itself). Returns false if the view has no width yet.
+   */
+  private relayout(keep = true): boolean {
     const store = this.store;
     const width = this.scroller.clientWidth;
     if (!store || width <= 0) return false;
     const old = this.layout;
     let anchor: { index: number; at: number } | null = null;
-    if (old && old.pages.length) {
+    if (keep && old && old.pages.length) {
       const index = pageAtY(old, this.scroller.scrollTop);
       const box = old.pages[index];
       anchor = { index, at: (this.scroller.scrollTop - box.top) / box.height };
     }
-    const layout = layoutPages(this.pages.map(pv => pv.slot.size), width, store.paperSize);
+    const layout = layoutPages(this.pages.map(pv => pv.slot.size), width, store.paperSize, this.zoomLevel);
     this.layout = layout;
     this.width = width;
-    this.pagesEl.style.height = `${layout.height}px`;
+    for (const el of [this.pagesEl, this.sizer]) {
+      el.style.width = `${layout.width}px`;
+      el.style.height = `${layout.height}px`;
+    }
     this.pages.forEach((pv, i) => {
       const b = layout.pages[i], s = pv.el.style;
       s.top = `${b.top}px`;
@@ -404,11 +440,14 @@ export class InkView extends FileView {
     }
   }
 
-  /** The pages to keep bitmaps for: the viewport and one page height either side. */
+  /**
+   * The pages to keep bitmaps for: the viewport and one page height either side, a page height
+   * at 100% when zoomed in (so at 400% at most two or three pages have bitmaps).
+   */
   private band(): { near: Set<number>; visible: number[] } {
     const layout = this.layout!;
     const top = this.scroller.scrollTop, height = this.scroller.clientHeight;
-    const pageHeight = layout.pages.reduce((h, p) => Math.max(h, p.height), 0);
+    const pageHeight = layout.pages.reduce((h, p) => Math.max(h, p.height), 0) / Math.max(1, layout.zoom);
     return {
       near: new Set(pagesInBand(layout, top - pageHeight, top + height + pageHeight)),
       visible: pagesInBand(layout, top, top + height),
@@ -420,7 +459,9 @@ export class InkView extends FileView {
    * pages near the viewport one per frame.
    */
   private update() {
-    if (!this.store || !this.layout) return;
+    // While a pinch scales the layer, the scroll position doesn't say what's on screen: keep the
+    // bitmaps as they are until the zoom is committed.
+    if (!this.store || !this.layout || this.nav.previewing) return;
     const { near, visible } = this.band();
     this.pages.forEach((pv, i) => {
       if (!near.has(i)) this.dropBitmap(pv);
@@ -434,7 +475,7 @@ export class InkView extends FileView {
     if (this.pumpFrame) return;
     this.pumpFrame = requestAnimationFrame(() => {
       this.pumpFrame = 0;
-      if (!this.store || !this.layout) return;
+      if (!this.store || !this.layout || this.nav.previewing) return;
       const { near, visible } = this.band();
       const mid = visible.length ? (visible[0] + visible[visible.length - 1]) / 2 : 0;
       const next = [...near]
@@ -716,13 +757,90 @@ export class InkView extends FileView {
     });
   }
 
+  // ---- zoom (#9)
+
+  /** The zoom on top of the fitted width: 1 is 100%, from 0.5 to 4. */
+  get zoom(): number {
+    return this.zoomLevel;
+  }
+
+  /**
+   * Zooms to `z` (clamped to 0.5-4) keeping the page point at `centre` (px from the top-left of
+   * the visible pages area; by default its middle) where it is, and redraws the visible pages.
+   */
+  setZoom(z: number, centre?: { x: number; y: number }) {
+    this.nav.stopMomentum();
+    this.nav.commitWheel();
+    const sc = this.scroller;
+    const c = centre ?? { x: sc.clientWidth / 2, y: sc.clientHeight / 2 };
+    this.commitZoom(z, sc.scrollLeft + c.x, sc.scrollTop + c.y, c.x, c.y);
+    this.renderStats();
+  }
+
+  /** The next 25% step up. */
+  zoomIn() {
+    this.setZoom(zoomStep(this.zoomLevel, 1));
+  }
+
+  /** The next 25% step down. */
+  zoomOut() {
+    this.setZoom(zoomStep(this.zoomLevel, -1));
+  }
+
+  resetZoom() {
+    this.setZoom(1);
+  }
+
+  /** Scales the pages layer by k around (x, y) of the layer during a pinch; k = 1 removes it. */
+  private preview(k: number, x: number, y: number) {
+    const s = this.pagesEl.style;
+    if (k === 1) {
+      s.transform = s.transformOrigin = '';
+      return;
+    }
+    s.transformOrigin = `${x}px ${y}px`;
+    s.transform = `scale(${k})`;
+  }
+
+  /**
+   * Makes `z` the zoom: removes any pinch transform, lays out again, scrolls so that the page
+   * point at (x, y) of the pages layer (laid out as before) is at (vx, vy) of the viewport, then
+   * redraws the visible pages at the new size and drops the other bitmaps of the old size.
+   */
+  private commitZoom(z: number, x: number, y: number, vx: number, vy: number) {
+    this.preview(1, 0, 0);
+    z = clampZoom(z);
+    const old = this.layout, changed = z !== this.zoomLevel;
+    this.zoomLevel = this.stats.nav.zoom = z;
+    this.stats.nav.at = performance.now();
+    if (!this.store || !old) return;
+    const a = anchorAt(old, x, y);
+    if (changed) this.relayout(false);
+    if (a && this.layout) {
+      // Whole px: browsers may truncate a fractional scroll position.
+      const to = scrollToKeep(this.layout, a, vx, vy);
+      this.scroller.scrollLeft = Math.round(to.left);
+      this.scroller.scrollTop = Math.round(to.top);
+    }
+    if (changed) {
+      const { visible } = this.band();
+      this.pages.forEach((pv, i) => {
+        if (!pv.bitmap) return;
+        if (visible.includes(i)) this.renderPage(pv);
+        else this.dropBitmap(pv);
+      });
+    }
+    this.update();
+    this.input.viewMoved();
+  }
+
   // ---- stats overlay
 
   get statsShown(): boolean {
     return !!this.statsEl && this.statsEl.style.display !== 'none';
   }
 
-  /** Shows or hides the pen stats overlay. */
+  /** Shows or hides the stats overlay (pen and navigation). */
   toggleStats() {
     if (this.statsShown) this.statsEl.hide();
     else this.statsEl.show();
@@ -730,7 +848,7 @@ export class InkView extends FileView {
   }
 
   private renderStats() {
-    if (this.statsShown) this.statsEl.setText(penStatsLines(this.stats.pen, this.pen).join('\n'));
+    if (this.statsShown) this.statsEl.setText([...penStatsLines(this.stats.pen, this.pen), ...navStatsLines(this.stats.nav)].join('\n'));
   }
 
   // ---- adding pages
