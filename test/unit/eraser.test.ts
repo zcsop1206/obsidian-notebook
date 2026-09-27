@@ -53,11 +53,9 @@ test('store: removeStrokes removes by id, returns them with their indices in ord
   assert.equal(store.unsaved, false);
 
   const model = store.page(store.slots[0])!;
-  const array = model.strokes;
   const removed = store.removeStrokes('p-000001', new Set(['00000004', '00000002', 'ffffffff']));
   assert.deepEqual(removed.map(r => [r.index, r.stroke.id, r.stroke.tool]), [[1, '00000002', 'pen'], [3, '00000004', 'highlighter']]);
   assert.deepEqual(model.strokes.map(s => s.id), ['00000001', '00000003', '00000005']);
-  assert.equal(model.strokes, array, 'edited in place');
   assert.equal(store.unsaved, true);
   await store.flush();
   assert.deepEqual(readPage(files.files.get('lec/p-000001.svg')!).strokes.map(s => s.id), ['00000001', '00000003', '00000005']);

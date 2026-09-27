@@ -1199,6 +1199,31 @@ try:
         }""")
         check('eraser: the autosave writes the page without the erased strokes', r['writes'] == 1 and r['disk'] == [er_ids[0], er_ids[4], er_ids[5]], r)
 
+        # Undo and redo (#8): one drag that erases two lines (over several frames) is one undo step.
+        r = ev("""async () => {
+          const path = view.store.slots[0].path, n = view.history.labels.length;
+          await T.pen(0, Array.from({ length: 501 }, (_, j) => [100 + j, 300, 0.3]), { predict: 0 });
+          const erased = { ids: T.ids(), steps: view.history.labels.length - n, label: view.history.labels.slice(-1)[0],
+            frames: view.input.lastErase.frames, lines: [150, 550].map(x => T.darkIn(0, x - 5, 220, x + 5, 380)) };
+          const undid = view.undo();
+          await view.save();
+          const undone = { undid, ids: T.ids(), disk: ink.readPage(fs.get(path)).strokes.map(s => s.id), lines: [150, 550].map(x => T.darkIn(0, x - 5, 220, x + 5, 380)) };
+          view.redo();
+          await view.save();
+          const redone = { ids: T.ids(), disk: ink.readPage(fs.get(path)).strokes.map(s => s.id), lines: [150, 550].map(x => T.darkIn(0, x - 5, 220, x + 5, 380)) };
+          view.undo();  // back to three strokes for the checks below
+          await view.save();
+          return { erased, undone, redone, index: view.pages[0].spatial.size, strokes: T.ids().length };
+        }""")
+        print('eraser: undo and redo:', r)
+        check('eraser: a drag erasing two lines over several frames is one "Erase" undo step',
+              r['erased']['ids'] == [er_ids[5]] and r['erased']['steps'] == 1 and r['erased']['label'] == 'Erase' and r['erased']['frames'] > 10 and r['erased']['lines'] == [0, 0], r['erased'])
+        check('eraser: undo brings both lines back, in place (model, bitmap, and the file after saving)',
+              r['undone']['undid'] and r['undone']['ids'] == [er_ids[0], er_ids[4], er_ids[5]] and r['undone']['disk'] == r['undone']['ids'] and all(n > 50 for n in r['undone']['lines']), r['undone'])
+        check('eraser: redo removes them again (model, bitmap, file)',
+              r['redone']['ids'] == [er_ids[5]] and r['redone']['disk'] == [er_ids[5]] and r['redone']['lines'] == [0, 0], r['redone'])
+        check('eraser: the page index follows undo and redo', r['index'] == r['strokes'] == 3, r)
+
         # The highlighter stroke, touches, sizes and commands.
         r = ev("""async () => {
           const n = T.ids().length;

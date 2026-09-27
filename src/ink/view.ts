@@ -167,7 +167,7 @@ export class InkView extends FileView {
       statsChanged: () => this.renderStats(),
       strokeStyle: () => this.strokeStyle(),
       eraser: () => this.eraser,
-      erase: (target, path, radius) => this.eraseAlong(target, path, radius),
+      erase: (target, path, radius, start) => this.eraseAlong(target, path, radius, start),
     }, (type, fn, options) => this.registerDomEvent(this.pagesEl, type, fn, options), this.stats.pen);
     // A Pencil drag anywhere in the view, on a page or not, never scrolls it; fingers do. The
     // rules are in blockStylusTouch.
@@ -672,15 +672,16 @@ export class InkView extends FileView {
     this.setEraser({ size: nextEraserSize(this.eraser.size) });
   }
 
-  /** The eraser moved along `path` on a page: erases the strokes it touched. */
-  private eraseAlong(target: PageTarget, path: readonly { x: number; y: number }[], radius: number): number {
+  /** The eraser moved along `path` on a page: erases the strokes it touched, one undo step per drag. */
+  private eraseAlong(target: PageTarget, path: readonly { x: number; y: number }[], radius: number, start: boolean): number {
     const pv = target.key as PageView;
     const index = this.pages.indexOf(pv);
     const page = this.store && index >= 0 ? this.store.page(pv.slot) : null;
     if (!page) return 0;
     if (!pv.spatial) pv.spatial = new SpatialIndex(page.size, page.strokes);
+    if (start) this.lastErase = null; // a new drag: its first removal is a new undo step
     const ids = pv.spatial.hitPath(path, radius, this.eraseHits);
-    const n = ids.length ? this.eraseStrokes(index, ids).length : 0;
+    const n = ids.length ? this.eraseStrokes(index, ids, !start).length : 0;
     ids.length = 0;
     return n;
   }
@@ -842,19 +843,55 @@ export class InkView extends FileView {
   /**
    * Removes these strokes from page `pageIndex` as one undoable edit, keeps the page's eraser
    * index in step and redraws the page once. Every erase goes through here (the eraser, #7, via
-   * eraseAlong). Returns the removed strokes with the indices they had (see
-   * NoteStore.removeStrokes); nothing is recorded if nothing was removed. Saved by the autosave.
+   * eraseAlong). With `join`, the removal joins the previous erase if that was on the same page
+   * and is still the latest edit, so one eraser drag (erasing over many frames) is one undo
+   * step. Returns the removed strokes with the indices they had (see NoteStore.removeStrokes);
+   * nothing is recorded if nothing was removed. Saved by the autosave.
    */
-  eraseStrokes(pageIndex: number, ids: Iterable<string>): { index: number; stroke: Stroke }[] {
+  eraseStrokes(pageIndex: number, ids: Iterable<string>, join = false): { index: number; stroke: Stroke }[] {
     const pv = this.pages[pageIndex];
-    if (!this.store || !pv) return [];
-    const removed = this.store.removeStrokes(pv.slot.id, ids);
+    const store = this.store;
+    if (!store || !pv) return [];
+    const pageId = pv.slot.id;
+    const removed = store.removeStrokes(pageId, ids);
     if (!removed.length) return removed;
     if (pv.spatial) for (const r of removed) pv.spatial.remove(r.stroke.id);
-    this.redrawPage(pv.slot.id);
-    this.recordStrokes('Erase', pv.slot.id, removed, false);
+    this.redrawPage(pageId);
+    const last = this.lastErase, depth = this.history.labels.length;
+    if (join && last && last.store === store && last.pageId === pageId && last.depth === depth && !this.history.canRedo) {
+      last.batches.push(removed);
+      return removed;
+    }
+    // Each batch's indices are those before it was removed: undo puts the batches back latest first.
+    const batches = [removed];
+    const spatial = () => this.pages.find(p => p.slot.id === pageId)?.spatial;
+    this.history.push({
+      label: 'Erase',
+      undo: () => {
+        if (this.store !== store) return;
+        const index = spatial();
+        for (let i = batches.length - 1; i >= 0; i--) {
+          store.insertStrokes(pageId, batches[i]);
+          if (index) for (const e of batches[i]) index.add(e.stroke);
+        }
+        this.redrawPage(pageId);
+      },
+      redo: () => {
+        if (this.store !== store) return;
+        const ids: string[] = [];
+        for (const b of batches) for (const e of b) ids.push(e.stroke.id);
+        store.removeStrokes(pageId, ids);
+        const index = spatial();
+        if (index) for (const id of ids) index.remove(id);
+        this.redrawPage(pageId);
+      },
+    });
+    this.lastErase = { store, pageId, batches, depth: this.history.labels.length };
     return removed;
   }
+
+  /** The latest erase edit, which the next frames of the same eraser drag join. */
+  private lastErase: { store: NoteStore; pageId: string; batches: { index: number; stroke: Stroke }[][]; depth: number } | null = null;
 
   /**
    * Records strokes added to (`added`) or removed from a page, with the indices they have (or
