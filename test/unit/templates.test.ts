@@ -197,3 +197,26 @@ test('store: pdf:<name> defaults resolve through the resolver; unknown names fal
   }
   assert.equal(warnings.length, 2);
 });
+
+test('store: changing a page\'s template to a sized one sets its size; the old size restores it', async () => {
+  const { store, files } = await openStore('letter', 'blank');
+  const slot = store.slots[0];
+  const had = { ...slot.size };
+  const before = store.setPageTemplate(slot.id, parseTemplateName('sticky-3in'), { width: 288, height: 288 });
+  assert.deepEqual(before, { kind: 'blank' });
+  assert.deepEqual([slot.size, store.page(slot)!.size], [{ width: 288, height: 288 }, { width: 288, height: 288 }]);
+  await store.flush();
+  assert.deepEqual(readPage(files.files.get(slot.path)!).size, { width: 288, height: 288 });
+  store.setPageTemplate(slot.id, before!, had);
+  assert.deepEqual(store.page(slot)!.size, { width: 816, height: 1056 });
+  // Without a size, the size is kept.
+  store.setPageTemplate(slot.id, { kind: 'grid', spacing: '5mm' });
+  assert.deepEqual(slot.size, { width: 816, height: 1056 });
+  // All pages: each entry of what was replaced has the size it had.
+  store.addPage();
+  const all = store.setAllTemplates(parseTemplateName('index-card'), { width: 480, height: 288 });
+  assert.deepEqual(all.pages.map(p => p.size), [{ width: 816, height: 1056 }, { width: 816, height: 1056 }]);
+  assert.ok(store.slots.every(s => s.size.width === 480 && s.size.height === 288));
+  for (const p of all.pages) store.setPageTemplate(p.id, p.template, p.size);
+  assert.ok(store.slots.every(s => s.size.width === 816));
+});

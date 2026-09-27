@@ -3642,6 +3642,32 @@ try:
         check('pdf template note: each page file renders its background (GitHub, reading view)', all(n > 2000 for n in r['imgs']), r['imgs'])
         check('pdf template note: a sharp render of the PDF page at 200%', r['sharp'], r)
 
+        # Changing a Letter page to the PDF template takes the PDF page's size; undo restores both.
+        r = ev("""async () => {
+          await T.newNote('Resize', 'blank', 'letter');
+          const size = () => ({ ...view.store.slots[0].size }), kind = () => view.store.page(view.store.slots[0]).template.kind;
+          const ratio = () => Math.round(T.pages()[0].offsetWidth / T.pages()[0].offsetHeight * 1000) / 1000;
+          commands['change-page-template'].checkCallback(false);
+          await T.choose('engineering (PDF)');
+          await T.sleep(100);
+          const after = [size(), kind(), ratio()];
+          view.undo();
+          await T.sleep(100);
+          const undone = [size(), kind(), ratio()];
+          view.chooseTemplate('all');
+          await T.choose('Sticky note 3 × 3 in');
+          const all = [size(), kind()];
+          view.undo();
+          await view.save();
+          return { after, undone, all, disk: ink.readPage(fs.get(view.store.slots[0].path)).size };
+        }""")
+        print('resize:', r)
+        check('resize: a Letter page changed to the PDF template gets the PDF page\'s size, and undo restores 816 x 1056 and blank',
+              r['after'][:2] == [{'width': 793.7, 'height': 1122.5}, 'pdf'] and abs(r['after'][2] - 793.7 / 1122.5) < 0.01
+              and r['undone'][:2] == [{'width': 816, 'height': 1056}, 'blank'] and abs(r['undone'][2] - 816 / 1056) < 0.01, r)
+        check('resize: "all pages" to the sticky note resizes too; undo restores the size on disk',
+              r['all'] == [{'width': 288, 'height': 288}, 'fill'] and r['disk'] == {'width': 816, 'height': 1056}, r)
+
         # The chooser lists PDF templates after the built-ins; "Custom size…" only when adding.
         r = ev("""async () => {
           await app.workspace.getLeaf(false).setViewState({ type: 'notebook-ink', state: { file: '""" + sticky_file + """' }, active: true });
