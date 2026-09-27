@@ -1,6 +1,9 @@
-# Drives the spike in headless Chromium with a mock obsidian module and a fake mic.
-# Run from anywhere: python test/run_spike_test.py. Screenshots land in test/out/.
+# Drives the ink debug view (the former spike) in headless Chromium with a mock obsidian module
+# and a fake mic, against the built main.js. Run `npm test` (builds first), or
+# python test/run_spike_test.py after `npm run build`. Screenshots land in test/out/.
+# Exits non-zero if any check fails.
 import json, os, re, subprocess, sys, time
+import xml.etree.ElementTree as ET
 from playwright.sync_api import sync_playwright
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -9,6 +12,13 @@ os.makedirs(OUT, exist_ok=True)
 port = 8765
 srv = subprocess.Popen([sys.executable, '-m', 'http.server', str(port)], cwd=os.path.dirname(HERE), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 time.sleep(1)
+
+failures = []
+
+def check(name, ok, detail=''):
+    print(('PASS ' if ok else 'FAIL ') + name + (f' ({detail})' if detail and not ok else ''))
+    if not ok:
+        failures.append(name)
 
 def dump_fs(page):
     return page.evaluate("""() => [...fs.entries()].map(([k, v]) => [k, typeof v === 'string' ? v.length : v.length, typeof v])""")
@@ -54,6 +64,21 @@ try:
         svg = page.evaluate(f"() => fs.get('{svg_name}')")
         meta = json.loads(re.search(r'<!\[CDATA\[(.*)\]\]>', svg).group(1))
         print('SVG', svg_name, len(svg), 'bytes;', len(meta['strokes']), 'strokes;', [s['type'] for s in meta['strokes']], 'first pts', meta['strokes'][0]['pts'][:3])
+        # Three pen strokes, a pen tap and a mouse stroke draw; the finger touch is ignored.
+        types = [s['type'] for s in meta['strokes']]
+        check('ink: five strokes saved with their pointer types', types == ['pen', 'pen', 'pen', 'pen', 'mouse'], types)
+        check('ink: every stroke has [x, y, pressure, ms] points',
+              all(s['pts'] and all(len(pt) == 4 for pt in s['pts']) for s in meta['strokes']) and max(len(s['pts']) for s in meta['strokes']) > 50)
+        check('ink: finger touch ignored', 'finger touches ignored 1' in page.inner_text('.nbspike-hud'))
+        try:
+            NS = '{http://www.w3.org/2000/svg}'
+            root = ET.fromstring(svg)
+            md = root.find(NS + 'metadata')
+            svg_ok = (root.tag == NS + 'svg' and md is not None and json.loads(md.text)['format'] == 'notebook-ink/0'
+                      and len(root.findall(NS + 'path')) == len(meta['strokes']))
+            check('ink: SVG parses, with notebook-ink/0 metadata and one path per stroke', svg_ok)
+        except Exception as e:
+            check('ink: SVG parses, with notebook-ink/0 metadata and one path per stroke', False, repr(e))
         print('RESULTS.md:\n' + page.evaluate("() => fs.get('_spike/_results.md')"))
         with open(os.path.join(OUT, 'ink.svg'), 'w') as f: f.write(svg)
         for scheme in ['light', 'dark']:
@@ -75,14 +100,20 @@ try:
         dirA = page.evaluate("() => p.recorder.dir")
         print('LOG A:\n' + page.evaluate(f"() => fs.get('{dirA}/_log.md')"))
 
-        decode = """async (path) => {
+        decode_js = """async (path) => {
           const bytes = fs.get(path);
           const ac = new OfflineAudioContext(1, 1, 48000);
-          try { const buf = await ac.decodeAudioData(bytes.slice().buffer); return `${path}: ${bytes.length} bytes, decodes to ${buf.duration.toFixed(2)} s`; }
-          catch (e) { return `${path}: ${bytes.length} bytes, DECODE FAILED ${e}`; }
+          try { const buf = await ac.decodeAudioData(bytes.slice().buffer); return { ok: buf.duration > 0, text: `${path}: ${bytes.length} bytes, decodes to ${buf.duration.toFixed(2)} s` }; }
+          catch (e) { return { ok: false, text: `${path}: ${bytes.length} bytes, DECODE FAILED ${e}` }; }
         }"""
-        for f in page.evaluate(f"() => [...fs.keys()].filter(k => k.startsWith('{dirA}/audio-'))"):
-            print(page.evaluate(decode, f))
+        def decode(path):
+            r = page.evaluate(decode_js, path)
+            print(r['text'])
+            return r
+        segsA = page.evaluate(f"() => [...fs.keys()].filter(k => k.startsWith('{dirA}/audio-'))")
+        decA = [decode(f) for f in segsA]
+        check('audio A: hide, killed mic and return produced two segments', len(segsA) == 2, segsA)
+        check('audio A: both segments decode', bool(decA) and all(r['ok'] for r in decA))
 
         # --- audio C: what the iPad does. Hidden, then back with the mic live and the recorder
         # saying "recording" but delivering nothing. Then the same stall while visible (watchdog).
@@ -99,14 +130,14 @@ try:
         logC = page.evaluate(f"() => fs.get('{dirC}/_log.md')")
         print('LOG C:\n' + logC)
         segsC = sorted(page.evaluate(f"() => [...fs.keys()].filter(k => k.startsWith('{dirC}/audio-'))"))
-        for f in segsC:
-            print(page.evaluate(decode, f))
+        decC = [decode(f) for f in segsC]
         metaC = json.loads(page.evaluate(f"() => fs.get('{dirC}/meta.json')"))
         print('META C segments:', metaC['segments'])
         segs = metaC['segments']
         ok_meta = [x['file'] for x in segs] == [f.split('/')[-1] for f in segsC] and segs[0]['startMs'] < 1000 and 'audioEndMs' in segs[0] and segs[1]['startMs'] > segs[0]['audioEndMs']
-        ok_c = ok_meta and len(segsC) == 3 and 'back after' in logC and 'no audio for' in logC and 'DECODE FAILED' not in ''.join(page.evaluate(decode, f) for f in segsC)
+        ok_c = ok_meta and len(segsC) == 3 and 'back after' in logC and 'no audio for' in logC and all(r['ok'] for r in decC)
         print('AUDIO C', 'ok: return and watchdog each started a new segment' if ok_c else 'FAILED')
+        check('audio C: return and watchdog each started a new segment, with start times in meta.json', ok_c)
 
         # --- audio B: no appendBinary, then a crash mid-recording, then recovery on next load
         page.evaluate("async () => { delete adapter.appendBinary; await p.recorder.start(); }")
@@ -118,11 +149,19 @@ try:
         page.evaluate("async () => { window.p2 = await loadPlugin(); await new Promise(r => setTimeout(r, 500)); }")
         after = [k for k, *_ in dump_fs(page) if k.startswith(dirB)]
         print('after recovery:', after)
-        print('LOG B tail:\n' + '\n'.join(page.evaluate(f"() => fs.get('{dirB}/_log.md')").splitlines()[-3:]))
-        for f in [k for k in after if '/audio-' in k]:
-            print(page.evaluate(decode, f))
+        logB = page.evaluate(f"() => fs.get('{dirB}/_log.md')")
+        print('LOG B tail:\n' + '\n'.join(logB.splitlines()[-3:]))
+        decB = [decode(f) for f in after if '/audio-' in f]
+        check('audio B: recovery merged the parts into a file that decodes',
+              bool(decB) and all(r['ok'] for r in decB) and not any('/parts-' in k for k in after) and 'rebuilt from parts' in logB)
         print('notices:', page.evaluate("() => notices"))
         print('page errors:', errors)
+        check('no page errors', not errors, errors)
         b.close()
 finally:
     srv.terminate()
+
+if failures:
+    print(f'\n{len(failures)} check(s) FAILED: ' + '; '.join(failures))
+    sys.exit(1)
+print('\nAll checks passed.')
