@@ -99,8 +99,8 @@ export function noteTemplate(name: string): Template {
 export interface TemplatesBefore {
   /** The note's `template:` name. */
   note: string;
-  /** Each page that could be read and the template it had. */
-  pages: { id: string; template: Template }[];
+  /** Each page that could be read and the template it had (and its size, when a size was given). */
+  pages: { id: string; template: Template; size?: Size }[];
 }
 
 /** 32-bit FNV-1a with the length: enough to recognise our own writes without keeping the text. */
@@ -267,17 +267,26 @@ export class NoteStore {
    * Sets one page's template; the strokes are untouched. Returns the template it had (to undo,
    * set that again), or null if there's no such page or it can't be read.
    */
-  setPageTemplate(pageId: string, template: Template): Template | null {
+  setPageTemplate(pageId: string, template: Template, size?: Size): Template | null {
     const slot = this.slots.find(s => s.id === pageId);
     const page = slot && this.page(slot);
     if (!slot || !page) return null;
     const before = page.template;
     const next = parseTemplate(template);
+    let changed = false;
     if (!sameTemplate(next, before)) {
       page.template = next;
-      this.changed(slot);
+      changed = true;
       if (next.kind === 'pdf') this.options.templateUsed?.(next, this.folder);
     }
+    // A sized template (#27) or a PDF template (#21) brings its page size; the caller reads the
+    // old size (slot.size) first to undo it.
+    if (size && (size.width !== page.size.width || size.height !== page.size.height)) {
+      page.size = { width: size.width, height: size.height };
+      slot.size = page.size;
+      changed = true;
+    }
+    if (changed) this.changed(slot);
     return before;
   }
 
@@ -285,12 +294,13 @@ export class NoteStore {
    * Sets the template of every page that can be read, and makes it the note's default for new
    * pages. Returns what it replaced.
    */
-  setAllTemplates(template: Template): TemplatesBefore {
+  setAllTemplates(template: Template, size?: Size): TemplatesBefore {
     const pages: TemplatesBefore['pages'] = [];
     for (const slot of this.slots) {
       if (!this.page(slot)) continue;
-      const before = this.setPageTemplate(slot.id, template);
-      if (before) pages.push({ id: slot.id, template: before });
+      const had = { ...slot.size };
+      const before = this.setPageTemplate(slot.id, template, size);
+      if (before) pages.push(size ? { id: slot.id, template: before, size: had } : { id: slot.id, template: before });
     }
     return { note: this.setNoteTemplate(template), pages };
   }

@@ -970,8 +970,8 @@ export class InkView extends FileView {
     const placeholder = scope === 'add' ? 'Template of the new page' : scope === 'page' ? 'Template of this page' : 'Template of all pages';
     new TemplateChooser(this.app, placeholder, (template, size) => {
       if (scope === 'add') this.addPage(template, size);
-      else if (scope === 'page') this.setPageTemplate(this.currentPageIndex(), template);
-      else this.setAllTemplates(template);
+      else if (scope === 'page') this.setPageTemplate(this.currentPageIndex(), template, size);
+      else this.setAllTemplates(template, size);
     }, templateRegistry()?.entries ?? [], scope === 'add').open();
   }
 
@@ -997,21 +997,29 @@ export class InkView extends FileView {
    * Changes page `index`'s template, keeping its ink, and redraws it. Returns the template it
    * had, or null if there's no such page or it can't be read.
    */
-  setPageTemplate(index: number, template: Template): Template | null {
+  setPageTemplate(index: number, template: Template, size?: Size): Template | null {
     const pv = this.pages[index];
     if (!this.store || !pv) return null;
-    const before = this.store.setPageTemplate(pv.slot.id, template);
-    if (before && pv.bitmap) this.renderPage(pv);
-    if (before) this.recordPageTemplate(pv.slot.id, before, template);
+    const hadSize = { ...pv.slot.size };
+    const before = this.store.setPageTemplate(pv.slot.id, template, size);
+    if (before) this.relayoutRedraw([pv.slot.id]);
+    if (before) this.recordPageTemplate(pv.slot.id, before, template, hadSize, size);
     return before;
   }
 
+  /** After page sizes may have changed (#27, #21): relays out and redraws these pages. */
+  private relayoutRedraw(ids: string[]) {
+    this.relayout();
+    for (const pv of this.pages) if (ids.includes(pv.slot.id) && pv.bitmap) this.renderPage(pv);
+    this.update();
+  }
+
   /** Changes every page's template and the note's default, and redraws. Returns what it replaced. */
-  setAllTemplates(template: Template): TemplatesBefore | null {
+  setAllTemplates(template: Template, size?: Size): TemplatesBefore | null {
     if (!this.store) return null;
-    const before = this.store.setAllTemplates(template);
-    for (const pv of this.pages) if (pv.bitmap) this.renderPage(pv);
-    this.recordAllTemplates(before, template);
+    const before = this.store.setAllTemplates(template, size);
+    this.relayoutRedraw(this.pages.map(p => p.slot.id));
+    this.recordAllTemplates(before, template, size);
     return before;
   }
 
@@ -1151,36 +1159,37 @@ export class InkView extends FileView {
     this.history.push({ label, undo: added ? remove : insert, redo: added ? insert : remove });
   }
 
-  private recordPageTemplate(pageId: string, before: Template, after: Template) {
+  private recordPageTemplate(pageId: string, before: Template, after: Template, beforeSize?: Size, afterSize?: Size) {
     const store = this.store;
-    if (!store || sameTemplate(before, after)) return;
-    const set = (template: Template) => () => {
+    const resized = !!afterSize && !!beforeSize && (afterSize.width !== beforeSize.width || afterSize.height !== beforeSize.height);
+    if (!store || (sameTemplate(before, after) && !resized)) return;
+    const set = (template: Template, size?: Size) => () => {
       if (this.store !== store) return;
-      store.setPageTemplate(pageId, template);
-      this.redrawPage(pageId);
+      store.setPageTemplate(pageId, template, size);
+      this.relayoutRedraw([pageId]);
+      this.updateStats();
     };
-    this.history.push({ label: 'Change page template', undo: set(before), redo: set(after) });
+    this.history.push({ label: 'Change page template', undo: set(before, resized ? beforeSize : undefined), redo: set(after, afterSize) });
   }
 
-  private recordAllTemplates(before: TemplatesBefore | null, after: Template) {
+  private recordAllTemplates(before: TemplatesBefore | null, after: Template, size?: Size) {
     const store = this.store;
     if (!store || !before) return;
     const name = templateName(parseTemplate(after));
-    if (before.note === name && before.pages.every(p => templateName(p.template) === name)) return;
-    const redrawAll = () => {
-      for (const pv of this.pages) if (pv.bitmap) this.renderPage(pv);
-    };
+    const sameSize = (s?: Size) => !size || !s || (s.width === size.width && s.height === size.height);
+    if (before.note === name && before.pages.every(p => templateName(p.template) === name && sameSize(p.size))) return;
+    const redrawAll = () => this.relayoutRedraw(this.pages.map(p => p.slot.id));
     this.history.push({
       label: 'Change all templates',
       undo: () => {
         if (this.store !== store) return;
         store.setNoteTemplateName(before.note);
-        for (const p of before.pages) store.setPageTemplate(p.id, p.template);
+        for (const p of before.pages) store.setPageTemplate(p.id, p.template, p.size);
         redrawAll();
       },
       redo: () => {
         if (this.store !== store) return;
-        store.setAllTemplates(after);
+        store.setAllTemplates(after, size);
         redrawAll();
       },
     });
