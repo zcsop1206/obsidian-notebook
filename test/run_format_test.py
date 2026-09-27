@@ -182,7 +182,8 @@ try:
             check(f'pdf page {scheme}: loads at its own size', size == [794, 1123], size)
             check(f'pdf page {scheme}: the embedded page image is the background (red square, blue bar, white paper)',
                   near(r['at'][0], RED) and near(r['at'][1], BLUEBAR) and near(r['at'][3], (255, 255, 255), 8), r['at'])
-            check(f'pdf page {scheme}: the ink is drawn over it', near(r['at'][2], INK[scheme], 30), r['at'][2])
+            # The paper is the PDF's own white in both schemes, so default ink stays near-black.
+            check(f'pdf page {scheme}: the default ink is drawn over it, near-black in both schemes', near(r['at'][2], INK['light'], 30), r['at'][2])
             page.close()
         b.close()
 finally:

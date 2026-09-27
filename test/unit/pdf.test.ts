@@ -100,3 +100,13 @@ test('pdf page: bad pdf fields in the metadata are rejected', () => {
   assert.throws(() => readPage(svg.replace('"page":3', '"page":0')), /pdf page 0/);
   assert.throws(() => readPage(svg.replace('"source":"lecture/lecture.pdf"', '"source":"../x.pdf"')), /pdf source/);
 });
+
+test('pdf page: default ink does not flip in dark mode; other pages keep the dark-mode style', () => {
+  const pdf = writePage(newPage('p-0a1b2c', { width: 816, height: 1056 }, PDF));
+  assert.match(pdf, /<style>\.i\{fill:#1f1f1f\}\.t\{stroke:#c9c9c9\}<\/style>/);
+  assert.ok(!pdf.includes('prefers-color-scheme'));
+  for (const template of [{ kind: 'blank' }, { kind: 'grid', spacing: '5mm' }] as const) {
+    const svg = writePage(newPage('p-0a1b2c', { width: 816, height: 1056 }, template));
+    assert.ok(svg.includes('@media (prefers-color-scheme:dark){.i{fill:#e6e3de}.t{stroke:#3c3c3c}}'));
+  }
+});

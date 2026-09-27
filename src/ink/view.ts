@@ -21,7 +21,7 @@ import { DEFAULT_ERASER, ERASER_SIZES, nextEraserSize, withEraser, type EraserMo
 import { splitStroke } from './split';
 import { layoutPages, MARGIN, mostVisiblePage, pageAtY, pagesInBand, type Layout } from './layout';
 import { anchorAt, clampZoom, navStatsLines, Navigator, newNavStats, scrollToKeep, zoomStep, type NavStats } from './navigate';
-import { currentTheme, PageBitmap, releaseScratch, strokeColor, TemplateImages, warmOutlines, type Theme } from './renderer';
+import { currentTheme, PageBitmap, pageTheme, releaseScratch, strokeColor, TemplateImages, warmOutlines, type Theme } from './renderer';
 import { SpatialIndex } from './spatial';
 import { PagesPanel } from './pages-panel';
 import { NoteStore, type NoteFiles, type PageSlot, type TemplatesBefore } from './store';
@@ -140,6 +140,8 @@ export class InkView extends FileView {
   private layout: Layout | null = null;
   private theme: Theme = currentTheme();
   private templates = new TemplateImages();
+  /** The page the pen last landed on (pageAt), for the live stroke's colour. */
+  private penPage: Page | null = null;
   private resizeObserver: ResizeObserver | null = null;
   private resizeTimer = 0;
   private updateFrame = 0;
@@ -192,7 +194,8 @@ export class InkView extends FileView {
     this.input = new PenInput({
       pageAt: target => this.pageAt(target),
       pen: () => this.pen,
-      drawColor: color => strokeColor({ color }, this.theme),
+      // The pen asks for the colour right after pageAt; a pdf page's default ink stays dark (#14).
+      drawColor: color => strokeColor({ color }, pageTheme(this.penPage, this.theme)),
       commit: (target, stroke) => this.commit(target, stroke),
       statsChanged: () => this.renderStats(),
       strokeStyle: () => this.strokeStyle(),
@@ -603,6 +606,7 @@ export class InkView extends FileView {
     if (!pv) return null;
     const page = this.store.page(pv.slot);
     if (!page) return null;
+    this.penPage = page;
     return { key: pv, el: pv.el, size: page.size };
   }
 

@@ -165,10 +165,13 @@ function checkStroke(s: unknown, i: number, seen: Set<string>): StrokeHead {
 
 // ---- writing
 
-/** Default ink (`.i`, fill) and template lines (`.t`, stroke) follow dark mode. */
+/** Default ink (`.i`, fill) and template lines (`.t`, stroke) follow dark mode (not on pdf pages). */
 const STYLE =
   '<style>.i{fill:#1f1f1f}.t{stroke:#c9c9c9}' +
   '@media (prefers-color-scheme:dark){.i{fill:#e6e3de}.t{stroke:#3c3c3c}}</style>';
+
+/** For pdf pages (#14): the paper is the PDF's own, white in both modes, so the ink doesn't flip. */
+const PDF_STYLE = '<style>.i{fill:#1f1f1f}.t{stroke:#c9c9c9}</style>';
 
 function layer(id: string, attrs: string, items: string[]): string {
   const open = `<g id="${id}"${attrs}>`;
@@ -209,7 +212,7 @@ export function writePage(page: Page): string {
   const w = fmt1(size.width), h = fmt1(size.height);
   return [
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">`,
-    STYLE,
+    template.kind === 'pdf' ? PDF_STYLE : STYLE,
     // `]]>` could only occur inside a JSON string, where `>` may be escaped instead.
     `<metadata><![CDATA[${meta.replace(/]]>/g, ']]\\u003e')}]]></metadata>`,
     layer('template', '', renderTemplate(template, size)),

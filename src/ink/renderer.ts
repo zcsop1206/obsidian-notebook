@@ -24,6 +24,14 @@ export function currentTheme(): Theme {
   return document.body.classList.contains('theme-dark') ? DARK : LIGHT;
 }
 
+/**
+ * The theme a page's ink is drawn in. A pdf page's paper is the PDF's own (white), so its
+ * default ink stays the light theme's near-black in dark mode too, as in its SVG file (#14).
+ */
+export function pageTheme(page: Pick<Page, 'template'> | null | undefined, theme: Theme): Theme {
+  return page?.template.kind === 'pdf' && theme.ink !== LIGHT.ink ? { ...theme, ink: LIGHT.ink } : theme;
+}
+
 export const strokeColor = (s: Pick<Stroke, 'color'>, theme: Theme) => (s.color === DEFAULT_INK ? theme.ink : s.color);
 
 /** Matches the highlight layer's `opacity="0.4"` in the page SVG. */
@@ -282,6 +290,7 @@ export class PageBitmap {
    * renderPen, a page can be drawn over several frames (#9), each rasterising only part of it.
    */
   renderBase(page: Page, theme: Theme, template: CanvasImageSource | null) {
+    theme = pageTheme(page, theme);
     const { ctx, canvas } = this;
     const w = canvas.width, h = canvas.height;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -310,6 +319,7 @@ export class PageBitmap {
    * Returns the index to continue from (the number of strokes once all are drawn).
    */
   renderPen(page: Page, theme: Theme, from: number, count: number): number {
+    theme = pageTheme(page, theme);
     this.pageTransform(this.ctx, page.size);
     const strokes = page.strokes;
     let i = from;
@@ -331,7 +341,7 @@ export class PageBitmap {
       return;
     }
     this.pageTransform(this.ctx, page.size);
-    this.fill(stroke, theme);
+    this.fill(stroke, pageTheme(page, theme));
   }
 
   private fill(s: Stroke, theme: Theme) {
