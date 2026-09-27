@@ -198,7 +198,8 @@ test('invalid page data is rejected', () => {
 test('writePage rejects pages it cannot write', () => {
   const page = randomPage(seeded(10), 2, 'pen/uniform');
   assert.throws(() => writePage({ ...page, id: 'p-12' }), /invalid page id/);
-  assert.throws(() => writePage({ ...page, template: { kind: 'lined' } as never }), /Unknown page template "lined"/);
+  assert.throws(() => writePage({ ...page, template: { kind: 'wallpaper' } as never }), /Unknown page template "wallpaper"/);
+  assert.throws(() => writePage({ ...page, template: { kind: 'lined' } as never }), /lined rule undefined/);
   assert.throws(() => writePage({ ...page, strokes: [{ ...page.strokes[0], points: [] }] }), /no points/);
   assert.throws(() => writePage({ ...page, strokes: [page.strokes[0], page.strokes[0]] }), /used twice/);
 });
