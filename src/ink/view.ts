@@ -11,7 +11,7 @@ import { parseTemplate, templateName } from '../format/template';
 import type { Stroke } from '../format/page';
 import { listenForUndoTaps } from './gestures';
 import { History } from './history';
-import { blockFingerTouch, blockStylusTouch, newPenStats, PenInput, penStatsLines, type EraseTally, type NewStroke, type PageTarget, type PenStats, type StrokeStyle } from './input';
+import { blockFingerTouch, blockStylusTouch, eraseStatsLines, newPenStats, PenInput, penStatsLines, type EraseTally, type NewStroke, type PageTarget, type PenStats, type StrokeStyle } from './input';
 import { COLOR_PRESETS, DEFAULT_PEN, nextColor, nextSize, SIZE_PRESETS, SIZE_STEP, withPen, type PenSettings } from './pen';
 import {
   DEFAULT_HIGHLIGHTER, HIGHLIGHTER_COLORS, HIGHLIGHTER_SIZES, nextHighlighterColor, nextHighlighterSize, withHighlighter,
@@ -994,7 +994,7 @@ export class InkView extends FileView {
   }
 
   private renderStats() {
-    if (this.statsShown) this.statsEl.setText([...penStatsLines(this.stats.pen, this.pen), ...navStatsLines(this.stats.nav)].join('\n'));
+    if (this.statsShown) this.statsEl.setText([...penStatsLines(this.stats.pen, this.pen), ...eraseStatsLines(this.input.lastErase), ...navStatsLines(this.stats.nav)].join('\n'));
   }
 
   // ---- adding pages
