@@ -86,13 +86,23 @@ export function fmt1(n: number): string {
   return r === 0 ? '0' : String(r);
 }
 
-/** The SVG path `d` for a stroke's filled outline, with coordinates rounded to 0.1 px. */
+/**
+ * The SVG path `d` for a stroke's filled outline, with coordinates rounded to 0.1 px. The pen's
+ * outline is drawn with quadratic curves through its points (smoothCurve), so its edges are
+ * curved rather than a polygon's straight segments; the highlighter's stays a polygon, to keep
+ * its flat ends square.
+ */
 export function strokePath(stroke: OutlineInput): string {
   const { points, size } = stroke;
   if (points.length === 0) return '';
   if (points.length === 1) return dot(points[0].x, points[0].y, size / 2);
-  const outline = getStroke(points.map(pt => [pt.x, pt.y, pt.p]), { ...outlineOptions(stroke), size });
-  return polygon(outline);
+  const outline = strokeOutline(stroke);
+  return stroke.tool === 'pen' ? smoothCurve(outline) : polygon(outline);
+}
+
+/** The outline's points, as perfect-freehand computes them. */
+export function strokeOutline(stroke: OutlineInput): number[][] {
+  return getStroke(stroke.points.map(pt => [pt.x, pt.y, pt.p]), { ...outlineOptions(stroke), size: stroke.size });
 }
 
 /** A closed polygon as `M x y L x y … Z`, dropping points that round onto the previous one. */
@@ -105,6 +115,28 @@ export function polygon(pts: readonly (readonly number[])[]): string {
     last = xy;
   }
   return d ? d + 'Z' : '';
+}
+
+/**
+ * A closed curve through an outline, perfect-freehand's recommended conversion: the midpoints
+ * between consecutive points are on the curve and each point is the control point of a
+ * quadratic (`M mid Q x y mid … Z`). Points that round onto the previous one are dropped first.
+ */
+export function smoothCurve(pts: readonly (readonly number[])[]): string {
+  const q: number[][] = [];
+  let last = '';
+  for (const [x, y] of pts) {
+    const xy = fmt1(x) + ' ' + fmt1(y);
+    if (xy === last) continue;
+    q.push([Math.round(x * 10) / 10, Math.round(y * 10) / 10]);
+    last = xy;
+  }
+  if (q.length > 1 && fmt1(q[0][0]) === fmt1(q[q.length - 1][0]) && fmt1(q[0][1]) === fmt1(q[q.length - 1][1])) q.pop();
+  if (q.length < 3) return polygon(q);
+  const mid = (a: number[], b: number[]) => fmt1((a[0] + b[0]) / 2) + ' ' + fmt1((a[1] + b[1]) / 2);
+  let d = 'M' + mid(q[q.length - 1], q[0]);
+  for (let i = 0; i < q.length; i++) d += 'Q' + fmt1(q[i][0]) + ' ' + fmt1(q[i][1]) + ' ' + mid(q[i], q[(i + 1) % q.length]);
+  return d + 'Z';
 }
 
 /** A filled circle of radius `r` as two arcs. */

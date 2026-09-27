@@ -3,7 +3,7 @@
 // for large notes, on window.ink.
 import { newPageId } from '../src/format/ids';
 import { newNote, readNote, writeNote } from '../src/format/note';
-import { strokePath } from '../src/format/outline';
+import { polygon, strokeOutline, strokePath } from '../src/format/outline';
 import { readPage, writePage } from '../src/format/page';
 import { templateName } from '../src/format/template';
 import { densePage } from './fixture';
@@ -27,4 +27,4 @@ function largeNote(folder: string, name: string, pages: number, strokes: number)
   return files;
 }
 
-(window as unknown as { ink: unknown }).ink = { readPage, writePage, readNote, writeNote, templateName, largeNote, strokePath };
+(window as unknown as { ink: unknown }).ink = { readPage, writePage, readNote, writeNote, templateName, largeNote, strokePath, strokeOutline, polygon };
