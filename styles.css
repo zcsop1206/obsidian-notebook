@@ -763,8 +763,16 @@
   min-width: 0;
 }
 
-.nb-tpl-preview {
+.nb-tpl-thumb {
   flex: none;
+  width: 42px;
+  height: 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.nb-tpl-preview {
   border: 1px solid var(--background-modifier-border);
   border-radius: 2px;
 }
