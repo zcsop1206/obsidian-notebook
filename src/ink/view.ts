@@ -1,14 +1,15 @@
 // The ink view: an ink note's pages stacked like paper in a native scrolling container, with
-// the provisional pen, autosave and reloading after changes on disk. The note's data lives in
+// the pen (input.ts) and its provisional controls, autosave and reloading after changes on disk. The note's data lives in
 // NoteStore; page bitmaps in PageBitmap; this file ties them to Obsidian and the DOM.
 import { FileView, Notice, TAbstractFile, TFile, TFolder, type App, type WorkspaceLeaf } from 'obsidian';
 import { newStrokeId } from '../format/ids';
 import { isInkNote } from '../format/note';
-import type { Page, Point } from '../format/page';
+import type { Page } from '../format/page';
 import type { Template } from '../format/template';
-import { PenInput, PEN, type PageTarget } from './input';
+import { blockStylusTouch, newPenStats, PenInput, penStatsLines, type NewPenStroke, type PageTarget, type PenStats } from './input';
+import { COLOR_PRESETS, DEFAULT_PEN, nextColor, nextSize, SIZE_PRESETS, SIZE_STEP, withPen, type PenSettings } from './pen';
 import { layoutPages, MARGIN, mostVisiblePage, pageAtY, pagesInBand, type Layout } from './layout';
-import { currentTheme, PageBitmap, releaseScratch, TemplateImages, type Theme } from './renderer';
+import { currentTheme, PageBitmap, releaseScratch, strokeColor, TemplateImages, type Theme } from './renderer';
 import { NoteStore, type NoteFiles, type PageSlot, type TemplatesBefore } from './store';
 import { VIEW_TYPE_INK } from './takeover';
 import { TemplateChooser } from './template-chooser';
@@ -28,6 +29,8 @@ export interface InkStats {
   openMs: number;
   /** File writes completed by this view. */
   saves: number;
+  /** Pen input measurements (input.ts). */
+  pen: PenStats;
 }
 
 interface PageView {
@@ -74,14 +77,19 @@ export function vaultFiles(app: App): NoteFiles {
 }
 
 export class InkView extends FileView {
-  stats: InkStats = { pagesLoaded: 0, pagesRendered: 0, lastRenderMs: 0, openMs: 0, saves: 0 };
+  stats: InkStats = { pagesLoaded: 0, pagesRendered: 0, lastRenderMs: 0, openMs: 0, saves: 0, pen: newPenStats() };
+  /** The settings of the next stroke. */
+  pen: PenSettings = { ...DEFAULT_PEN };
   store: NoteStore | null = null;
   private scroller!: HTMLElement;
   private pagesEl!: HTMLElement;
   /** The "Add page" controls below the last page. */
   private footer!: HTMLElement;
   private messageEl!: HTMLElement;
-  private pen!: PenInput;
+  private input!: PenInput;
+  /** The provisional pen strip (#10 replaces it with the toolbar). */
+  private strip!: HTMLElement;
+  private statsEl!: HTMLElement;
   private pages: PageView[] = [];
   private layout: Layout | null = null;
   private theme: Theme = currentTheme();
@@ -117,6 +125,8 @@ export class InkView extends FileView {
     const root = this.contentEl;
     root.empty();
     root.addClass('nb-ink-view');
+    this.strip = root.createDiv({ cls: 'nb-ink-strip' });
+    this.buildStrip();
     this.scroller = root.createDiv({ cls: 'nb-ink-scroll' });
     this.pagesEl = this.scroller.createDiv({ cls: 'nb-ink-pages' });
     this.messageEl = this.scroller.createDiv({ cls: 'nb-ink-message' });
@@ -127,13 +137,25 @@ export class InkView extends FileView {
     this.footer.createEl('button', { cls: 'nb-ink-add-with', text: 'Add page with template…' })
       .addEventListener('click', () => this.chooseTemplate('add'));
 
-    this.pen = new PenInput({
-      pageAt: target => this.pageAt(target),
-      liveColor: () => this.theme.ink,
-      commit: (target, points) => this.commit(target, points),
-    }, (type, fn, options) => this.registerDomEvent(this.pagesEl, type, fn, options));
+    this.statsEl = root.createDiv({ cls: 'nb-ink-stats' });
+    this.statsEl.hide();
 
-    this.registerDomEvent(this.scroller, 'scroll', () => this.requestUpdate(), { passive: true });
+    this.input = new PenInput({
+      pageAt: target => this.pageAt(target),
+      pen: () => this.pen,
+      drawColor: color => strokeColor({ color }, this.theme),
+      commit: (target, stroke) => this.commit(target, stroke),
+      statsChanged: () => this.renderStats(),
+    }, (type, fn, options) => this.registerDomEvent(this.pagesEl, type, fn, options), this.stats.pen);
+    // A Pencil drag anywhere in the view, on a page or not, never scrolls it; fingers do. The
+    // rules are in blockStylusTouch.
+    this.registerDomEvent(root, 'touchstart', e => blockStylusTouch(e), { passive: false });
+    this.registerDomEvent(root, 'touchmove', e => blockStylusTouch(e), { passive: false });
+
+    this.registerDomEvent(this.scroller, 'scroll', () => {
+      this.input.viewMoved();
+      this.requestUpdate();
+    }, { passive: true });
     this.resizeObserver = new ResizeObserver(() => this.resized());
     this.resizeObserver.observe(this.scroller);
 
@@ -171,7 +193,7 @@ export class InkView extends FileView {
     window.clearTimeout(this.resizeTimer);
     cancelAnimationFrame(this.updateFrame);
     cancelAnimationFrame(this.pumpFrame);
-    this.pen.destroy();
+    this.input.destroy();
     this.templates.clear();
     releaseScratch();
     await super.onClose();
@@ -244,7 +266,7 @@ export class InkView extends FileView {
     const store = this.store;
     if (!store) return;
     this.store = null;
-    this.pen.cancel();
+    this.input.cancel();
     const saved = store.flush();
     store.close();
     this.clearPages();
@@ -457,18 +479,104 @@ export class InkView extends FileView {
     return { key: pv, el: pv.el, size: page.size };
   }
 
-  private commit(target: PageTarget, points: Point[]) {
+  private commit(target: PageTarget, drawn: NewPenStroke) {
     const pv = target.key as PageView;
     const store = this.store;
     if (!store || !this.pages.includes(pv)) return;
     const page = store.page(pv.slot);
     if (!page) return;
-    const stroke = { ...PEN, id: newStrokeId(page.strokes.map(s => s.id)), points };
+    const stroke = { id: newStrokeId(page.strokes.map(s => s.id)), ...drawn };
     store.addStroke(pv.slot, stroke);
     if (pv.bitmap) pv.bitmap.addStroke(page, stroke, this.theme, this.template(pv, page));
     else this.renderPage(pv);
     this.updateStats();
   }
+
+  // ---- pen settings and the provisional pen strip
+
+  /**
+   * Changes the pen for the next stroke. Sizes are clamped to 0.5-16 px in 0.5 px steps; an
+   * unknown nib or a colour that isn't `#rrggbb` throws.
+   */
+  setPen(change: Partial<PenSettings>) {
+    this.pen = withPen(this.pen, change);
+    this.renderStrip();
+    this.renderStats();
+  }
+
+  nextColor() {
+    this.setPen({ color: nextColor(this.pen.color) });
+  }
+
+  nextSize() {
+    this.setPen({ size: nextSize(this.pen.size) });
+  }
+
+  /**
+   * PROVISIONAL (#10 replaces it with the toolbar): one small row with the nib toggle, the
+   * eight colour swatches, the three sizes and a size stepper.
+   */
+  private buildStrip() {
+    const strip = this.strip;
+    strip.setAttribute('aria-label', 'Pen (provisional controls)');
+    const button = (parent: HTMLElement, cls: string, text: string, label: string, fn: () => void) => {
+      const b = parent.createEl('button', { cls: `nb-ink-control ${cls}`, text, attr: { 'aria-label': label, type: 'button' } });
+      b.addEventListener('click', fn);
+      return b;
+    };
+    const group = (cls: string) => strip.createDiv({ cls: `nb-ink-control nb-ink-group ${cls}` });
+    const nibs = group('nb-ink-nibs');
+    button(nibs, 'nb-ink-nib', 'Uniform', 'Uniform pen', () => this.setPen({ nib: 'uniform' })).dataset.nib = 'uniform';
+    button(nibs, 'nb-ink-nib', 'Pressure', 'Pressure pen', () => this.setPen({ nib: 'pressure' })).dataset.nib = 'pressure';
+    const colors = group('nb-ink-colors');
+    for (const { color, name } of COLOR_PRESETS) {
+      const b = button(colors, 'nb-ink-swatch', '', name, () => this.setPen({ color }));
+      b.dataset.color = color;
+      if (color === DEFAULT_PEN.color) b.addClass('is-default-ink');
+      else b.style.backgroundColor = color;
+    }
+    const sizes = group('nb-ink-sizes');
+    for (const size of SIZE_PRESETS) button(sizes, 'nb-ink-size', String(size), `Size ${size} px`, () => this.setPen({ size })).dataset.size = String(size);
+    const stepper = group('nb-ink-stepper');
+    button(stepper, 'nb-ink-step', '−', 'Thinner', () => this.setPen({ size: this.pen.size - SIZE_STEP })).dataset.step = '-1';
+    stepper.createSpan({ cls: 'nb-ink-control nb-ink-size-value' });
+    button(stepper, 'nb-ink-step', '+', 'Thicker', () => this.setPen({ size: this.pen.size + SIZE_STEP })).dataset.step = '1';
+    strip.createSpan({ cls: 'nb-ink-control nb-ink-provisional', text: 'provisional' });
+    this.renderStrip();
+  }
+
+  private renderStrip() {
+    if (!this.strip) return;
+    const pen = this.pen;
+    const mark = (sel: string, on: (el: HTMLElement) => boolean) => this.strip.querySelectorAll<HTMLElement>(sel).forEach(el => {
+      const active = on(el);
+      el.toggleClass('is-active', active);
+      el.setAttribute('aria-pressed', String(active));
+    });
+    mark('.nb-ink-nib', el => el.dataset.nib === pen.nib);
+    mark('.nb-ink-swatch', el => el.dataset.color === pen.color);
+    mark('.nb-ink-size', el => Number(el.dataset.size) === pen.size);
+    this.strip.querySelector<HTMLElement>('.nb-ink-size-value')?.setText(`${pen.size} px`);
+  }
+
+  // ---- stats overlay
+
+  get statsShown(): boolean {
+    return !!this.statsEl && this.statsEl.style.display !== 'none';
+  }
+
+  /** Shows or hides the pen stats overlay. */
+  toggleStats() {
+    if (this.statsShown) this.statsEl.hide();
+    else this.statsEl.show();
+    this.renderStats();
+  }
+
+  private renderStats() {
+    if (this.statsShown) this.statsEl.setText(penStatsLines(this.stats.pen, this.pen).join('\n'));
+  }
+
+  // ---- adding pages
 
   /** Appends a page with the given template, or the note's default, and scrolls to it. */
   addPage(template?: Template) {
@@ -535,7 +643,7 @@ export class InkView extends FileView {
   }
 
   private indexChanged() {
-    this.pen.cancel();
+    this.input.cancel();
     this.buildPages();
     this.relayout();
     this.update();
