@@ -1,8 +1,9 @@
 // The pen's outline (#32): quadratic curves through the outline's points, and the refit a
-// finished pen stroke is drawn from (smoothed, thinned, ends kept; the file keeps raw points).
+// finished pen stroke is drawn from (smoothed, thinned, ends kept; the file keeps raw points),
+// and LiveFit, the same refit computed incrementally for the live stroke (#52).
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { refit, smoothCurve, strokePath } from '../../src/format/outline';
+import { LiveFit, refit, smoothCurve, strokePath } from '../../src/format/outline';
 import type { Point } from '../../src/format/page';
 
 /** A seeded noisy straight line from (100, 200) along x, in the Pencil's 0.5 px steps. */
@@ -75,4 +76,72 @@ test('smoothCurve: quadratics through the outline points with midpoints on the c
   assert.equal(smoothCurve([[0, 0], [10, 0], [10, 10], [0, 10]]), 'M0 5Q0 0 5 0Q10 0 10 5Q10 10 5 10Q0 10 0 5Z');
   assert.equal(smoothCurve([[0, 0], [0.01, 0], [10, 0], [10, 10], [0, 10], [0, 0]]), 'M0 5Q0 0 5 0Q10 0 10 5Q10 10 5 10Q0 10 0 5Z', 'points rounding onto their neighbour dropped');
   assert.equal(smoothCurve([[1, 1], [2, 2]]), 'M1 1L2 2Z');
+});
+
+/** Handwriting-like loops in the Pencil's 0.5 px steps, points closer than 0.25 px dropped (as the pen samples). */
+function loops(n: number, step = 0.5): Point[] {
+  const pts: Point[] = [];
+  for (let j = 0; j < n; j++) {
+    const a = j / 14, x = Math.round((100 + j * 0.28 - 7 * Math.sin(a)) / step) * step, y = Math.round((200 - 9 * (1 - Math.cos(a))) / step) * step;
+    const q = pts[pts.length - 1];
+    if (q && Math.hypot(x - q.x, y - q.y) < 0.25) continue;
+    pts.push({ x, y, p: 0.05 + 0.1 * Math.sin(j / 30) ** 2, t: j * 2 });
+  }
+  return pts;
+}
+
+test('LiveFit (#52): refit of the points so far, for every prefix, however the points arrive', () => {
+  for (const [name, all] of [['noisy line', noisyLine(700)], ['loops', loops(900)], ['loops at 400%', loops(900, 0.125)]] as const) {
+    for (const per of [1, 4, 9]) {
+      const fit = new LiveFit(), pts: Point[] = [];
+      let settled: Point[] = [];
+      for (let i = 0; i < all.length; i += per) {
+        pts.push(...all.slice(i, i + per));
+        const n = fit.update(pts);
+        const want = refit(pts);
+        assert.equal(n, want.length, `${name}, ${per} per update, ${pts.length} points: count`);
+        assert.deepEqual(fit.slice(0), want, `${name}, ${per} per update, ${pts.length} points`);
+        // Settled points never change afterwards (they're what the head canvas freezes).
+        assert.ok(fit.settled <= n);
+        assert.deepEqual(want.slice(0, settled.length), settled, `${name}: settled points changed`);
+        settled = want.slice(0, fit.settled);
+      }
+      assert.ok(fit.settled > (refit(pts).length) - 12, `${name}: only the last 1.5 px unsettled (${fit.settled} of ${refit(pts).length})`);
+    }
+  }
+});
+
+test('LiveFit: short strokes, slices, and the tip on the last sample', () => {
+  const fit = new LiveFit(), pts: Point[] = [];
+  assert.equal(fit.update(pts), 0);
+  assert.deepEqual(fit.slice(0), []);
+  pts.push({ x: 1, y: 1, p: 0.1, t: 0 });
+  assert.equal(fit.update(pts), 1);
+  pts.push({ x: 2, y: 1, p: 0.1, t: 1 });
+  assert.deepEqual(fit.slice(0), [pts[0]], 'slice is of the last update');
+  fit.update(pts);
+  assert.deepEqual(fit.slice(0), pts);
+  pts.push(...loops(200).map(q => ({ ...q, x: q.x - 97 })));
+  const n = fit.update(pts), all = refit(pts);
+  assert.deepEqual(fit.slice(5, 40), all.slice(5, 40));
+  assert.deepEqual(fit.slice(n - 3), all.slice(n - 3));
+  assert.deepEqual(fit.slice(fit.settled - 2, n), all.slice(fit.settled - 2));
+  assert.deepEqual(fit.slice(n - 1)[0], pts[pts.length - 1], 'the tip is the last sample');
+  assert.deepEqual(fit.slice(0, 1)[0], pts[0]);
+});
+
+test('LiveFit: the live outline is the committed one, and a 2,000-point stroke updates in well under a millisecond per frame', () => {
+  const all = loops(2000), fit = new LiveFit(), pts: Point[] = [];
+  const times: number[] = [];
+  for (let i = 0; i < all.length; i += 4) {
+    pts.push(...all.slice(i, i + 4));
+    const t0 = performance.now();
+    fit.update(pts);
+    times.push(performance.now() - t0);
+  }
+  const s = { tool: 'pen' as const, nib: 'uniform' as const, size: 2.5, points: pts };
+  assert.equal(strokePath({ ...s, points: fit.slice(0) }, true), strokePath(s));
+  times.sort((a, b) => a - b);
+  console.log(`LiveFit update: median ${times[times.length >> 1].toFixed(4)} ms, max ${times[times.length - 1].toFixed(3)} ms`);
+  assert.ok(times[times.length >> 1] < 0.2, `${times[times.length >> 1]} ms`);
 });

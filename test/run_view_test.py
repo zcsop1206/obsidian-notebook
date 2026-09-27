@@ -590,10 +590,10 @@ try:
           const points = live.trace.points.map(q => ({ ...q }));
           // alpha 145 over white paper is where the ink (#1f1f1f) gets darker than 128
           return { before, live: T.liveInk(), live145: T.liveInk(145), frames: live.frames.length, events: live.events,
-            same: inp.livePath === ink.strokePath({ tool: 'pen', nib: 'uniform', size: 2.5, points }, true), points: points.length };
+            same: inp.livePath === ink.strokePath({ tool: 'pen', nib: 'uniform', size: 2.5, points }), points: points.length };
         }""")
         check('pen: mid-stroke, the live overlay has ink after the frames', r['live'] > 300 and r['frames'] >= 10, r)
-        check('pen: the live outline is strokePath of the points so far (same options, same code, live: not refitted)', r['same'], r)
+        check('pen: the live outline is strokePath of the points so far (same options, same code; #52: refitted, as committed)', r['same'], r)
         page.locator('.nb-ink-page').first.screenshot(path=os.path.join(OUT, 'pen_live_light.png'))
         live_px = r['live145']
         r = ev("""async () => {
