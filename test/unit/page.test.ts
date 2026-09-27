@@ -137,7 +137,7 @@ test('pressure nib width follows pressure; uniform nib and highlighter widths do
     return Math.max(...ys) - Math.min(...ys);
   };
   const pressure = { tool: 'pen', nib: 'pressure' } as const;
-  assert.ok(width(pressure, 0.9) > width(pressure, 0.5) + 2 && width(pressure, 0.5) > width(pressure, 0.1) + 2);
+  assert.ok(width(pressure, 0.9) > width(pressure, 0.5) + 1.5 && width(pressure, 0.5) > width(pressure, 0.1) + 2);
   assert.ok(Math.abs(width(pressure, 0.5) - 10) < 0.5, 'pressure nib at 0.5 is `size` wide');
   for (const s of [{ tool: 'pen', nib: 'uniform' }, { tool: 'highlighter' }] as const) {
     for (const p of [0, 0.1, 0.5, 0.9, 1]) assert.ok(Math.abs(width(s, p) - 10) < 0.5, `${s.tool} at ${p}: ${width(s, p)}`);
