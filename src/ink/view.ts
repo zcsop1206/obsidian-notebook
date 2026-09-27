@@ -1842,8 +1842,6 @@ export class InkView extends FileView {
       theme: () => this.theme,
       canPaste: () => this.canPaste,
       paste: () => this.pasteStrokes(),
-      insertImage: asPage => this.insertImage(asPage),
-      pasteImage: () => void this.pasteImage(),
       exportPdf: () => void this.exportPdf(),
       importAction: kind => this.importAction(kind),
       saveTemplate: () => void this.saveBackgroundAsTemplate(),

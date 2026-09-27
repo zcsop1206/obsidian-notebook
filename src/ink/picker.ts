@@ -1,9 +1,9 @@
 // The toolbar's popover (#10): the picker of the tool in use (pen: nib, colours, custom colour,
 // size in 0.5 px steps, a live preview and "Save as favourite"; highlighter: the same without
 // the nib; eraser: sizes and mode; lasso, #11: a hint and Paste), the page settings menu
-// (with, #12, inserting and pasting images; #54, saving the page's background as a template and
-// adding a page from a favourite template) and the Import menu (#54: PDFs and images, once or as
-// templates). A plain positioned div inside the
+// (templates; #54, saving the page's background as a template and adding a page from a favourite
+// template; export) and the Import menu (#54: PDFs and images, once or as templates, which took
+// over #12's image entries from the page settings menu). A plain positioned div inside the
 // ink view, not a Modal, so the page stays visible; closed by a tap elsewhere (starting to
 // write included), Escape, or tapping its button again. Choosing an option leaves it open so
 // that colour, nib and size can all be set in one visit.
@@ -45,9 +45,6 @@ export interface PickerHost {
   /** Whether strokes were copied (#11), and pasting them into the current page. */
   canPaste(): boolean;
   paste(): void;
-  /** Images (#12): pick one for the current page, or (asPage) a page of its own; paste one from the clipboard. */
-  insertImage?(asPage: boolean): void;
-  pasteImage?(): void;
   /** Export the note as a PDF (#18). */
   exportPdf?(): void;
   /** The Import menu's entries (#54). */
@@ -275,11 +272,6 @@ export class Picker {
     item('nb-ink-menu-all-templates', 'Template of all pages…', () => h.chooseTemplate('all'));
     item('nb-ink-menu-add-with', 'Add page with template…', () => h.chooseTemplate('add'));
     this.buildTemplateEntries();
-    if (h.insertImage) {
-      item('nb-ink-menu-insert-image', 'Insert image…', () => h.insertImage!(false));
-      item('nb-ink-menu-insert-image-page', 'Insert image as page…', () => h.insertImage!(true));
-    }
-    if (h.pasteImage) item('nb-ink-menu-paste-image', 'Paste image', () => h.pasteImage!());
     if (h.exportPdf) item('nb-ink-menu-export-pdf', 'Export as PDF…', () => h.exportPdf!());
     const paper = h.paperLabel();
     this.el.createDiv({ cls: 'nb-ink-control nb-ink-paper', text: `Paper size: ${paper ?? 'unknown'}` });
