@@ -43,6 +43,10 @@ export default class NotebookPlugin extends Plugin {
     this.addInkCommand('pen-nib-pressure', 'Use the pressure pen', view => view.setPen({ nib: 'pressure' }));
     this.addInkCommand('pen-next-color', 'Next pen colour', view => view.nextColor());
     this.addInkCommand('pen-next-size', 'Next pen size', view => view.nextSize());
+    this.addInkCommand('tool-pen', 'Use the pen', view => view.setTool('pen'));
+    this.addInkCommand('tool-highlighter', 'Use the highlighter', view => view.setTool('highlighter'));
+    this.addInkCommand('highlighter-next-color', 'Next highlighter colour', view => view.nextHighlighterColor());
+    this.addInkCommand('highlighter-next-size', 'Next highlighter size', view => view.nextHighlighterSize());
     this.addInkCommand('toggle-ink-stats', 'Toggle ink stats overlay', view => view.toggleStats());
     this.registerEvent(this.app.workspace.on('file-menu', (menu, file, _source, leaf) => {
       if (!(file instanceof TFile) || !leaf || leaf.view.getViewType() !== 'markdown' || !cachedIsInk(this.app, file)) return;

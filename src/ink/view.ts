@@ -6,8 +6,12 @@ import { newStrokeId } from '../format/ids';
 import { isInkNote } from '../format/note';
 import type { Page } from '../format/page';
 import type { Template } from '../format/template';
-import { blockStylusTouch, newPenStats, PenInput, penStatsLines, type NewPenStroke, type PageTarget, type PenStats } from './input';
+import { blockStylusTouch, newPenStats, PenInput, penStatsLines, type NewStroke, type PageTarget, type PenStats, type StrokeStyle } from './input';
 import { COLOR_PRESETS, DEFAULT_PEN, nextColor, nextSize, SIZE_PRESETS, SIZE_STEP, withPen, type PenSettings } from './pen';
+import {
+  DEFAULT_HIGHLIGHTER, HIGHLIGHTER_COLORS, HIGHLIGHTER_SIZES, nextHighlighterColor, nextHighlighterSize, withHighlighter,
+  type HighlighterSettings, type ToolKind,
+} from './pen';
 import { layoutPages, MARGIN, mostVisiblePage, pageAtY, pagesInBand, type Layout } from './layout';
 import { currentTheme, PageBitmap, releaseScratch, strokeColor, TemplateImages, type Theme } from './renderer';
 import { NoteStore, type NoteFiles, type PageSlot, type TemplatesBefore } from './store';
@@ -80,6 +84,8 @@ export class InkView extends FileView {
   stats: InkStats = { pagesLoaded: 0, pagesRendered: 0, lastRenderMs: 0, openMs: 0, saves: 0, pen: newPenStats() };
   /** The settings of the next stroke. */
   pen: PenSettings = { ...DEFAULT_PEN };
+  /** The highlighter's colour and size (the pen's `tool` says which one is in use). */
+  highlighter: HighlighterSettings = { ...DEFAULT_HIGHLIGHTER };
   store: NoteStore | null = null;
   private scroller!: HTMLElement;
   private pagesEl!: HTMLElement;
@@ -146,6 +152,7 @@ export class InkView extends FileView {
       drawColor: color => strokeColor({ color }, this.theme),
       commit: (target, stroke) => this.commit(target, stroke),
       statsChanged: () => this.renderStats(),
+      strokeStyle: () => this.strokeStyle(),
     }, (type, fn, options) => this.registerDomEvent(this.pagesEl, type, fn, options), this.stats.pen);
     // A Pencil drag anywhere in the view, on a page or not, never scrolls it; fingers do. The
     // rules are in blockStylusTouch.
@@ -479,7 +486,7 @@ export class InkView extends FileView {
     return { key: pv, el: pv.el, size: page.size };
   }
 
-  private commit(target: PageTarget, drawn: NewPenStroke) {
+  private commit(target: PageTarget, drawn: NewStroke) {
     const pv = target.key as PageView;
     const store = this.store;
     if (!store || !this.pages.includes(pv)) return;
@@ -542,6 +549,7 @@ export class InkView extends FileView {
     stepper.createSpan({ cls: 'nb-ink-control nb-ink-size-value' });
     button(stepper, 'nb-ink-step', '+', 'Thicker', () => this.setPen({ size: this.pen.size + SIZE_STEP })).dataset.step = '1';
     strip.createSpan({ cls: 'nb-ink-control nb-ink-provisional', text: 'provisional' });
+    this.buildToolGroups(button);
     this.renderStrip();
   }
 
@@ -557,6 +565,75 @@ export class InkView extends FileView {
     mark('.nb-ink-swatch', el => el.dataset.color === pen.color);
     mark('.nb-ink-size', el => Number(el.dataset.size) === pen.size);
     this.strip.querySelector<HTMLElement>('.nb-ink-size-value')?.setText(`${pen.size} px`);
+    this.renderToolGroups();
+  }
+
+  // ---- tools and the highlighter (#6)
+
+  /** What the next stroke is written with: the active tool's own colour and size. */
+  strokeStyle(): StrokeStyle {
+    const { pen, highlighter } = this;
+    if (pen.tool === 'highlighter') return { tool: 'highlighter', color: highlighter.color, size: highlighter.size };
+    return { tool: 'pen', nib: pen.nib, color: pen.color, size: pen.size };
+  }
+
+  /** Switches the tool; each tool keeps its own colour and size. An unknown tool throws. */
+  setTool(tool: ToolKind) {
+    this.setPen({ tool });
+  }
+
+  /**
+   * Changes the highlighter's colour or size for its next stroke. Sizes are clamped to 4-48 px
+   * in 0.5 px steps; a colour that isn't `#rrggbb` throws.
+   */
+  setHighlighter(change: Partial<HighlighterSettings>) {
+    this.highlighter = withHighlighter(this.highlighter, change);
+    this.renderStrip();
+  }
+
+  nextHighlighterColor() {
+    this.setHighlighter({ color: nextHighlighterColor(this.highlighter.color) });
+  }
+
+  nextHighlighterSize() {
+    this.setHighlighter({ size: nextHighlighterSize(this.highlighter.size) });
+  }
+
+  /**
+   * PROVISIONAL (#10): the tool group (first in the strip) and the highlighter's group of five
+   * swatches and two sizes (before the "provisional" label), shown while the highlighter is in use.
+   */
+  private buildToolGroups(button: (parent: HTMLElement, cls: string, text: string, label: string, fn: () => void) => HTMLElement) {
+    const strip = this.strip;
+    const tools = strip.createDiv({ cls: 'nb-ink-control nb-ink-group nb-ink-tools' });
+    strip.prepend(tools);
+    button(tools, 'nb-ink-tool', 'Pen', 'Pen', () => this.setTool('pen')).dataset.tool = 'pen';
+    button(tools, 'nb-ink-tool', 'Highlighter', 'Highlighter', () => this.setTool('highlighter')).dataset.tool = 'highlighter';
+    const hl = strip.createDiv({ cls: 'nb-ink-control nb-ink-group nb-ink-highlighter' });
+    strip.insertBefore(hl, strip.querySelector('.nb-ink-provisional'));
+    for (const { color, name } of HIGHLIGHTER_COLORS) {
+      const b = button(hl, 'nb-ink-hl-swatch', '', `${name} highlighter`, () => this.setHighlighter({ color }));
+      b.dataset.color = color;
+      b.style.backgroundColor = color;
+    }
+    for (const size of HIGHLIGHTER_SIZES) {
+      button(hl, 'nb-ink-hl-size', String(size), `Highlighter size ${size} px`, () => this.setHighlighter({ size })).dataset.size = String(size);
+    }
+  }
+
+  private renderToolGroups() {
+    const strip = this.strip, { pen, highlighter } = this;
+    const mark = (sel: string, on: (el: HTMLElement) => boolean) => strip.querySelectorAll<HTMLElement>(sel).forEach(el => {
+      const active = on(el);
+      el.toggleClass('is-active', active);
+      el.setAttribute('aria-pressed', String(active));
+    });
+    mark('.nb-ink-tool', el => el.dataset.tool === pen.tool);
+    mark('.nb-ink-hl-swatch', el => el.dataset.color === highlighter.color);
+    mark('.nb-ink-hl-size', el => Number(el.dataset.size) === highlighter.size);
+    const show = (sel: string, on: boolean) => strip.querySelectorAll<HTMLElement>(sel).forEach(el => (on ? el.show() : el.hide()));
+    show('.nb-ink-nibs, .nb-ink-colors, .nb-ink-sizes, .nb-ink-stepper', pen.tool === 'pen');
+    show('.nb-ink-highlighter', pen.tool === 'highlighter');
   }
 
   // ---- stats overlay
