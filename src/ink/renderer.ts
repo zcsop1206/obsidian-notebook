@@ -89,7 +89,7 @@ export class TemplateImages {
    * `onReady` is called once it is).
    */
   get(template: Template, size: Size, width: number, height: number, theme: Theme, onReady: () => void): HTMLImageElement | null {
-    if (template.kind === 'pdf') return this.pdf.get(template, width, height, onReady);
+    if (template.kind === 'pdf') return this.pdf.get(template, size, width, height, onReady);
     const items = renderTemplate(template, size);
     if (!items.length) return null;
     const key = `${JSON.stringify(template)} ${size.width}x${size.height} ${width}x${height} ${theme.line}`;
@@ -137,6 +137,9 @@ export function setSharpPdfRenderer(render: SharpPdfRenderer | null) {
 /** Counts for tests: sharp renders requested and received, and times a sharp image was drawn. */
 export const pdfStats = { requested: 0, received: 0, sharpDrawn: 0, jpegDrawn: 0 };
 
+/** The embedded image's resolution: 150 dpi over CSS px at 96 per inch. */
+const JPEG_PX_PER_CSS_PX = 150 / 96;
+
 type PdfEntry = { img: HTMLImageElement | null; ready: boolean; failed: boolean; waiting: (() => void)[] };
 
 /** Frees an image's decoded pixels, and its blob URL if it has one. */
@@ -157,11 +160,13 @@ class PdfImages {
   private jpegs = new Map<string, PdfEntry>();
   private sharp = new Map<string, PdfEntry>();
 
-  get(t: PdfTemplate, width: number, height: number, onReady: () => void): HTMLImageElement | null {
+  get(t: PdfTemplate, size: Size, width: number, height: number, onReady: () => void): HTMLImageElement | null {
     try {
       const sharpKey = `${t.source}#${t.page} ${width}x${height}`;
       let s = touch(this.sharp, sharpKey);
-      if (!s && sharpPdf) {
+      // Only when the bitmap has more pixels than the embedded image (not for thumbnails).
+      const finer = width > size.width * JPEG_PX_PER_CSS_PX * 1.05 || !t.image;
+      if (!s && sharpPdf && finer) {
         const entry: PdfEntry = s = { img: null, ready: false, failed: false, waiting: [] };
         this.sharp.set(sharpKey, entry);
         this.trim(this.sharp, PdfImages.MAX_SHARP);

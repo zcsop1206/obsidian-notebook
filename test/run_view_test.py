@@ -7,7 +7,8 @@
 # highlighter (tools, layers, crossings, the live overlay, long strokes), undo and redo, the
 # eraser, and zoom and finger navigation (#9: pans with momentum, pinches, zoom commands and
 # Ctrl+wheel, strokes at 50-400%, the pen during finger gestures, touch rules, frame times on
-# the 20-page note, bitmap memory at 400%), and renaming or moving notes and page folders (#26). Run by `npm test`; screenshots land in test/out/.
+# the 20-page note, bitmap memory at 400%), renaming or moving notes and page folders (#26), and PDF import (#14:
+# pages, the copied PDF, the embedded JPEG, sharp renders at 200%, writing on PDF pages). Run by `npm test`; screenshots land in test/out/.
 # Exits non-zero if any check fails.
 import os, subprocess, sys, time
 from playwright.sync_api import sync_playwright
@@ -2441,6 +2442,250 @@ try:
         check('partial: the stats overlay shows the partial erase with its cuts and remnants',
               f"last erase: partial, removed {L['removed']}, cuts {L['split']}, remnants {L['remnants']}; erase frame" in r, r)
         # ======== end of 19. The partial eraser (#15) ========
+
+        # ======== 20. Import a PDF and write on it (#14) ========
+        # With the fake pdf.js of test/mock-obsidian.js (loadPdfJs): a page renders a red marker
+        # square (red 40 x page number) and vertical lines 1 device px wide every 3 points.
+        ev("""() => {
+          T.pdfBytes = fakePdf([[612, 792], [792, 612], [595.28, 841.89]]);
+          dirs.add('Slides');
+          fs.set('Slides/lecture.pdf', new Uint8Array(T.pdfBytes));
+          T.waitFor = async (f, ms = 3000) => { const t = performance.now(); while (!f() && performance.now() - t < ms) await T.sleep(20); return f(); };
+          /** Grey (antialiased or blurred) and black pixels in the line pattern of a canvas of a PDF page `wPt` points wide. */
+          T.sharpness = (c, wPt) => {
+            const s = c.width / wPt, x0 = Math.round(100 * s), y0 = Math.round(100 * s), n = Math.round(150 * s);
+            const d = c.getContext('2d').getImageData(x0, y0, n, n).data;
+            let black = 0, grey = 0;
+            for (let k = 0; k < d.length; k += 4) { const v = d[k + 1]; if (v < 50) black++; else if (v < 205) grey++; }
+            return { black, grey, ratio: grey / Math.max(1, black + grey) };
+          };
+        }""")
+        r = ev("""async () => {
+          const before = notices.length;
+          commands['import-pdf'].callback();
+          const m = modals[modals.length - 1];
+          const items = [...m.contentEl.querySelectorAll('.suggestion-item')].map(e => e.textContent);
+          [...m.contentEl.querySelectorAll('.suggestion-item')].find(e => e.textContent === 'Slides/lecture.pdf').click();
+          await T.waitFor(() => modals.length && modals[modals.length - 1].titleEl.textContent === 'Import PDF as ink note');
+          const nm = modals[modals.length - 1], input = nm.contentEl.querySelector('input');
+          const name = input.value;
+          const t0 = performance.now();
+          input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+          await T.waitFor(() => view.file && view.file.basename === 'lecture' && view.store);
+          const ms = performance.now() - t0;
+          await T.sleep(100);
+          const path = view.file.path, dir = path.includes('/') ? path.slice(0, path.lastIndexOf('/') + 1) : '';
+          const md = fs.get(path), note = ink.readNote(md, 'lecture');
+          const pages = note.pages.map(id => {
+            const svg = fs.get(`${dir}lecture/${id}.svg`), pg = ink.readPage(svg);
+            const meta = /<metadata><!\\[CDATA\\[([\\s\\S]*?)\\]\\]>/.exec(svg)[1];
+            return { size: pg.size, kind: pg.template.kind, source: pg.template.source, page: pg.template.page,
+              jpeg: pg.template.image.startsWith('data:image/jpeg;base64,'), imageLen: pg.template.image.length,
+              once: svg.split(pg.template.image).length === 2, metaBytes: meta.includes('base64') };
+          });
+          const pdf = fs.get(`${dir}lecture/lecture.pdf`);
+          const same = pdf instanceof Uint8Array && pdf.length === T.pdfBytes.byteLength && pdf.every((b, i) => b === new Uint8Array(T.pdfBytes)[i]);
+          const els = T.pages().map(e => e.offsetWidth / e.offsetHeight);
+          return { items, name, ms, path, md, pages, same, els, type: view.getViewType(), progress: notices.slice(before),
+            files: [...fs.keys()].filter(k => k.startsWith(dir + 'lecture/')).length };
+        }""")
+        print('pdf import:', {k: r[k] for k in ('path', 'ms', 'items', 'progress')}, r['pages'])
+        check('pdf import: the chooser offers the device first, then the vault\'s PDFs', r['items'][:1] == ['Choose a file from this device…'] and 'Slides/lecture.pdf' in r['items'], r['items'])
+        check('pdf import: the name defaults to the PDF\'s', r['name'] == 'lecture', r['name'])
+        check('pdf import: opens the note in the ink view', r['type'] == 'notebook-ink' and r['path'].endswith('lecture.md'), r)
+        check('pdf import: one page per PDF page, each at its own size (points x 96/72)',
+              [p['size'] for p in r['pages']] == [{'width': 816, 'height': 1056}, {'width': 1056, 'height': 816}, {'width': 793.7, 'height': 1122.5}], r['pages'])
+        check('pdf import: each page records the copied PDF and its page number',
+              all(p['kind'] == 'pdf' and p['source'] == 'lecture.pdf' and p['page'] == i + 1 for i, p in enumerate(r['pages'])), r['pages'])
+        check('pdf import: each page embeds a JPEG once, not in the metadata',
+              all(p['jpeg'] and p['imageLen'] > 1000 and p['once'] and not p['metaBytes'] for p in r['pages']), r['pages'])
+        check('pdf import: the PDF is copied byte for byte into the page folder', r['same'] and r['files'] == 4, r)
+        check('pdf import: the note\'s template stays blank', '\ntemplate: blank\n' in r['md'], r['md'][:120])
+        check('pdf import: page elements have the pages\' own aspect ratios',
+              [round(a, 2) for a in r['els']] == [round(816 / 1056, 2), round(1056 / 816, 2), round(793.7 / 1122.5, 2)], r['els'])
+        check('pdf import: progress in a notice', any('page 3 of 3' in n for n in r['progress']), r['progress'])
+
+        # The page files render with their backgrounds as plain <img> (reading view, GitHub).
+        r = ev("""async () => {
+          const dir = view.file.path.includes('/') ? view.file.path.slice(0, view.file.path.lastIndexOf('/') + 1) : '';
+          const out = [];
+          for (const id of view.store.slots.map(s => s.id)) out.push(await T.imageInk(`${dir}lecture/${id}.svg`));
+          return out;
+        }""")
+        check('pdf import: each page file renders its PDF page as an image', all(x['n'] > 2000 for x in r) and [x['w'] for x in r] == [816, 1056, 794], r)
+
+        # At 200% the bitmap is drawn from a sharp render of the PDF at its pixel size, not the JPEG.
+        r = ev("""async () => {
+          view.setZoom(2);
+          const c = () => T.pages()[0].querySelector('canvas.nb-ink-bitmap');
+          const hit = () => c() && pdfjsStats.renders.some(([n, w, h]) => n === 1 && w === c().width && Math.abs(h - c().height) <= 1);
+          const got = await T.waitFor(hit, 4000);
+          // The render then becomes a PNG image and the page is redrawn with it.
+          await T.waitFor(() => T.sharpness(c(), 612).ratio < 0.05, 4000);
+          const bmp = c(), sharp = T.sharpness(bmp, 612);
+          // The embedded JPEG scaled to the same size, for comparison.
+          const img = new Image(); img.src = view.store.page(view.store.slots[0]).template.image; await img.decode();
+          const j = document.createElement('canvas'); j.width = bmp.width; j.height = bmp.height;
+          j.getContext('2d').drawImage(img, 0, 0, j.width, j.height);
+          const jpeg = T.sharpness(j, 612);
+          return { got, w: bmp.width, h: bmp.height, sharp, jpeg, renders: p.pdfPages.renders, zoom: view.zoom, marker: T.pixel(0, 10, 10) };
+        }""")
+        print('pdf at 200%:', r)
+        check('pdf 200%: a sharp render at the bitmap\'s pixel size was drawn', r['got'] and r['renders'] >= 1 and r['zoom'] == 2, r)
+        check('pdf 200%: the pattern\'s lines are crisp (few grey pixels), unlike the scaled JPEG',
+              r['sharp']['black'] > 1000 and r['sharp']['ratio'] < 0.05 and r['jpeg']['ratio'] > 0.3, r)
+        check('pdf 200%: it is page 1 (red marker 40)', abs(r['marker'][0] - 40) <= 8 and r['marker'][1] <= 8, r['marker'])
+
+        # A stroke on a PDF page saves, keeping the page's PDF template and image.
+        r = ev("""async () => {
+          view.resetZoom();
+          await T.sleep(100);
+          const slot = view.store.slots[1], img = view.store.page(slot).template.image;
+          await T.pen(1, T.loops(200, 300, 400));
+          await view.save();
+          const pg = ink.readPage(fs.get(slot.path));
+          return { strokes: pg.strokes.length, kind: pg.template.kind, page: pg.template.page, same: pg.template.image === img, ink: T.near(1, [0x1f, 0x1f, 0x1f], 30) };
+        }""")
+        check('pdf page: a pen stroke saves, and the page keeps its PDF page and image',
+              r['strokes'] == 1 and r['kind'] == 'pdf' and r['page'] == 2 and r['same'] and r['ink'] > 100, r)
+        r = ev("""async () => {
+          const slot = view.store.slots[1];
+          return T.imageInk(slot.path);
+        }""")
+        check('pdf page: the annotated page file still renders its background', r['n'] > 2000, r)
+        r = ev("""async () => {
+          view.setTool('highlighter');
+          await T.pen(2, T.loops(150, 400, 300));
+          view.setTool('eraser');
+          await T.pen(1, T.loops(200, 300, 400));
+          view.setTool('pen');
+          view.undo();
+          await view.save();
+          const s = view.store.slots;
+          return [ink.readPage(fs.get(s[1].path)).strokes.length, ink.readPage(fs.get(s[2].path)).strokes.map(x => x.tool)];
+        }""")
+        check('pdf page: the highlighter, eraser and undo work on PDF pages', r == [1, ['highlighter']], r)
+
+        # In dark mode a pdf page's default ink stays dark (its paper is the PDF's white), live and committed.
+        r = ev("""async () => {
+          document.body.classList.add('theme-dark'); app.workspace.trigger('css-change');
+          await T.sleep(100);
+          const pts = Array.from({ length: 40 }, (_, j) => [300 + j * 4, 700, 0.5]);
+          await T.pen(0, pts, { up: false });
+          const oc = [...T.pages()[0].querySelectorAll('canvas')].filter(c => !c.classList.contains('nb-ink-bitmap'));
+          let live = null;
+          for (const c of oc) {
+            const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+            for (let k = 0; k < d.length; k += 4) if (d[k + 3] > 200) { live = [d[k], d[k + 1], d[k + 2]]; break; }
+            if (live) break;
+          }
+          T.penUp(0, pts[pts.length - 1]);
+          await T.sleep(50);
+          const committed = T.pixel(0, 360, 700);
+          view.undo();
+          document.body.classList.remove('theme-dark'); app.workspace.trigger('css-change');
+          await T.sleep(100);
+          return { live, committed };
+        }""")
+        check('pdf page dark mode: default ink stays near-black, live and committed',
+              r['live'] is not None and max(r['live']) < 80 and max(r['committed']) < 80, r)
+
+        # Without the PDF (not synced yet, or deleted), the page keeps its embedded image.
+        r = ev("""async () => {
+          const path = view.file.path, dir = path.includes('/') ? path.slice(0, path.lastIndexOf('/') + 1) : '';
+          const pdf = fs.get(`${dir}lecture/lecture.pdf`);
+          fs.delete(`${dir}lecture/lecture.pdf`);
+          p.pdfPages.docs.clear();  // forget the open document, as after a restart
+          await view.leaf.setViewState({ type: 'markdown', state: { file: path } });
+          await app.workspace.getLeaf(false).setViewState({ type: 'notebook-ink', state: { file: path }, active: true });
+          await T.waitFor(() => view.store && T.pages().length === 3);
+          const n = p.pdfPages.renders;
+          view.setZoom(2);
+          await T.sleep(1200);
+          const marker = T.pixel(0, 10, 10), c = T.pages()[0].querySelector('canvas.nb-ink-bitmap');
+          const out = { renders: p.pdfPages.renders - n, marker, lines: T.sharpness(c, 612) };
+          view.resetZoom();
+          fs.set(`${dir}lecture/lecture.pdf`, pdf);
+          return out;
+        }""")
+        check('pdf missing: no sharp render, the embedded image is drawn instead',
+              r['renders'] == 0 and abs(r['marker'][0] - 40) <= 16 and r['lines']['black'] + r['lines']['grey'] > 1000, r)
+
+        # From the device: the first row opens a file input (the iPad's Files app).
+        r = ev("""async () => {
+          const click = HTMLInputElement.prototype.click;
+          let picked = null;
+          HTMLInputElement.prototype.click = function () { picked = this; };
+          try {
+            commands['import-pdf'].callback();
+            const m = modals[modals.length - 1];
+            m.contentEl.querySelector('.suggestion-item').click();
+          } finally { HTMLInputElement.prototype.click = click; }
+          const accept = picked && picked.accept, type = picked && picked.type;
+          const dt = new DataTransfer();
+          dt.items.add(new File([fakePdf([[420, 595]])], 'Worksheet 2.pdf', { type: 'application/pdf' }));
+          picked.files = dt.files;
+          picked.dispatchEvent(new Event('change'));
+          await T.waitFor(() => modals.length && modals[modals.length - 1].titleEl.textContent === 'Import PDF as ink note');
+          const nm = modals[modals.length - 1], input = nm.contentEl.querySelector('input');
+          const name = input.value;
+          input.value = 'WS';
+          nm.contentEl.querySelector('button.mod-cta').click();
+          await T.waitFor(() => view.file && view.file.basename === 'WS' && view.store);
+          const path = view.file.path, dir = path.includes('/') ? path.slice(0, path.lastIndexOf('/') + 1) : '';
+          const pg = ink.readPage(fs.get(view.store.slots[0].path));
+          return { accept, type, name, path, inputGone: !document.body.contains(picked), pdf: fs.has(`${dir}WS/Worksheet 2.pdf`),
+            size: pg.size, source: pg.template.source, pages: view.store.slots.length };
+        }""")
+        check('pdf from device: a PDF file input, the name from the file, the PDF copied',
+              r['type'] == 'file' and 'application/pdf' in r['accept'] and r['name'] == 'Worksheet 2' and r['inputGone'] and r['pdf']
+              and r['source'] == 'Worksheet 2.pdf' and r['size'] == {'width': 560, 'height': 793.3} and r['pages'] == 1, r)
+
+        # A file pdf.js can't read: a notice, and nothing written.
+        r = ev("""async () => {
+          fs.set('Slides/broken.pdf', new TextEncoder().encode('not a pdf'));
+          const files = fs.size, before = notices.length;
+          commands['import-pdf'].callback();
+          [...modals[modals.length - 1].contentEl.querySelectorAll('.suggestion-item')].find(e => e.textContent === 'Slides/broken.pdf').click();
+          await T.waitFor(() => modals.length && modals[modals.length - 1].titleEl.textContent === 'Import PDF as ink note');
+          modals[modals.length - 1].contentEl.querySelector('button.mod-cta').click();
+          await T.waitFor(() => notices.slice(before).some(n => n.startsWith("Couldn't import")));
+          return { notices: notices.slice(before), added: fs.size - files };
+        }""")
+        check('pdf import: an unreadable PDF gives a notice and writes nothing', any(n.startswith("Couldn't import the PDF") for n in r['notices']) and r['added'] == 0, r)
+        # Renaming the note (#26) moves its page folder with the PDF; the pages' source is relative
+        # to that folder, so it is unchanged and the sharp render finds the PDF.
+        r = ev("""async () => {
+          const from = view.file.path, dir = from.includes('/') ? from.slice(0, from.lastIndexOf('/') + 1) : '';
+          await app.vault.rename(app.vault.getFile(from), `${dir}WS renamed.md`);
+          await T.sleep(200);
+          const n = pdfjsStats.renders.length;
+          view.setZoom(1.5);
+          const c = () => T.pages()[0].querySelector('canvas.nb-ink-bitmap');
+          const got = await T.waitFor(() => c() && pdfjsStats.renders.slice(n).some(([pg, w]) => pg === 1 && w === c().width), 4000);
+          const t = view.store.page(view.store.slots[0]).template;
+          view.resetZoom();
+          return { file: view.file.path, pdf: fs.has(`${dir}WS renamed/Worksheet 2.pdf`), old: fs.has(`${dir}WS/Worksheet 2.pdf`), source: t.source, got };
+        }""")
+        check('pdf rename: the PDF moves with the page folder and still renders sharply',
+              r['file'].endswith('WS renamed.md') and r['pdf'] and not r['old'] and r['source'] == 'Worksheet 2.pdf' and r['got'], r)
+
+        # Duplicating and deleting pages (#17) never touches the PDF.
+        r = ev("""async () => {
+          const dir = view.file.path.includes('/') ? view.file.path.slice(0, view.file.path.lastIndexOf('/') + 1) : '';
+          const pdf = `${dir}WS renamed/Worksheet 2.pdf`, bytes = fs.get(pdf);
+          view.duplicatePage(0);
+          await T.sleep(100);
+          const dup = view.store.page(view.store.slots[1]).template;
+          view.deletePage(1);
+          view.deletePage(0);
+          await view.save();
+          await T.sleep(100);
+          return { dup: [dup.kind, dup.page, dup.image.length > 1000], kept: fs.get(pdf) === bytes, pages: view.store.slots.length };
+        }""")
+        check('pdf pages: duplicate copies the PDF template; deleting pages leaves the PDF file',
+              r['dup'] == ['pdf', 1, True] and r['kept'], r)
+        # ======== end of 20. Import a PDF and write on it (#14) ========
 
         # --- unload removes the patch
         r = ev("""async () => {
