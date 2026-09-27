@@ -83,6 +83,12 @@ function canvasImage(canvas: HTMLCanvasElement): Promise<HTMLImageElement> {
   });
 }
 
+/** The note a pdf page belongs to: the index's vault path and its page folder's vault path. */
+export interface PdfNote {
+  path: string;
+  pages: string;
+}
+
 /**
  * Sharp renders of PDF pages for the ink view. Documents are opened from the vault on demand
  * and kept per vault path (at most MAX_DOCS). Renders run one at a time and wait while a pen
@@ -101,7 +107,7 @@ export class PdfPages {
   private onDown = (e: PointerEvent) => { if (e.pointerType !== 'touch') this.down.add(e.pointerId); };
   private onUp = (e: PointerEvent) => { if (this.down.delete(e.pointerId)) this.lastUp = performance.now(); };
 
-  constructor(private vault: Vault, private noteOf: (template: PdfTemplate) => string | null) {
+  constructor(private vault: Vault, private noteOf: (template: PdfTemplate) => PdfNote | null) {
     window.addEventListener('pointerdown', this.onDown, { capture: true, passive: true });
     window.addEventListener('pointerup', this.onUp, { capture: true, passive: true });
     window.addEventListener('pointercancel', this.onUp, { capture: true, passive: true });
@@ -116,8 +122,7 @@ export class PdfPages {
     const run = async (): Promise<HTMLImageElement | null> => {
       if (note == null) return null;
       await this.idle();
-      const folder = note.includes('/') ? note.slice(0, note.lastIndexOf('/')) : '';
-      const doc = await this.doc(pdfPath(folder, template.source));
+      const doc = await this.doc(this.resolve(note, template.source));
       if (!doc || template.page > doc.numPages) return null;
       this.renders++;
       const page = await doc.getPage(template.page);
@@ -132,6 +137,21 @@ export class PdfPages {
     });
     this.queue = result;
     return result;
+  }
+
+  /**
+   * The PDF's vault path: `source` from the note's folder, or, if nothing is there, the part of
+   * `source` after its first folder inside the note's page folder. `source` names the page folder
+   * as it was at import; renaming or moving the note (#26) moves the page folder, PDF included,
+   * without rewriting the pages' sources.
+   */
+  resolve(note: PdfNote, source: string): string {
+    const dir = note.path.includes('/') ? note.path.slice(0, note.path.lastIndexOf('/')) : '';
+    const direct = pdfPath(dir, source);
+    const slash = source.indexOf('/');
+    if (this.vault.getFileByPath(direct) || slash < 0) return direct;
+    const moved = normalizePath(`${note.pages}/${source.slice(slash + 1)}`);
+    return this.vault.getFileByPath(moved) ? moved : direct;
   }
 
   private async idle() {
