@@ -778,4 +778,29 @@ export class NoteStore {
     this.changed(slot);
     return { index, stroke };
   }
+
+  // ---- the lasso (#11)
+
+  /**
+   * Replaces strokes in place, each `id` by `stroke` (which may carry another id), keeping
+   * drawing order, and marks the page changed once. Returns the strokes replaced with their
+   * indices, in the order given (to undo, replace them back); unknown ids are skipped, and an
+   * unknown or unreadable page replaces nothing.
+   */
+  replaceStrokes(pageId: string, entries: readonly { id: string; stroke: Stroke }[]): { index: number; stroke: Stroke }[] {
+    const slot = this.slots.find(s => s.id === pageId);
+    const page = slot && this.page(slot);
+    if (!slot || !page || !entries.length) return [];
+    const at = new Map(page.strokes.map((s, i) => [s.id, i] as const));
+    const out: { index: number; stroke: Stroke }[] = [];
+    for (const { id, stroke } of entries) {
+      const index = at.get(id);
+      if (index === undefined) continue;
+      out.push({ index, stroke: page.strokes[index] });
+      page.strokes[index] = stroke;
+      at.delete(id);
+    }
+    if (out.length) this.changed(slot);
+    return out;
+  }
 }
