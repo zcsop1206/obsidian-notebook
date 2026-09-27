@@ -1,6 +1,6 @@
 // The toolbar's popover (#10): the picker of the tool in use (pen: nib, colours, custom colour,
 // size in 0.5 px steps, a live preview and "Save as favourite"; highlighter: the same without
-// the nib; eraser: sizes and mode) and the page settings menu. A plain positioned div inside the
+// the nib; eraser: sizes and mode; lasso, #11: a hint and Paste) and the page settings menu. A plain positioned div inside the
 // ink view, not a Modal, so the page stays visible; closed by a tap elsewhere (starting to
 // write included), Escape, or tapping its button again. Choosing an option leaves it open so
 // that colour, nib and size can all be set in one visit.
@@ -26,6 +26,9 @@ export interface PickerHost {
   theme(): Theme;
   chooseTemplate(scope: 'add' | 'page' | 'all'): void;
   paperLabel(): string | null;
+  /** Whether strokes were copied (#11), and pasting them into the current page. */
+  canPaste(): boolean;
+  paste(): void;
 }
 
 /** Preview canvas size in CSS px. */
@@ -77,6 +80,7 @@ export class Picker {
     this.el.setAttribute('aria-label', kind === 'page' ? 'Page settings' : `${kind[0].toUpperCase()}${kind.slice(1)} settings`);
     if (kind === 'pen' || kind === 'highlighter') this.buildInk(kind);
     else if (kind === 'eraser') this.buildEraser();
+    else if (kind === 'lasso') this.buildLasso();
     else this.buildPage();
     this.el.show();
     anchor.setAttribute('aria-expanded', 'true');
@@ -107,7 +111,7 @@ export class Picker {
   /** Marks the chosen options and redraws the preview. */
   render() {
     const kind = this.openFor;
-    if (!kind || kind === 'page') return;
+    if (!kind || kind === 'page' || kind === 'lasso') return;
     const h = this.host, pen = h.pen(), hl = h.highlighter(), er = h.eraser();
     const mark = (sel: string, on: (el: HTMLElement) => boolean) => this.el.querySelectorAll<HTMLElement>(sel).forEach(el => {
       const active = on(el);
@@ -188,6 +192,16 @@ export class Picker {
     for (const [mode, text, label] of list) {
       this.option(modes, 'nb-ink-eraser-mode', text, label, () => this.host.setEraser({ mode })).dataset.eraserMode = mode;
     }
+  }
+
+  private buildLasso() {
+    this.el.createDiv({ cls: 'nb-ink-control nb-ink-lasso-hint',
+      text: 'Draw a loop around strokes to select them. Drag the selection to move it, its corner to resize it.' });
+    const b = this.option(this.el, 'nb-ink-menu-item nb-ink-lasso-paste', 'Paste', 'Paste strokes', () => {
+      this.close();
+      this.host.paste();
+    });
+    b.disabled = !this.host.canPaste();
   }
 
   private buildPage() {

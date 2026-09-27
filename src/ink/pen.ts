@@ -2,9 +2,12 @@
 // view and saved in the plugin settings with the favourite presets (#10: see the end).
 import { DEFAULT_INK, NIBS, type Nib } from '../format/page';
 
-/** The tool the next stroke of the Pencil uses. Highlighter is #6, eraser is #7. */
-export type ToolKind = 'pen' | 'highlighter' | 'eraser';
-export const TOOL_KINDS: readonly ToolKind[] = ['pen', 'highlighter', 'eraser'];
+/**
+ * The tool the next stroke of the Pencil uses. Highlighter is #6, eraser is #7, lasso is #11
+ * (it selects strokes instead of writing; like the eraser, it can't be a favourite preset).
+ */
+export type ToolKind = 'pen' | 'highlighter' | 'eraser' | 'lasso';
+export const TOOL_KINDS: readonly ToolKind[] = ['pen', 'highlighter', 'eraser', 'lasso'];
 
 export interface PenSettings {
   tool: ToolKind;
@@ -248,7 +251,7 @@ export function parsePresets(v: unknown): (PenPreset | null)[] {
   });
 }
 
-/** The preset for the tool in use, or null for the eraser. */
+/** The preset for the tool in use, or null for the eraser and the lasso. */
 export function presetOf(pen: Readonly<PenSettings>, highlighter: Readonly<HighlighterSettings>): PenPreset | null {
   if (pen.tool === 'pen') return { tool: 'pen', color: pen.color, size: pen.size, nib: pen.nib };
   if (pen.tool === 'highlighter') return { tool: 'highlighter', color: highlighter.color, size: highlighter.size };
