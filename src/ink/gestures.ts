@@ -1,8 +1,8 @@
 // Multi-finger taps: two fingers tapped together undo, three redo (as in Notability). A tap is
 // fingers that land and lift within TAP_MS without any of them moving more than TAP_SLOP px;
 // anything else (a two-finger scroll or pinch) is left alone. The listeners are passive and
-// never call preventDefault, so native scrolling is untouched. Kept separate from the view so
-// the gesture work in #9 can reuse or replace it.
+// never call preventDefault. Panning and pinching (#9, navigate.ts) start only once a finger
+// has moved more than NAV_SLOP (= TAP_SLOP) px, so a tap never moves the view.
 
 /** The longest a tap may take, from the first finger down to the last finger up, in ms. */
 export const TAP_MS = 300;

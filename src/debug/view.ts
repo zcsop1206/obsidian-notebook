@@ -7,6 +7,7 @@
 import { ItemView, Notice } from 'obsidian';
 import type { WorkspaceLeaf } from 'obsidian';
 import { penStatsLines, type PenStats } from '../ink/input';
+import { navStatsLines, type NavStats } from '../ink/navigate';
 import type { Recorder } from './recorder';
 import { type InkStroke, toSvg, width } from './ink-svg';
 import { ROOT, appendText, ensureDir, fmt, kb, median, mmss, stamp, yn } from './util';
@@ -18,6 +19,8 @@ interface DebugHost {
   recorder: Recorder;
   /** The latest ink view's pen stats, shown in the readout too. */
   inkPenStats(): PenStats | null;
+  /** The latest ink view's navigation stats (zoom, finger gesture frame times). */
+  inkNavStats(): NavStats | null;
 }
 
 /** A stroke while it is drawn, with the counters the readout needs. */
@@ -238,7 +241,7 @@ export class DebugView extends ItemView {
 
   renderHud() {
     const m = this.m, L = m.last, last = this.stats[this.stats.length - 1], r = this.measured(this.stats.slice(-10));
-    const rec = this.plugin.recorder, ink = this.plugin.inkPenStats();
+    const rec = this.plugin.recorder, ink = this.plugin.inkPenStats(), nav = this.plugin.inkNavStats();
     this.hud.setText([
       L ? `last input: ${L.type}, pressure ${fmt(L.p, 2)}, tilt ${fmt(L.tiltX)}/${fmt(L.tiltY)} deg, altitude ${fmt(L.alt, 2)}, azimuth ${fmt(L.az, 2)} rad`
         : 'last input: none yet, write with the Pencil',
@@ -248,6 +251,7 @@ export class DebugView extends ItemView {
       rec.state === 'idle' ? 'audio: idle'
         : `audio: ${rec.state} ${mmss(rec.elapsed)}, ${kb(rec.bytes)}, segment ${rec.segment}, ${rec.lateChunks} late chunks`,
       ...(ink ? penStatsLines(ink).map(l => `ink view ${l}`) : []),
+      ...(nav ? navStatsLines(nav).map(l => `ink view ${l}`) : []),
     ].join('\n'));
     this.recButton.setText(rec.state === 'idle' ? 'Record' : 'Stop');
   }

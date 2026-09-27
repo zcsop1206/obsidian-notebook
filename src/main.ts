@@ -6,6 +6,7 @@ import { LOG_PREFIX } from './debug/util';
 import { createInkNote, NewNoteModal, targetFolder } from './ink/new-note';
 import { cachedIsInk, installTakeover, VIEW_TYPE_INK } from './ink/takeover';
 import type { PenStats } from './ink/input';
+import type { NavStats } from './ink/navigate';
 import { InkView } from './ink/view';
 import type { Paper } from './format/page';
 import { DEFAULT_SETTINGS, NotebookSettingTab, parseSettings, type NotebookSettings } from './settings';
@@ -54,6 +55,10 @@ export default class NotebookPlugin extends Plugin {
     // The eraser (#7), also until #10's toolbar.
     this.addInkCommand('tool-eraser', 'Use the eraser', view => view.setTool('eraser'));
     this.addInkCommand('eraser-next-size', 'Next eraser size', view => view.nextEraserSize());
+    // Zoom (#9) in 25% steps, for desktop and the tests; on the iPad, pinch.
+    this.addInkCommand('zoom-in', 'Zoom in', view => view.zoomIn());
+    this.addInkCommand('zoom-out', 'Zoom out', view => view.zoomOut());
+    this.addInkCommand('zoom-reset', 'Reset zoom to 100%', view => view.resetZoom());
     this.registerEvent(this.app.workspace.on('file-menu', (menu, file, _source, leaf) => {
       if (!(file instanceof TFile) || !leaf || leaf.view.getViewType() !== 'markdown' || !cachedIsInk(this.app, file)) return;
       menu.addItem(item => item.setTitle('Open as ink note').setIcon('pencil').onClick(() => void this.openAsInk(file, leaf)));
@@ -115,6 +120,16 @@ export default class NotebookPlugin extends Plugin {
     for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_INK)) {
       const view = leaf.view;
       if (view instanceof InkView && (!best || view.stats.pen.at > best.at)) best = view.stats.pen;
+    }
+    return best;
+  }
+
+  /** The navigation stats (zoom, finger gesture frame times) of the ink view navigated most recently, or null. */
+  inkNavStats(): NavStats | null {
+    let best: NavStats | null = null;
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_INK)) {
+      const view = leaf.view;
+      if (view instanceof InkView && (!best || view.stats.nav.at > best.at)) best = view.stats.nav;
     }
     return best;
   }

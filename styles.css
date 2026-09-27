@@ -52,21 +52,36 @@
 }
 
 /*
- * Touch rules (src/ink/input.ts, blockStylusTouch): touch-action stays default, so fingers
- * scroll natively; Pencil touches are stopped by preventDefault on touchstart/touchmove.
+ * Touch rules (#9): fingers never scroll the pages natively. touch-action: none hands every
+ * finger to the view's navigator (src/ink/navigate.ts), which pans and pinch-zooms from pointer
+ * events; finger touchmoves are also prevented (blockFingerTouch), so Obsidian never sees a
+ * swipe and doesn't open its sidebars. Pencil touches are stopped by preventDefault on
+ * touchstart/touchmove (blockStylusTouch). Mouse wheels and trackpads scroll natively. Above
+ * 100% zoom the pages are wider than the view and it scrolls sideways too.
  */
 .nb-ink-scroll {
+  position: relative;
   flex: 1;
   min-height: 0;
-  overflow-x: hidden;
-  overflow-y: auto;
+  overflow: auto;
   scrollbar-gutter: stable;
-  -webkit-overflow-scrolling: touch;
+  touch-action: none;
+  overscroll-behavior: contain;
   background: var(--background-secondary);
 }
 
+/* Explicitly sized from the layout (src/ink/layout.ts); scaled by a transform during a pinch. */
 .nb-ink-pages {
   position: relative;
+}
+
+/* Keeps the scroll size while the pages layer is scaled during a pinch. */
+.nb-ink-sizer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .nb-ink-page {
@@ -90,6 +105,12 @@
   inset: 0;
   width: 100%;
   height: 100%;
+  /*
+   * Events target the page element, never a canvas: a bitmap is replaced when a page is redrawn
+   * at a new size (a zoom), and a finger or the Pencil on a removed canvas would lose its
+   * pointerup.
+   */
+  pointer-events: none;
 }
 
 /* The stroke in progress (head and tail overlays). Input is handled on the pages container; these only draw. */

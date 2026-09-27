@@ -279,21 +279,40 @@ export function penStatsLines(stats: PenStats, pen?: Readonly<PenSettings>): str
 /** Elements a Pencil tap must still reach. */
 const CONTROLS = 'button, select, input, textarea, a, .nb-ink-control';
 
+const hasStylus = (e: TouchEvent) => Array.from(e.changedTouches).some(t => (t as Touch & { touchType?: string }).touchType === 'stylus');
+
 /**
  * Keeps a Pencil drag anywhere in the ink view from scrolling it or opening Obsidian's sidebars
  * (on the iPad the Pencil also sends touch events, with touchType "stylus"). Rules, for
  * touchstart and touchmove listeners (passive: false) on the whole view:
- * - a touch event with no stylus touch (fingers) is left alone, so fingers scroll natively;
+ * - a touch event with no stylus touch (fingers) is left alone here (see blockFingerTouch);
  * - a stylus touchstart on a control (button, select, input, textarea, a, .nb-ink-control) is
  *   left alone, so Pencil taps on "Add page" and the pen strip still click;
  * - any other stylus touchstart, and every stylus touchmove, is prevented and stopped.
  * Returns whether the event was prevented.
  */
 export function blockStylusTouch(e: TouchEvent): boolean {
-  const stylus = Array.from(e.changedTouches).some(t => (t as Touch & { touchType?: string }).touchType === 'stylus');
-  if (!stylus) return false;
+  if (!hasStylus(e)) return false;
   const el = e.target as Element | null;
   if (e.type === 'touchstart' && el && typeof el.closest === 'function' && el.closest(CONTROLS)) return false;
+  e.preventDefault();
+  e.stopPropagation();
+  return true;
+}
+
+/**
+ * Keeps finger drags over the pages (`area`, the scroll container) away from Obsidian, which
+ * would otherwise open its sidebars on a swipe (#9: the view pans and zooms from finger pointer
+ * events itself, see navigate.ts, and the scroll container has `touch-action: none`). For a
+ * touchmove listener (passive: false) on the whole view: a finger touchmove (no stylus touch)
+ * inside `area` is prevented and stopped. Touchstarts are left alone, so finger taps on "Add
+ * page" still click, and fingers outside `area` (the pen strip) scroll natively. Returns whether
+ * the event was prevented.
+ */
+export function blockFingerTouch(e: TouchEvent, area: Element): boolean {
+  if (e.type !== 'touchmove' || hasStylus(e)) return false;
+  const el = e.target;
+  if (!(el instanceof Node) || !area.contains(el)) return false;
   e.preventDefault();
   e.stopPropagation();
   return true;
@@ -612,7 +631,7 @@ export class PenInput {
     }
   }
 
-  /** The page moved under a stroke in progress (the view scrolled): follow it. */
+  /** The page moved under a stroke in progress (the view scrolled or zoomed): follow it. */
   viewMoved() {
     const er = this.erasing;
     if (er) er.map = pageMap(er.target.el.getBoundingClientRect(), er.target.size, er.map.t0);
