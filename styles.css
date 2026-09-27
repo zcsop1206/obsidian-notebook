@@ -516,3 +516,67 @@
 .nb-pdf-file-input {
   display: none;
 }
+
+/* The lasso (#11): the selection's overlay over its page, and its menu (a popover like the picker). */
+.nb-ink-page canvas.nb-ink-selection {
+  pointer-events: none;
+  touch-action: none;
+}
+
+.nb-ink-selmenu {
+  position: absolute;
+  z-index: 3;
+  max-width: calc(100% - 16px);
+  box-sizing: border-box;
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m, 8px);
+  background: var(--background-primary, #fff);
+  box-shadow: var(--shadow-s, 0 4px 16px rgba(0, 0, 0, 0.2));
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.nb-ink-selmenu-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.nb-ink-selmenu button {
+  min-height: 32px;
+  min-width: 32px;
+  margin: 0;
+  padding: 0 10px;
+  font-size: var(--font-ui-small, 13px);
+  box-shadow: none;
+  cursor: pointer;
+}
+
+.nb-ink-selmenu .nb-ink-swatch {
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  min-height: 28px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--background-modifier-border);
+}
+
+.nb-ink-selmenu .nb-ink-swatch.is-default-ink {
+  background: #1f1f1f;
+}
+
+.theme-dark .nb-ink-selmenu .nb-ink-swatch.is-default-ink {
+  background: #e6e3de;
+}
+
+.nb-ink-lasso-hint {
+  max-width: 280px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller, 12px);
+}

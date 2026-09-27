@@ -16,7 +16,7 @@ import { DEFAULT_PEN, nextColor, nextSize, withPen, type PenSettings } from './p
 import { DEFAULT_HIGHLIGHTER, nextHighlighterColor, nextHighlighterSize, withHighlighter, type HighlighterSettings, type ToolKind } from './pen';
 import { DEFAULT_ERASER, nextEraserSize, withEraser, type EraserMode, type EraserSettings } from './pen';
 import { DEFAULT_PRESETS, MAX_PRESETS, parseToolState, presetOf, type PenPreset } from './pen';
-import { A4, LETTER } from '../format/page';
+import { A4, LETTER, roundXY } from '../format/page';
 import type { NotebookSettings } from '../settings';
 import { Toolbar } from './toolbar';
 import { splitStroke } from './split';
@@ -28,6 +28,10 @@ import { PagesPanel } from './pages-panel';
 import { NoteStore, type NoteFiles, type PageSlot, type TemplatesBefore } from './store';
 import { VIEW_TYPE_INK } from './takeover';
 import { TemplateChooser } from './template-chooser';
+import { centreOn, encodeClip, isIdentity, lassoSelect, moveBy, resizeBy, resizeScale, strokesBounds, transformStroke, withIds, type Box, type Transform } from './lasso';
+import { hitSelection, SelectionMenu, SelectionOverlay } from './selection';
+import type { Point } from '../format/page';
+import type { SelectionHit } from './input';
 
 /** How long the view waits after a resize before redrawing bitmaps at the new size. */
 const RESIZE_DELAY = 150;
@@ -60,7 +64,17 @@ export interface InkStats {
 export interface ToolSettingsHost {
   settings: NotebookSettings;
   saveSettings(): Promise<void>;
+  /** Strokes copied with the lasso (#11), kept by the plugin so they paste into any note. */
+  inkClipboard?: InkClipboard | null;
 }
+
+/** Strokes copied or cut with the lasso (#11): copies, in page px of the page they came from, in drawing order. */
+export interface InkClipboard {
+  strokes: Stroke[];
+}
+
+/** The clipboard of views without a plugin (never in the plugin). */
+let localClipboard: InkClipboard | null = null;
 
 interface PageView {
   slot: PageSlot;
@@ -210,6 +224,11 @@ export class InkView extends FileView {
       strokeStyle: () => this.strokeStyle(),
       eraser: () => this.eraser,
       erase: (target, path, radius, start, mode, tally) => this.eraseAlong(target, path, radius, start, mode, tally),
+      selectionHit: (target, point) => this.selectionHit(target, point),
+      clearSelection: () => this.clearSelection(),
+      lassoSelect: (target, loop) => this.selectLoop(target, loop),
+      dragSelection: (kind, from, to, x, y) => this.dragSelection(kind, from, to, x, y),
+      endSelectionDrag: cancelled => this.endSelectionDrag(cancelled),
     }, (type, fn, options) => this.registerDomEvent(this.pagesEl, type, fn, options), this.stats.pen);
     // A Pencil drag anywhere in the view, on a page or not, never scrolls it (blockStylusTouch);
     // finger drags over the pages move it through the navigator, never natively, and never
@@ -228,6 +247,23 @@ export class InkView extends FileView {
     }, (type, fn, options) => this.registerDomEvent(this.scroller, type, fn, options), this.stats.nav);
     // Ctrl/Cmd+Z and Shift+Ctrl/Cmd+Z when focus is in the view, if the commands' hotkeys didn't take them.
     this.registerDomEvent(this.containerEl, 'keydown', e => this.historyKey(e));
+    // The lasso's selection (#11): its overlay, its menu, and Escape to drop it.
+    this.selOverlay = new SelectionOverlay();
+    this.selMenu = new SelectionMenu(root, {
+      recolor: color => this.recolorSelection(color),
+      remove: () => this.deleteSelection(),
+      cut: () => this.cutSelection(),
+      copy: () => this.copySelection(),
+      duplicate: () => this.duplicateSelection(),
+      paste: () => this.pasteStrokes(),
+      canPaste: () => this.canPaste,
+      theme: () => this.theme,
+    });
+    this.registerDomEvent(this.containerEl, 'keydown', e => {
+      if (e.key !== 'Escape' || !this.sel) return;
+      e.preventDefault();
+      this.clearSelection();
+    });
 
     this.registerDomEvent(this.scroller, 'scroll', () => {
       this.input.viewMoved();
@@ -270,6 +306,8 @@ export class InkView extends FileView {
     cancelAnimationFrame(this.pumpFrame);
     this.nav.reset();
     this.input.destroy();
+    this.selOverlay?.destroy();
+    this.selMenu?.destroy();
     this.templates.clear();
     this.pagesPanel?.destroy();
     this.toolbar?.destroy();
@@ -352,6 +390,7 @@ export class InkView extends FileView {
     this.store = null;
     this.history.clear();
     this.input.cancel();
+    this.clearSelection();
     this.nav.reset();
     this.preview(1, 0, 0);
     const saved = store.flush();
@@ -508,6 +547,7 @@ export class InkView extends FileView {
     }
     this.updateStats();
     this.pump();
+    if (this.sel && !this.selDrag) this.showSelection();
     if (this.pagesPanel?.isOpen) this.pagesPanel.setCurrent(this.currentPageIndex());
   }
 
@@ -546,10 +586,10 @@ export class InkView extends FileView {
   private renderStep(pv: PageView, page: Page) {
     if (pv.pending == null || !pv.bitmap) {
       if (!this.bitmapFor(pv)) return;
-      pv.bitmap!.renderBase(page, this.theme, this.template(pv, page));
+      pv.bitmap!.renderBase(page, this.theme, this.template(pv, page), this.hiddenOn(pv));
       pv.pending = 0;
     }
-    const next = pv.bitmap!.renderPen(page, this.theme, pv.pending!, PUMP_STROKES);
+    const next = pv.bitmap!.renderPen(page, this.theme, pv.pending!, PUMP_STROKES, this.hiddenOn(pv));
     pv.pending = next < page.strokes.length ? next : null;
   }
 
@@ -576,7 +616,7 @@ export class InkView extends FileView {
     }
     if (!this.bitmapFor(pv)) return;
     const t0 = performance.now();
-    pv.bitmap!.render(page, this.theme, this.template(pv, page));
+    pv.bitmap!.render(page, this.theme, this.template(pv, page), this.hiddenOn(pv));
     pv.pending = null;
     this.stats.lastRenderMs = performance.now() - t0;
   }
@@ -644,6 +684,7 @@ export class InkView extends FileView {
    */
   setPen(change: Partial<PenSettings>) {
     this.pen = withPen(this.pen, change);
+    if (this.pen.tool !== 'lasso') this.clearSelection(); // switching tools drops the lasso's selection (#11)
     this.toolsChanged();
     this.renderStats();
   }
@@ -889,7 +930,7 @@ export class InkView extends FileView {
   }
 
   private renderStats() {
-    if (this.statsShown) this.statsEl.setText([...penStatsLines(this.stats.pen, this.pen), ...eraseStatsLines(this.input.lastErase), ...navStatsLines(this.stats.nav)].join('\n'));
+    if (this.statsShown) this.statsEl.setText([...penStatsLines(this.stats.pen, this.pen), ...eraseStatsLines(this.input.lastErase), ...this.lassoStatsLines(), ...navStatsLines(this.stats.nav)].join('\n'));
   }
 
   // ---- adding pages
@@ -956,6 +997,7 @@ export class InkView extends FileView {
     const pv = this.pages.find(p => p.slot === slot);
     if (!pv) return;
     this.pagesPanel?.changed(slot.id);
+    if (this.sel?.pv === pv) this.clearSelection(); // reloaded from disk: the selection may no longer exist
     this.showError(pv);
     pv.spatial = null; // reloaded from disk: rebuilt when next erased
     this.relayout(); // the size may have changed
@@ -965,6 +1007,7 @@ export class InkView extends FileView {
 
   private indexChanged() {
     this.input.cancel();
+    this.clearSelection();
     this.history.clear(); // pages were added, removed or reordered elsewhere: the history no longer fits
     this.buildPages();
     this.relayout();
@@ -987,6 +1030,8 @@ export class InkView extends FileView {
   /** Reverses the latest edit. Returns false if there was nothing to undo. */
   undo(): boolean {
     if (!this.store) return false;
+    if (this.input.lassoActive) this.input.cancel();
+    this.clearSelection();
     const op = this.history.undo();
     this.updateStats();
     return !!op;
@@ -995,6 +1040,8 @@ export class InkView extends FileView {
   /** Repeats the latest undone edit. Returns false if there was nothing to redo. */
   redo(): boolean {
     if (!this.store) return false;
+    if (this.input.lassoActive) this.input.cancel();
+    this.clearSelection();
     const op = this.history.redo();
     this.updateStats();
     return !!op;
@@ -1151,6 +1198,7 @@ export class InkView extends FileView {
     if (i < 0) return;
     this.input.cancel();
     const [pv] = this.pages.splice(i, 1);
+    if (this.sel?.pv === pv) this.clearSelection();
     this.dropBitmap(pv);
     pv.el.remove();
     this.relayout();
@@ -1341,6 +1389,7 @@ export class InkView extends FileView {
     const store = this.store;
     if (!store) return;
     this.input.cancel();
+    this.clearSelection();
     const old = new Map(this.pages.map(pv => [pv.slot, pv] as const));
     this.pages = store.slots.map(slot => {
       const pv = old.get(slot);
@@ -1384,6 +1433,8 @@ export class InkView extends FileView {
       pagesOpen: () => this.pagesPanelOpen,
       togglePages: () => this.togglePagesPanel(),
       theme: () => this.theme,
+      canPaste: () => this.canPaste,
+      paste: () => this.pasteStrokes(),
     });
   }
 
@@ -1457,5 +1508,353 @@ export class InkView extends FileView {
     window.clearTimeout(this.saveToolsTimer);
     this.saveToolsTimer = 0;
     this.settingsHost?.saveSettings().catch(e => console.error('[notebook]', 'saving tool settings', e));
+  }
+
+  // ---- the lasso (#11)
+  // The lasso tool selects strokes of one page (input.ts draws the loop and drives the drags;
+  // lasso.ts is the geometry; selection.ts draws the box, the drag preview and the menu). The
+  // selection is a page and stroke ids, dropped by switching tools, Escape, a tap outside it,
+  // undo and redo, and when the note closes, reloads, or its pages change. Every edit is one
+  // undo step: moves, resizes and recolours replace the strokes in place (NoteStore.
+  // replaceStrokes; undo puts the old ones back), a move onto another page takes them off one
+  // page and appends them to the other (new ids only where they'd clash), delete and cut remove
+  // them, duplicate and paste append copies with new ids, selected.
+
+  /** The selected strokes: their page, ids (in drawing order) and ink box (page px). */
+  private sel: { pv: PageView; ids: string[]; box: Box } | null = null;
+  /** A drag of the selection in progress. */
+  private selDrag: {
+    kind: 'move' | 'resize';
+    strokes: Stroke[];
+    /** The page the preview is over, and the move from the selection's page onto it (page px). */
+    to: PageView;
+    ox: number;
+    oy: number;
+    t: Transform;
+  } | null = null;
+  /** Strokes left out of a page's bitmap while they're dragged. */
+  private hidden: { pv: PageView; ids: Set<string> } | null = null;
+  private selOverlay: SelectionOverlay | null = null;
+  private selMenu: SelectionMenu | null = null;
+
+  /** The selection, for tests and commands: page index, stroke ids and box (page px). */
+  get selection(): { page: number; ids: string[]; box: Box } | null {
+    const s = this.sel;
+    return s ? { page: this.pages.indexOf(s.pv), ids: [...s.ids], box: [...s.box] } : null;
+  }
+
+  /** The last selection drag's frame times (input.ts), for tests. */
+  get lassoStats() {
+    return { lastDrag: this.input.lastDrag, previews: this.selOverlay?.previews ?? 0 };
+  }
+
+  get selectionMenuOpen(): boolean {
+    return !!this.selMenu?.isOpen;
+  }
+
+  private hiddenOn(pv: PageView): ReadonlySet<string> | null {
+    return this.hidden?.pv === pv ? this.hidden.ids : null;
+  }
+
+  private lassoStatsLines(): string[] {
+    const d = this.input.lastDrag;
+    if (!d) return [];
+    const f = (n: number) => (Number.isFinite(n) ? n.toFixed(2) : '-');
+    return [`last lasso ${d.kind}: ${this.sel?.ids.length ?? 0} selected, frame ${f(d.frameMs)} ms median (max ${f(d.frameMaxMs)}, ${d.frames} frames)`];
+  }
+
+  private get clipboard(): InkClipboard | null {
+    return this.settingsHost ? this.settingsHost.inkClipboard ?? null : localClipboard;
+  }
+
+  private set clipboard(clip: InkClipboard | null) {
+    if (this.settingsHost) this.settingsHost.inkClipboard = clip;
+    else localClipboard = clip;
+  }
+
+  get canPaste(): boolean {
+    return !!this.clipboard?.strokes.length;
+  }
+
+  /** Selects these strokes of page `pageIndex` (the lasso's tool is switched to); an empty list deselects. */
+  select(pageIndex: number, ids: readonly string[]) {
+    const pv = this.pages[pageIndex];
+    const page = pv && this.store?.page(pv.slot);
+    if (!pv || !page) return;
+    if (this.pen.tool !== 'lasso') this.setTool('lasso');
+    const want = new Set(ids);
+    const strokes = page.strokes.filter(s => want.has(s.id));
+    const box = strokesBounds(strokes);
+    if (!box) {
+      this.clearSelection();
+      return;
+    }
+    this.sel = { pv, ids: strokes.map(s => s.id), box };
+    this.showSelection();
+  }
+
+  clearSelection() {
+    const had = this.sel || this.selDrag;
+    this.sel = null;
+    this.selDrag = null;
+    if (this.hidden) {
+      const pv = this.hidden.pv;
+      this.hidden = null;
+      if (pv.bitmap && this.pages.includes(pv)) this.renderPage(pv);
+    }
+    if (!had) return;
+    this.selOverlay?.clear();
+    this.selOverlay?.canvas.remove();
+    this.selMenu?.hide();
+  }
+
+  /** Draws the selection's box over its page and puts the menu by it. */
+  private showSelection() {
+    const sel = this.sel, overlay = this.selOverlay, page = sel && this.store?.page(sel.pv.slot);
+    if (!sel || !overlay || !page) return;
+    overlay.place(sel.pv.el, page.size);
+    overlay.drawBox(sel.box);
+    const r = sel.pv.el.getBoundingClientRect(), k = r.width / page.size.width;
+    const bar = this.toolbar?.el;
+    this.selMenu?.show(this.contentEl, {
+      left: r.left + sel.box[0] * k, top: r.top + sel.box[1] * k, right: r.left + sel.box[2] * k, bottom: r.top + sel.box[3] * k,
+    }, bar ? bar.offsetTop + bar.offsetHeight : 0);
+  }
+
+  /** The selected strokes, in drawing order. */
+  private selectedStrokes(): Stroke[] {
+    const sel = this.sel, page = sel && this.store?.page(sel.pv.slot);
+    if (!sel || !page) return [];
+    const ids = new Set(sel.ids);
+    return page.strokes.filter(s => ids.has(s.id));
+  }
+
+  private selectionHit(target: PageTarget, point: Point): SelectionHit {
+    const sel = this.sel;
+    if (!sel || sel.pv !== target.key || !this.layout) return null;
+    return hitSelection(sel.box, point, 1 / this.layout.scale);
+  }
+
+  private selectLoop(target: PageTarget, loop: readonly Point[]) {
+    const pv = target.key as PageView;
+    const page = this.store && this.pages.includes(pv) ? this.store.page(pv.slot) : null;
+    if (!page) return;
+    this.select(this.pages.indexOf(pv), lassoSelect(page.strokes, loop));
+  }
+
+  /** The page under a client point, or null (a gap, the margin, a page that can't be read). */
+  private pageUnder(clientX: number, clientY: number): PageView | null {
+    const layout = this.layout;
+    if (!layout || !this.store) return null;
+    const r = this.pagesEl.getBoundingClientRect(), x = clientX - r.left, y = clientY - r.top;
+    const i = layout.pages.findIndex(b => x >= b.left && x < b.left + b.width && y >= b.top && y < b.top + b.height);
+    const pv = this.pages[i];
+    return pv && this.store.page(pv.slot) ? pv : null;
+  }
+
+  private dragSelection(kind: 'move' | 'resize', from: Point, to: Point, clientX: number, clientY: number) {
+    const sel = this.sel, store = this.store, layout = this.layout, overlay = this.selOverlay;
+    if (!sel || !store || !layout || !overlay) return;
+    let d = this.selDrag;
+    if (!d) {
+      // Start: the page without the selection; the selection on the overlay.
+      d = this.selDrag = { kind, strokes: this.selectedStrokes(), to: sel.pv, ox: 0, oy: 0, t: moveBy(0, 0) };
+      this.selMenu?.hide();
+      this.hidden = { pv: sel.pv, ids: new Set(sel.ids) };
+      if (sel.pv.bitmap) this.renderPage(sel.pv);
+    }
+    let dest = sel.pv;
+    if (kind === 'resize') d.t = resizeBy(sel.box, resizeScale(sel.box, from, to));
+    else {
+      d.t = moveBy(roundXY(to.x - from.x), roundXY(to.y - from.y));
+      dest = this.pageUnder(clientX, clientY) ?? sel.pv;
+    }
+    const a = layout.pages[this.pages.indexOf(sel.pv)], b = layout.pages[this.pages.indexOf(dest)];
+    d.ox = roundXY((a.left - b.left) / layout.scale);
+    d.oy = roundXY((a.top - b.top) / layout.scale);
+    const page = store.page(dest.slot)!;
+    if (d.to !== dest || overlay.canvas.parentElement !== dest.el) overlay.place(dest.el, page.size);
+    d.to = dest;
+    overlay.drawDrag(d.strokes, d.t, d.ox, d.oy, sel.box, pageTheme(page, this.theme));
+  }
+
+  private endSelectionDrag(cancelled: boolean) {
+    const d = this.selDrag, sel = this.sel;
+    this.selDrag = null;
+    const hidden = this.hidden;
+    this.hidden = null;
+    if (!d || !sel || !this.store) {
+      if (hidden?.pv.bitmap && this.pages.includes(hidden.pv)) this.renderPage(hidden.pv);
+      return;
+    }
+    const same = d.to === sel.pv;
+    if (cancelled || (same && isIdentity(d.t)) || !d.strokes.length) {
+      if (sel.pv.bitmap) this.renderPage(sel.pv);
+      this.showSelection();
+      return;
+    }
+    if (same) {
+      const entries = d.strokes.map(s => ({ id: s.id, stroke: transformStroke(s, d.t) }));
+      this.replaceRecorded(d.kind === 'move' ? 'Move selection' : 'Resize selection', sel.pv, entries);
+      this.select(this.pages.indexOf(sel.pv), entries.map(e => e.stroke.id));
+      return;
+    }
+    this.moveAcross(sel.pv, d.to, d.strokes, { ...d.t, dx: d.t.dx + d.ox, dy: d.t.dy + d.oy });
+  }
+
+  /** The page's eraser index, if built, follows strokes out and in. */
+  private reindex(pageId: string, out: Iterable<string>, add: Iterable<Stroke>) {
+    const index = this.pages.find(p => p.slot.id === pageId)?.spatial;
+    if (!index) return;
+    for (const id of out) index.remove(id);
+    for (const s of add) index.add(s);
+  }
+
+  /** Replaces strokes of a page in place as one undo step (undo puts the old ones back). */
+  private replaceRecorded(label: string, pv: PageView, entries: { id: string; stroke: Stroke }[]) {
+    const store = this.store;
+    if (!store) return;
+    const pageId = pv.slot.id;
+    const apply = (list: { id: string; stroke: Stroke }[]) => {
+      const old = store.replaceStrokes(pageId, list);
+      this.reindex(pageId, old.map(o => o.stroke.id), list.map(e => e.stroke));
+      this.redrawPage(pageId);
+      return old;
+    };
+    const before = apply(entries).map(o => ({ id: o.stroke.id, stroke: o.stroke }));
+    if (!before.length) return;
+    this.history.push({
+      label,
+      undo: () => {
+        if (this.store === store) apply(before);
+      },
+      redo: () => {
+        if (this.store === store) apply(entries);
+      },
+    });
+  }
+
+  /** Appends strokes to a page as one undo step, and selects them. */
+  private appendRecorded(label: string, pv: PageView, strokes: Stroke[]) {
+    const store = this.store, page = store?.page(pv.slot);
+    if (!store || !page || !strokes.length) return;
+    const entries = strokes.map((stroke, i) => ({ index: page.strokes.length + i, stroke }));
+    store.insertStrokes(pv.slot.id, entries);
+    this.reindex(pv.slot.id, [], strokes);
+    this.redrawPage(pv.slot.id);
+    this.recordStrokes(label, pv.slot.id, entries, true);
+    this.select(this.pages.indexOf(pv), strokes.map(s => s.id));
+  }
+
+  /**
+   * Moves strokes from page `from` to the end of page `to`, transformed by `t` (which includes
+   * the offset between the pages), with new ids where they'd clash; one undo step. Selects them.
+   */
+  private moveAcross(from: PageView, to: PageView, strokes: Stroke[], t: Transform) {
+    const store = this.store, dst = store?.page(to.slot);
+    if (!store || !dst) return;
+    const src = from.slot.id, dstId = to.slot.id, ids = strokes.map(s => s.id);
+    const moved = withIds(strokes.map(s => transformStroke(s, t)), new Set(dst.strokes.map(s => s.id)), false);
+    const entries = moved.map((stroke, i) => ({ index: dst.strokes.length + i, stroke }));
+    const movedIds = moved.map(s => s.id);
+    let removed: { index: number; stroke: Stroke }[] = [];
+    const apply = () => {
+      removed = store.removeStrokes(src, ids);
+      store.insertStrokes(dstId, entries);
+      this.reindex(src, ids, []);
+      this.reindex(dstId, [], moved);
+      this.redrawPage(src);
+      this.redrawPage(dstId);
+    };
+    apply();
+    this.history.push({
+      label: 'Move selection to another page',
+      undo: () => {
+        if (this.store !== store) return;
+        store.removeStrokes(dstId, movedIds);
+        store.insertStrokes(src, removed);
+        this.reindex(dstId, movedIds, []);
+        this.reindex(src, [], removed.map(r => r.stroke));
+        this.redrawPage(src);
+        this.redrawPage(dstId);
+      },
+      redo: () => {
+        if (this.store === store) apply();
+      },
+    });
+    this.select(this.pages.indexOf(to), movedIds);
+  }
+
+  /** Sets the colour of the selected pen strokes (highlighter strokes keep theirs). One undo step. */
+  recolorSelection(color: string) {
+    const sel = this.sel;
+    if (!sel) return;
+    const c = withPen(this.pen, { color }).color; // validates
+    const entries = this.selectedStrokes().filter(s => s.tool === 'pen' && s.color !== c).map(s => ({ id: s.id, stroke: { ...s, color: c } }));
+    if (entries.length) this.replaceRecorded('Recolour selection', sel.pv, entries);
+    this.showSelection();
+  }
+
+  /** Deletes the selected strokes. One undo step. */
+  deleteSelection(label = 'Delete selection') {
+    const sel = this.sel, store = this.store;
+    if (!sel || !store) return;
+    const pageId = sel.pv.slot.id;
+    this.clearSelection();
+    const removed = store.removeStrokes(pageId, sel.ids);
+    if (!removed.length) return;
+    this.reindex(pageId, sel.ids, []);
+    this.redrawPage(pageId);
+    this.recordStrokes(label, pageId, removed, false);
+  }
+
+  /**
+   * Copies the selected strokes to the plugin's clipboard (so they paste into any note), and as
+   * JSON tagged notebook-ink/strokes to the system clipboard where that's allowed.
+   */
+  copySelection() {
+    const strokes = withIds(this.selectedStrokes(), new Set(), false);
+    if (!strokes.length) return;
+    this.clipboard = { strokes };
+    try {
+      const done = navigator.clipboard?.writeText(encodeClip(strokes));
+      if (done && typeof done.catch === 'function') done.catch(() => {});
+    } catch {
+      // no system clipboard here (or not allowed): the plugin's clipboard is enough
+    }
+    this.showSelection();
+  }
+
+  cutSelection() {
+    this.copySelection();
+    this.deleteSelection('Cut selection');
+  }
+
+  /** Puts a copy of the selection 24 px right and down, with new ids, and selects it. One undo step. */
+  duplicateSelection() {
+    const sel = this.sel, page = sel && this.store?.page(sel.pv.slot);
+    if (!sel || !page) return;
+    const taken = new Set(page.strokes.map(s => s.id));
+    const copies = withIds(this.selectedStrokes().map(s => transformStroke(s, moveBy(24, 24))), taken, true);
+    this.appendRecorded('Duplicate selection', sel.pv, copies);
+  }
+
+  /**
+   * Pastes the copied strokes onto the current page, centred on the middle of the visible area,
+   * with new ids, and selects them (with the lasso). One undo step. Returns false if there's
+   * nothing to paste or no page.
+   */
+  pasteStrokes(): boolean {
+    const clip = this.clipboard, store = this.store;
+    const pv = this.pages[this.currentPageIndex()], page = pv && store?.page(pv.slot);
+    const box = clip && strokesBounds(clip.strokes);
+    if (!clip || !pv || !page || !box) return false;
+    const r = pv.el.getBoundingClientRect(), sc = this.scroller.getBoundingClientRect(), k = page.size.width / r.width;
+    const cx = (sc.left + this.scroller.clientWidth / 2 - r.left) * k, cy = (sc.top + this.scroller.clientHeight / 2 - r.top) * k;
+    const t = centreOn(box, cx, cy);
+    const copies = withIds(clip.strokes.map(s => transformStroke(s, t)), new Set(page.strokes.map(s => s.id)), true);
+    this.clearSelection();
+    this.appendRecorded('Paste', pv, copies);
+    return true;
   }
 }

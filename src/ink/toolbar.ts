@@ -1,6 +1,6 @@
 // The ink toolbar (#10): one row of icon buttons at the top of the ink view, wrapping onto a
-// second row when narrow. Left: the tools (pen, highlighter, eraser; lasso #11 and ruler #20
-// as disabled placeholders). Middle: the favourite presets. Right: undo, redo, add page, page
+// second row when narrow. Left: the tools (pen, highlighter, eraser, lasso #11; ruler #20
+// as a disabled placeholder). Middle: the favourite presets. Right: undo, redo, add page, page
 // settings and the Pages panel toggle. Tapping the tool already in use opens its picker (a
 // popover under the button, see picker.ts); so every tool, preset and picker option is at most
 // two taps away. The toolbar knows nothing of the store: the view hands it a ToolbarHost.
@@ -48,7 +48,11 @@ const TOOLS: Tool[] = [
   { tool: 'pen', icon: 'pen-line', label: 'Pen' },
   { tool: 'highlighter', icon: 'highlighter', label: 'Highlighter' },
   { tool: 'eraser', icon: 'eraser', label: 'Eraser' },
+  { tool: 'lasso', icon: 'lasso', label: 'Lasso' },
 ];
+
+/** Tools that can't be saved as a favourite. */
+const notPreset = (tool: ToolKind) => tool === 'eraser' || tool === 'lasso';
 
 export class Toolbar {
   readonly el: HTMLElement;
@@ -64,11 +68,10 @@ export class Toolbar {
 
     const tools = group('nb-ink-tools');
     for (const t of TOOLS) {
-      const b = this.button(tools, `nb-ink-tool nb-ink-${t.tool === 'eraser' ? 'eraser' : `tool-${t.tool}`}`, t.icon, t.label, () => this.toolTapped(t.tool, b));
+      const b = this.button(tools, `nb-ink-tool nb-ink-${notPreset(t.tool) ? t.tool : `tool-${t.tool}`}`, t.icon, t.label, () => this.toolTapped(t.tool, b));
       b.dataset.tool = t.tool;
       b.setAttribute('aria-haspopup', 'dialog');
     }
-    this.button(tools, 'nb-ink-lasso', 'lasso', 'Lasso: coming in #11', () => {}).disabled = true;
     this.button(tools, 'nb-ink-ruler', 'ruler', 'Ruler: coming in #20', () => {}).disabled = true;
 
     const presets = group('nb-ink-presets');
@@ -111,7 +114,7 @@ export class Toolbar {
       const d = !p ? 0 : p.tool === 'highlighter' ? 10 : Math.max(6, Math.min(22, 4 + p.size * 2.2));
       mark.style.width = p?.tool === 'highlighter' ? '22px' : `${d}px`;
       mark.style.height = `${d}px`;
-      const name = !p ? `Favourite ${i + 1}: empty (tap to save the current ${pen.tool === 'eraser' ? 'pen' : pen.tool})`
+      const name = !p ? `Favourite ${i + 1}: empty (tap to save the current ${notPreset(pen.tool) ? 'pen' : pen.tool})`
         : `Favourite ${i + 1}: ${p.tool === 'highlighter' ? 'highlighter' : `${p.nib ?? 'uniform'} pen`} ${p.color} ${p.size} px (long-press to replace)`;
       b.setAttribute('aria-label', name);
       b.title = name;
@@ -163,7 +166,7 @@ export class Toolbar {
     }
     this.picker.close();
     if (this.host.presets()[i]) this.host.applyPreset(i);
-    else if (this.host.pen().tool !== 'eraser') this.host.savePreset(i);
+    else if (!notPreset(this.host.pen().tool)) this.host.savePreset(i);
   }
 
   /** A long press on a slot saves the current pen or highlighter into it. */
@@ -176,7 +179,7 @@ export class Toolbar {
       x = e.clientX;
       y = e.clientY;
       timer = window.setTimeout(() => {
-        if (this.host.pen().tool === 'eraser') return;
+        if (notPreset(this.host.pen().tool)) return;
         this.pressed = i;
         this.host.savePreset(i);
       }, LONG_PRESS_MS);
