@@ -80,10 +80,11 @@ export interface PenHost {
   eraser(): Readonly<EraserSettings>;
   /**
    * The eraser moved along `path` (page px; one point for a tap) on a page since the last call:
-   * remove the strokes within `radius` of it. Called at most once per animation frame. `path`
-   * is reused afterwards, so don't keep it. Returns how many strokes were removed.
+   * remove the strokes within `radius` of it. Called at most once per animation frame; `start`
+   * is true for the first call of a gesture. `path` is reused afterwards, so don't keep it.
+   * Returns how many strokes were removed.
    */
-  erase(target: PageTarget, path: readonly Point[], radius: number): number;
+  erase(target: PageTarget, path: readonly Point[], radius: number, start: boolean): number;
 }
 
 // ---- sampling (pure; tested with fake events)
@@ -687,7 +688,7 @@ export class PenInput {
   private eraseStep(er: Erasing) {
     const pts = er.trace.points;
     if (pts.length > 1 || (pts.length === 1 && !er.sent)) {
-      er.removed += this.host.erase(er.target, pts, er.radius);
+      er.removed += this.host.erase(er.target, pts, er.radius, !er.sent);
       er.sent = true;
       pts.splice(0, pts.length - 1);
     }
