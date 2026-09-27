@@ -27,6 +27,8 @@ export interface Layout {
   /** Width of the pages layer: the view width, or the pages plus margins if wider. */
   width: number;
   pages: PageBox[];
+  /** The virtual blank page below the last page (#28), when laid out with `extra`; else null. */
+  ghost: PageBox | null;
   /** Top of the "Add page" control. */
   footerTop: number;
   /** Total scroll height. */
@@ -35,20 +37,25 @@ export interface Layout {
 
 /**
  * Lays out pages for a view `viewWidth` CSS px wide at `zoom` (1 fits the widest page to the
- * width). Pages with no size use `fallback`.
+ * width). Pages with no size use `fallback`. With `extra`, one more page of that size (the
+ * virtual blank page, #28) goes after the last one, counted in the widest page so that it
+ * becoming a real page (and another appearing below) moves nothing; the footer goes below it.
  */
-export function layoutPages(sizes: readonly Size[], viewWidth: number, fallback: Size, zoom = 1): Layout {
-  const widest = sizes.reduce((w, s) => Math.max(w, s.width), 0) || fallback.width;
+export function layoutPages(sizes: readonly Size[], viewWidth: number, fallback: Size, zoom = 1, extra?: Size | null): Layout {
+  const all = extra ? [...sizes, extra] : sizes;
+  const widest = all.reduce((w, s) => Math.max(w, s.width), 0) || fallback.width;
   const scale = Math.max(0.05, (viewWidth - 2 * MARGIN) / widest) * zoom;
   const width = Math.max(viewWidth, Math.round(widest * scale) + 2 * MARGIN);
   let top = MARGIN;
-  const pages = sizes.map(s => {
+  const boxes = all.map(s => {
     const w = Math.round(s.width * scale), height = Math.round(s.height * scale);
     const box = { top, left: Math.max(0, Math.round((width - w) / 2)), width: w, height };
     top += height + GAP;
     return box;
   });
-  return { scale, zoom, width, pages, footerTop: top, height: top + FOOTER };
+  const pages = boxes.slice(0, sizes.length);
+  const ghost = extra ? boxes[sizes.length] : null;
+  return { scale, zoom, width, pages, ghost, footerTop: top, height: top + FOOTER };
 }
 
 /** Indexes of the pages overlapping the band [start, end) of the scroll area, in order. */
@@ -83,4 +90,27 @@ export function mostVisiblePage(layout: Layout, start: number, end: number): num
     }
   });
   return best;
+}
+
+// ---- the virtual page (#28)
+
+/** Whether a gesture of this tool on the virtual page makes it a real page: only tools that ink. */
+export function inksGhost(tool: string): boolean {
+  return tool === 'pen' || tool === 'highlighter';
+}
+
+/**
+ * The pages to drop when a note closes (#28): the trailing run of pages that were made from the
+ * virtual page (`fromGhost`) and still have no strokes (`strokes` 0), last first. A page added
+ * explicitly, one with ink, or one that can't be read (`strokes` null) ends the run, so nothing
+ * above it is dropped.
+ */
+export function emptyGhostPages(pages: readonly { id: string; strokes: number | null }[], fromGhost: ReadonlySet<string>): string[] {
+  const out: string[] = [];
+  for (let i = pages.length - 1; i >= 0; i--) {
+    const p = pages[i];
+    if (!fromGhost.has(p.id) || p.strokes !== 0) break;
+    out.push(p.id);
+  }
+  return out;
 }

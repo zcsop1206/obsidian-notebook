@@ -3686,6 +3686,189 @@ try:
         check('chooser: a page changed to the PDF template keeps its ink and gets the PDF copied beside it',
               r['tpl'] == ['pdf', 2] and r['strokes'] == 1 and r['copied'], r)
         # ======== end of 23. Sized templates and page embeds (#27), PDF templates (#21) ========
+        # ======== 24. The virtual page (#28) ========
+        # A blank page always follows the last page: an element (.nb-ink-ghost), not in the store,
+        # the index, the panel or the stats; the pen or highlighter going down on it makes it a
+        # real page first. Empty pages made that way are dropped when the note closes.
+        r = ev("""async () => {
+          view.togglePagesPanel(false);
+          view.setTool('pen');
+          await p.createInkNote('Ghost', '', 'letter', 'lined-college');
+          await T.sleep(150);
+          const g = view.ghostEl, last = T.pages()[0];
+          T.ghostDown = (x, y, id = 51) => {
+            const el = view.ghostEl, r = el.getBoundingClientRect(), k = r.width / 816;
+            el.dispatchEvent(new PointerEvent('pointerdown', { pointerId: id, pointerType: 'pen', pressure: 0.3,
+              clientX: r.left + x * k, clientY: r.top + y * k, bubbles: true, cancelable: true, button: 0, buttons: 1 }));
+            return { r, k };
+          };
+          /** A stroke starting on the virtual page; moves and pointerup go to the page element it became. */
+          T.ghostStroke = async (pts, id = 52) => {
+            const n = view.store.slots.length, { r, k } = T.ghostDown(pts[0][0], pts[0][1], id);
+            const el = T.pages()[n] || view.ghostEl;
+            const fire = (t, [x, y]) => el.dispatchEvent(new PointerEvent(t, { pointerId: id, pointerType: 'pen', pressure: 0.4,
+              clientX: r.left + x * k, clientY: r.top + y * k, bubbles: true, cancelable: true, button: 0, buttons: t === 'pointerup' ? 0 : 1 }));
+            for (let j = 1; j < pts.length; j++) { fire('pointermove', pts[j]); await T.sleep(2); }
+            fire('pointerup', pts[pts.length - 1]);
+            await T.sleep(20);
+          };
+          T.svgs = () => [...fs.keys()].filter(k => k.startsWith('Ghost/')).sort();
+          const gc = g && g.querySelector('canvas');
+          let lines = 0;
+          if (gc) {
+            const d = gc.getContext('2d').getImageData(0, 0, gc.width, gc.height).data;
+            for (let k = 0; k < d.length; k += 4) if (d[k] < 235) lines++;
+          }
+          view.togglePagesPanel(true);
+          await T.sleep(100);
+          const thumbs = view.contentEl.querySelectorAll('.nb-pages-thumb').length;
+          view.togglePagesPanel(false);
+          await T.sleep(50);
+          return { ghost: !!g, isPage: g && g.classList.contains('nb-ink-page'), slots: view.store.slots.length, els: T.pages().length,
+            top: g && g.offsetTop, want: last.offsetTop + last.offsetHeight + 24, w: g && g.offsetWidth, h: g && g.offsetHeight, lw: last.offsetWidth, lh: last.offsetHeight,
+            lines, thumbs, loaded: view.stats.pagesLoaded, svgs: T.svgs().length, index: ink.readNote(fs.get('Ghost.md'), 'Ghost').pages.length,
+            footer: view.contentEl.querySelector('.nb-ink-footer').offsetTop > g.offsetTop + g.offsetHeight };
+        }""")
+        print('virtual page: new note:', r)
+        check('virtual page: a new note shows its page plus one virtual page right below it, the same size', r['ghost'] and not r['isPage'] and r['els'] == 1
+              and r['top'] == r['want'] and r['w'] == r['lw'] and r['h'] == r['lh'], r)
+        check('virtual page: drawn with the note\'s default template (lined)', r['lines'] > 1000, r['lines'])
+        check('virtual page: not in the store, the index, the panel, the stats or on disk', r['slots'] == 1 and r['index'] == 1 and r['thumbs'] == 1
+              and r['loaded'] == 1 and r['svgs'] == 1, r)
+        check('virtual page: the "Add page" controls are below it', r['footer'], r)
+
+        r = ev("""async () => {
+          const out = {};
+          for (const tool of ['eraser', 'lasso']) {
+            view.setTool(tool);
+            await T.ghostStroke(T.wave(100, 200, 20));
+            out[tool] = [view.store.slots.length, view.history.labels.length, T.pages().length];
+          }
+          view.setTool('pen');
+          return out;
+        }""")
+        check('virtual page: the eraser and lasso do nothing on it', r['eraser'] == [1, 0, 1] and r['lasso'][0] == 1 and r['lasso'][2] == 1, r)
+
+        r = ev("""async () => {
+          T.mark();
+          const top = view.ghostEl.offsetTop, scroll = view.contentEl.querySelector('.nb-ink-scroll').scrollTop;
+          await T.ghostStroke(T.wave(100, 200));
+          const el = T.pages()[1], g = view.ghostEl;
+          const res = { slots: view.store.slots.length, strokes: view.store.slots[1].page.strokes.length, top: el.offsetTop, was: top,
+            scrollKept: view.contentEl.querySelector('.nb-ink-scroll').scrollTop === scroll, ink: T.ink(1), tpl: T.templates()[1],
+            ghostTop: g.offsetTop, want: el.offsetTop + el.offsetHeight + 24, labels: view.history.labels.slice(-2),
+            thumbs: view.store.slots.length };
+          await T.sleep(2400);
+          res.index = ink.readNote(fs.get('Ghost.md'), 'Ghost').pages;
+          res.ids = view.store.slots.map(s => s.id);
+          res.disk = T.strokesOnDisk(`Ghost/${res.ids[1]}.svg`);
+          return res;
+        }""")
+        print('virtual page: stroke on it:', {k: r[k] for k in ('slots', 'strokes', 'top', 'was', 'ghostTop', 'want', 'ink', 'tpl')})
+        check('virtual page: a stroke on it makes a real page where it was (no jump), with the stroke on it',
+              r['slots'] == 2 and r['strokes'] == 1 and r['top'] == r['was'] and r['scrollKept'] and r['ink'] > 200, r)
+        check('virtual page: the new page has the note\'s default template', r['tpl'] == 'lined-college', r['tpl'])
+        check('virtual page: the next virtual page appears below it', r['ghostTop'] == r['want'], r)
+        check('virtual page: "Add page" then "Add stroke" in the history', r['labels'] == ['Add page', 'Add stroke'], r['labels'])
+        check('virtual page: autosave writes the page and the index', r['index'] == r['ids'] and r['disk'] == 1, r)
+
+        r = ev("""async () => {
+          const sc = view.contentEl.querySelector('.nb-ink-scroll');
+          sc.scrollTop = view.ghostEl.offsetTop - 200;
+          await T.sleep(50);
+          await T.ghostStroke(T.wave(100, 300), 53);
+          sc.scrollTop = view.ghostEl.offsetTop - 200;
+          await T.sleep(50);
+          await T.ghostStroke(T.wave(100, 300), 54);
+          const n = view.store.slots.length, strokes = view.store.slots.map(s => s.page ? s.page.strokes.length : -1);
+          // Undo: the stroke, then the page it made.
+          view.undo();
+          const afterStroke = [view.store.slots.length, view.store.slots[3].page.strokes.length];
+          view.undo();
+          const afterPage = view.store.slots.length;
+          view.redo(); view.redo();
+          return { n, strokes, afterStroke, afterPage, again: [view.store.slots.length, view.store.slots[3].page.strokes.length] };
+        }""")
+        check('virtual page: writing on two virtual pages in a row makes two pages, no taps', r['n'] == 4 and r['strokes'] == [0, 1, 1, 1], r)
+        check('virtual page: undo takes out the stroke, then the page ("Add page"); redo brings both back',
+              r['afterStroke'] == [4, 0] and r['afterPage'] == 3 and r['again'] == [4, 1], r)
+
+        r = ev("""async () => {
+          const sc = view.contentEl.querySelector('.nb-ink-scroll');
+          // A pen-down whose stroke is cancelled before any ink is committed.
+          sc.scrollTop = view.ghostEl.offsetTop - 200;
+          await T.sleep(50);
+          T.ghostDown(100, 100, 55);
+          view['input'].cancel();
+          T.penUp(4, [100, 100], 55);
+          await T.sleep(20);
+          const cancelled = [view.store.slots.length, view.store.slots[4].page.strokes.length];
+          // A stroke that is undone (the page stays until the note closes).
+          sc.scrollTop = view.ghostEl.offsetTop - 200;
+          await T.sleep(50);
+          await T.ghostStroke(T.wave(100, 300), 56);
+          view.undo();
+          const undone = [view.store.slots.length, view.store.slots[5].page.strokes.length];
+          await T.sleep(2400);  // autosave writes the two empty pages
+          const ids = view.store.slots.map(s => s.id);
+          const writtenEmpty = [fs.has(`Ghost/${ids[4]}.svg`), fs.has(`Ghost/${ids[5]}.svg`)];
+          await app.workspace.activeLeaf.detach();
+          await T.sleep(100);
+          const index = ink.readNote(fs.get('Ghost.md'), 'Ghost').pages;
+          const leaf = app.workspace.getLeaf('tab');
+          await leaf.openFile(app.vault.getFile('Ghost.md'));
+          await T.sleep(150);
+          return { cancelled, undone, writtenEmpty, index, kept: ids.slice(0, 4), svgs: T.svgs(), reopened: view.store.slots.map(s => s.id),
+            els: T.pages().length, ghost: !!view.ghostEl, loaded: view.stats.pagesLoaded };
+        }""")
+        print('virtual page: empty pages on close:', r)
+        check('virtual page: a pen-down with no ink, and an undone stroke, leave empty pages while open', r['cancelled'] == [5, 0] and r['undone'] == [6, 0], r)
+        check('virtual page: closing drops them: out of the index, their files deleted', r['writtenEmpty'] == [True, True] and r['index'] == r['kept']
+              and r['svgs'] == sorted(f'Ghost/{i}.svg' for i in r['kept']), r)
+        check('virtual page: reopening shows exactly the written pages plus one virtual page', r['reopened'] == r['kept'] and r['els'] == 4 and r['ghost'] and r['loaded'] == 4, r)
+
+        r = ev("""async () => {
+          view.chooseTemplate('add');
+          await T.choose('Grid, 5 mm');
+          const res = { slots: view.store.slots.length, tpl: T.templates()[4], ghostBelow: view.ghostEl.offsetTop > T.pages()[4].offsetTop + T.pages()[4].offsetHeight };
+          await app.workspace.activeLeaf.detach();
+          await T.sleep(100);
+          res.index = ink.readNote(fs.get('Ghost.md'), 'Ghost').pages.length;
+          const leaf = app.workspace.getLeaf('tab');
+          await leaf.openFile(app.vault.getFile('Ghost.md'));
+          await T.sleep(150);
+          res.reopened = view.store.slots.length;
+          return res;
+        }""")
+        check('virtual page: "Add page with template" still adds a page with that template, above the virtual page', r['slots'] == 5 and r['tpl'] == 'grid-5mm' and r['ghostBelow'], r)
+        check('virtual page: a page added with "Add page" is kept though empty', r['index'] == 5 and r['reopened'] == 5, r)
+
+        r = ev("""async () => {
+          const out = {};
+          for (const z of [2, 0.5]) {
+            view.setZoom(z);
+            await T.sleep(100);
+            const last = T.pages()[4], g = view.ghostEl;
+            out[z] = { top: g.offsetTop, want: last.offsetTop + last.offsetHeight + 24, w: g.offsetWidth, lw: last.offsetWidth, left: g.offsetLeft, ll: last.offsetLeft };
+          }
+          view.resetZoom();
+          await T.sleep(100);
+          return out;
+        }""")
+        check('virtual page: zoom keeps it placed below the last page at the same size',
+              all(v['top'] == v['want'] and v['w'] == v['lw'] and v['left'] == v['ll'] for v in r.values()), r)
+
+        ev("async () => { const sc = view.contentEl.querySelector('.nb-ink-scroll'); sc.scrollTop = view.ghostEl.offsetTop - 300; await T.sleep(150); }")
+        page.locator('#leaf').screenshot(path=os.path.join(OUT, 'virtual_page_light.png'))
+        ev("async () => { document.body.classList.add('theme-dark'); app.workspace.trigger('css-change'); await T.sleep(150); }")
+        page.locator('#leaf').screenshot(path=os.path.join(OUT, 'virtual_page_dark.png'))
+        r = ev("""() => {
+          const c = view.ghostEl.querySelector('canvas'), d = c.getContext('2d').getImageData(2, 2, 1, 1).data;
+          return [...d.slice(0, 3)];
+        }""")
+        check('virtual page: dark paper in the dark theme', r == [0x1e, 0x1e, 0x1e], r)
+        ev("() => { document.body.classList.remove('theme-dark'); app.workspace.trigger('css-change'); }")
+        # ======== end of 24. The virtual page (#28) ========
 
         # --- unload removes the patch
         r = ev("""async () => {
