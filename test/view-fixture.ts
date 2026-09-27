@@ -5,7 +5,7 @@ import { newPageId } from '../src/format/ids';
 import { newNote, readNote, writeNote } from '../src/format/note';
 import { polygon, strokeOutline, strokePath } from '../src/format/outline';
 import { readPage, writePage } from '../src/format/page';
-import { templateName } from '../src/format/template';
+import { parseTemplateName, templateName } from '../src/format/template';
 import { densePage } from './fixture';
 import { seeded } from './seeded';
 
@@ -27,4 +27,4 @@ function largeNote(folder: string, name: string, pages: number, strokes: number)
   return files;
 }
 
-(window as unknown as { ink: unknown }).ink = { readPage, writePage, readNote, writeNote, templateName, largeNote, strokePath, strokeOutline, polygon };
+(window as unknown as { ink: unknown }).ink = { readPage, writePage, readNote, writeNote, templateName, parseTemplateName, largeNote, strokePath, strokeOutline, polygon };
