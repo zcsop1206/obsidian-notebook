@@ -109,6 +109,8 @@ export class NoteStore {
   private delay: number;
   private maxDelay: number;
   private newId: (taken: Set<string>) => string;
+  /** Pages taken out of the index by removePageFromIndex, for insertPageInIndex (undo, #8). */
+  private detached = new Map<string, { slot: PageSlot; dirty: boolean }>();
 
   /**
    * `notePath` is the index's vault path; its pages are in the folder named after `basename`
@@ -262,6 +264,7 @@ export class NoteStore {
       const m = /^(p-[0-9a-f]{6})\.svg$/.exec(name);
       if (m) taken.add(m[1]);
     }
+    for (const id of this.detached.keys()) taken.add(id); // unwritten pages that redo may bring back
     const id = this.newId(taken);
     const page = newPage(id, this.paperSize, template ? parseTemplate(template) : noteTemplate(this.index.template));
     const slot: PageSlot = { id, path: this.pagePath(id), size: page.size, page, text: null, error: null };
@@ -271,6 +274,92 @@ export class NoteStore {
     this.indexDirty = true;
     this.schedule();
     return slot;
+  }
+
+  // ---- changes for undo and redo (#8)
+
+  /**
+   * Removes these strokes from the page. Returns the removed strokes with the indices they had,
+   * in ascending index order (to put them back with insertStrokes). Marks the page changed if
+   * anything was removed; unknown ids, pages and unreadable pages remove nothing.
+   */
+  removeStrokes(pageId: string, ids: Iterable<string>): { index: number; stroke: Stroke }[] {
+    const slot = this.slots.find(s => s.id === pageId);
+    const page = slot && this.page(slot);
+    if (!slot || !page) return [];
+    const remove = new Set(ids);
+    const removed: { index: number; stroke: Stroke }[] = [];
+    const kept: Stroke[] = [];
+    page.strokes.forEach((stroke, index) => {
+      if (remove.has(stroke.id)) removed.push({ index, stroke });
+      else kept.push(stroke);
+    });
+    if (!removed.length) return removed;
+    page.strokes = kept;
+    this.changed(slot);
+    return removed;
+  }
+
+  /**
+   * Puts strokes back at these indices (as removeStrokes returned them), restoring the original
+   * order. Indices past the end append; a stroke whose id is already on the page is skipped.
+   */
+  insertStrokes(pageId: string, entries: { index: number; stroke: Stroke }[]): void {
+    const slot = this.slots.find(s => s.id === pageId);
+    const page = slot && this.page(slot);
+    if (!slot || !page || !entries.length) return;
+    const present = new Set(page.strokes.map(s => s.id));
+    for (const { index, stroke } of [...entries].sort((a, b) => a.index - b.index)) {
+      if (present.has(stroke.id)) continue;
+      page.strokes.splice(Math.min(index, page.strokes.length), 0, stroke);
+      present.add(stroke.id);
+    }
+    this.changed(slot);
+  }
+
+  /**
+   * Takes a page out of the index (undoing "Add page"). Only the index changes: the page file
+   * is not deleted, so a page already written stays on disk, orphaned, until insertPageInIndex
+   * puts it back (page deletion is #17). Returns the position it had, or -1 if it isn't in the
+   * note. A page with unsaved changes isn't written while it's out of the index.
+   */
+  removePageFromIndex(pageId: string): { index: number } {
+    const index = this.index.pages.indexOf(pageId);
+    if (index < 0) return { index };
+    const [slot] = this.slots.splice(index, 1);
+    this.index.pages.splice(index, 1);
+    this.detached.set(pageId, { slot, dirty: this.dirtyPages.delete(pageId) });
+    this.indexDirty = true;
+    this.schedule();
+    return { index };
+  }
+
+  /** Puts a page taken out by removePageFromIndex back into the index at `index`. */
+  insertPageInIndex(pageId: string, index: number): void {
+    const out = this.detached.get(pageId);
+    if (!out) throw new Error(`Page ${pageId} was not taken out of the index`);
+    if (this.index.pages.includes(pageId)) return;
+    this.detached.delete(pageId);
+    const at = Math.max(0, Math.min(index, this.slots.length));
+    this.slots.splice(at, 0, out.slot);
+    this.index.pages.splice(at, 0, pageId);
+    if (out.dirty) this.dirtyPages.add(pageId);
+    this.indexDirty = true;
+    this.schedule();
+  }
+
+  /**
+   * Sets the note's `template:` name as it was, even a hand-edited name that isn't a known
+   * template (undoing setAllTemplates). Returns the name it had.
+   */
+  setNoteTemplateName(name: string): string {
+    const before = this.index.template;
+    if (name !== before) {
+      this.index.template = name;
+      this.indexDirty = true;
+      this.schedule();
+    }
+    return before;
   }
 
   /** Whether anything changed here is not yet written. */
