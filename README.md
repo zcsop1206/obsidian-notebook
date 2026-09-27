@@ -1,15 +1,38 @@
 # obsidian-notebook
 
-An Obsidian plugin for keeping an engineering notebook on the iPad: handwriting, audio recording and GitHub sync, stored as plain files in the vault.
+**Notebook** is an Obsidian plugin for handwritten notes with the Apple Pencil on the iPad, meant to replace Notability. Pages are stored as SVG files in the vault, so they render in Obsidian, on GitHub and on a website without the plugin. It's part of an engineering notebook kept in Obsidian and published with a portfolio site.
 
-Right now it is a throwaway spike that measures Apple Pencil input and audio recording inside Obsidian. It writes everything under `_spike/`.
+## Status
+
+The ink editor isn't built yet. For now the plugin has one tool, the **ink debug view**: a graph-paper canvas that measures Apple Pencil input (sample rate, pressure, tilt, coalesced and predicted events) and tests audio recording. It writes everything under `_spike/` in the vault. Open it with the command **Open ink debug view**. The command **Start or stop test recording** starts or stops a recording without opening the view.
+
+Planned: a page view with paper templates, pen, highlighter and eraser tools, pressure-shaped strokes (with [`perfect-freehand`](https://github.com/steveruizok/perfect-freehand)), ink notes embedded in markdown, and audio recording. Syncing the vault through GitHub is handled by a separate plugin.
 
 ## Install on the iPad
 
 1. Install **BRAT** from Community plugins and enable it.
 2. BRAT → Add beta plugin → `zcsop1206/obsidian-notebook`.
-3. Enable **Notebook spike** under Community plugins.
+3. Enable **Notebook** under Community plugins.
+
+If you installed the earlier **Notebook spike**, remove it under Community plugins. The plugin id changed from `notebook-spike` to `notebook`, so BRAT installs Notebook as a separate plugin rather than updating the spike.
+
+## Development
+
+Needs Node 22 (npm), and for the tests Python 3 with [Playwright](https://playwright.dev/python/) and its Chromium (`pip install playwright`, then `python -m playwright install chromium`).
+
+```sh
+npm install
+npm run dev     # rebuild main.js on every change, with an inline source map
+npm run build   # type-check, then build main.js for release
+npm test        # build, then run the headless tests in test/
+```
+
+Source is TypeScript under `src/`: `main.ts` is the plugin class, and `src/debug/` holds the ink debug view and test recorder. esbuild bundles it into `main.js` at the repo root, which is not committed. The plugin runs in Obsidian's iOS web view, so use web APIs only, never Node modules.
+
+`npm test` runs `test/run_spike_test.py`. It serves the repo on port 8765, loads the built `main.js` into `test/harness.html` (a mock of the Obsidian API with an in-memory vault) in headless Chromium with a fake microphone, and drives pen strokes, saving a page and three recording scenarios. It exits non-zero if a check fails. Screenshots and the saved SVG go to `test/out/`.
+
+To try a build in a desktop vault, copy `main.js`, `manifest.json` and `styles.css` into `<vault>/.obsidian/plugins/notebook/`.
 
 ## Release
 
-Bump `version` in `manifest.json` and `versions.json`, commit, then push a tag with the same version. The workflow attaches `main.js`, `manifest.json` and `styles.css` to a GitHub release.
+Bump `version` in `manifest.json` and add it to `versions.json`, commit, then push a tag equal to the version (for example `0.0.3`). The release workflow runs `npm ci` and `npm run build`, checks the tag matches the manifest, and attaches `main.js`, `manifest.json` and `styles.css` to a GitHub release, which BRAT installs.
