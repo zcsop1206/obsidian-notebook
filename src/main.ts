@@ -59,6 +59,7 @@ export default class NotebookPlugin extends Plugin {
     this.addInkCommand('zoom-in', 'Zoom in', view => view.zoomIn());
     this.addInkCommand('zoom-out', 'Zoom out', view => view.zoomOut());
     this.addInkCommand('zoom-reset', 'Reset zoom to 100%', view => view.resetZoom());
+    this.addInkCommand('toggle-pages-panel', 'Toggle pages panel', view => view.togglePagesPanel());
     this.registerEvent(this.app.workspace.on('file-menu', (menu, file, _source, leaf) => {
       if (!(file instanceof TFile) || !leaf || leaf.view.getViewType() !== 'markdown' || !cachedIsInk(this.app, file)) return;
       menu.addItem(item => item.setTitle('Open as ink note').setIcon('pencil').onClick(() => void this.openAsInk(file, leaf)));
