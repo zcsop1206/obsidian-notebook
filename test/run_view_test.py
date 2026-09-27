@@ -7,7 +7,7 @@
 # highlighter (tools, layers, crossings, the live overlay, long strokes), undo and redo, the
 # eraser, and zoom and finger navigation (#9: pans with momentum, pinches, zoom commands and
 # Ctrl+wheel, strokes at 50-400%, the pen during finger gestures, touch rules, frame times on
-# the 20-page note, bitmap memory at 400%). Run by `npm test`; screenshots land in test/out/.
+# the 20-page note, bitmap memory at 400%), and renaming or moving notes and page folders (#26). Run by `npm test`; screenshots land in test/out/.
 # Exits non-zero if any check fails.
 import os, subprocess, sys, time
 from playwright.sync_api import sync_playwright
@@ -2053,6 +2053,134 @@ try:
               0 < r['drawn'] <= 20 and r['maxMs'] < 40, r)
         ev("() => view.togglePagesPanel(false)")
         # ======== end of 16. Page management (#17) ========
+
+        # ======== 17. Renaming or moving a note keeps its pages (#26) ========
+        # Helpers: the page files under a folder, the strokes of each, and the index's folder and pages.
+        ev("""() => {
+          T.under = dir => [...fs.keys()].filter(k => k.startsWith(dir + '/')).sort();
+          T.index = path => { const n = ink.readNote(fs.get(path), path.replace(/^.*\\//, '').replace(/\\.md$/, '')); return { folder: n.folder, pages: n.pages }; };
+          T.strokesIn = dir => T.under(dir).filter(k => k.endsWith('.svg')).map(k => T.strokesOnDisk(k));
+        }""")
+        # (1) rename an open note with an unsaved stroke
+        r = ev("""async () => {
+          await p.createInkNote('Lecture', '', 'letter', 'blank');
+          await T.sleep(150);
+          const id = view.store.slots[0].id;
+          await T.stroke(0, T.wave(100, 200), 'pen', 7, 0);
+          const unsaved = view.store.unsaved, n0 = notices.length;
+          await app.vault.rename(app.vault.getFile('Lecture.md'), 'Week1.md');
+          await T.sleep(100);
+          const r = { id, unsaved, file: view.file.path, title: view.getDisplayText(), folder: view.store.folder, slot: view.store.slots[0].path,
+            old: T.under('Lecture').length + (fs.has('Lecture.md') ? 1 : 0) + (dirs.has('Lecture') ? 1 : 0), now: T.under('Week1'),
+            index: T.index('Week1.md'), strokes: T.strokesIn('Week1'), saved: !view.store.unsaved, notices: notices.slice(n0) };
+          await T.stroke(0, T.wave(100, 400), 'pen', 7, 0);
+          await T.sleep(2400);
+          r.after = { strokes: T.strokesIn('Week1'), old: T.under('Lecture').length, ink: T.ink(0) };
+          r.image = await T.imageInk(`Week1/${id}.svg`);
+          return r;
+        }""")
+        check('rename open: the page folder is renamed and nothing is left at the old path',
+              r['old'] == 0 and r['now'] == [f"Week1/{r['id']}.svg"], r)
+        check('rename open: the view follows (file, title, store folder, slot paths)',
+              r['file'] == 'Week1.md' and r['title'] == 'Week1' and r['folder'] == 'Week1' and r['slot'] == f"Week1/{r['id']}.svg", r)
+        check('rename open: the embeds point at the new folder', r['index'] == {'folder': 'Week1', 'pages': [r['id']]}, r)
+        check('rename open: the unsaved stroke is saved to the new path, with no notice',
+              r['unsaved'] and r['saved'] and r['strokes'] == [1] and r['notices'] == [], r)
+        check('rename open: the view still draws and autosaves to the new path afterwards',
+              r['after']['strokes'] == [2] and r['after']['old'] == 0 and r['after']['ink'] > 500, r['after'])
+        check('rename open: the moved page renders as a plain SVG image', r['image']['n'] > 500, r['image'])
+        pid = r['id']
+
+        # (2) move the open note to another folder, with an unsaved stroke
+        r = ev("""async () => {
+          await app.vault.createFolder('Archive');
+          await T.stroke(0, T.wave(100, 600), 'pen', 7, 0);
+          await app.vault.rename(app.vault.getFile('Week1.md'), 'Archive/Week1.md');
+          await T.sleep(100);
+          const r = { file: view.file.path, folder: view.store.folder, old: T.under('Week1').length + (dirs.has('Week1') ? 1 : 0),
+            index: T.index('Archive/Week1.md'), strokes: T.strokesIn('Archive/Week1') };
+          await T.stroke(0, T.wave(100, 700), 'pen', 7, 0);
+          await view.save();
+          r.after = { strokes: T.strokesIn('Archive/Week1'), old: T.under('Week1').length };
+          return r;
+        }""")
+        check('move open: the page folder moves along and the embeds follow',
+              r['file'] == 'Archive/Week1.md' and r['folder'] == 'Archive/Week1' and r['old'] == 0 and r['index'] == {'folder': 'Week1', 'pages': [pid]}, r)
+        check('move open: the unsaved stroke and a later one are saved in the new place', r['strokes'] == [3] and r['after'] == {'strokes': [4], 'old': 0}, r)
+
+        # (3) a name collision leaves the folder where it is, with a notice
+        r = ev("""async () => {
+          await app.vault.createFolder('Archive/Taken');
+          const n0 = notices.length;
+          await T.stroke(0, T.wave(100, 800), 'pen', 7, 0);
+          await app.vault.rename(app.vault.getFile('Archive/Week1.md'), 'Archive/Taken.md');
+          await T.sleep(100);
+          const r = { notices: notices.slice(n0), folder: view.store.folder, index: T.index('Archive/Taken.md'), strokes: T.strokesIn('Archive/Week1'),
+            taken: T.under('Archive/Taken') };
+          await T.stroke(0, T.wave(100, 900), 'pen', 7, 0);
+          await view.save();
+          r.after = T.strokesIn('Archive/Week1');
+          return r;
+        }""")
+        check('collision: the folder stays, the embeds keep pointing at it, and a notice says so',
+              r['folder'] == 'Archive/Week1' and r['index'] == {'folder': 'Week1', 'pages': [pid]} and r['taken'] == []
+              and len(r['notices']) == 1 and 'already exists' in r['notices'][0], r)
+        check('collision: the view keeps saving to the pages where they are', r['strokes'] == [5] and r['after'] == [6], r)
+
+        # (4) the page folder renamed by hand while the note is open, with an unsaved stroke
+        r = ev("""async () => {
+          const n0 = notices.length;
+          await T.stroke(0, T.wave(100, 1000), 'pen', 7, 0);
+          await app.vault.rename(app.vault.getFolder('Archive/Week1'), 'Archive/By hand');
+          await T.sleep(50);
+          const r = { folder: view.store.folder, slot: view.store.slots[0].path, missing: view.store.slots[0].error };
+          await view.save();
+          Object.assign(r, { index: T.index('Archive/Taken.md'), strokes: T.strokesIn('Archive/By hand'), old: T.under('Archive/Week1').length + (dirs.has('Archive/Week1') ? 1 : 0),
+            notices: notices.slice(n0), md: fs.get('Archive/Taken.md') });
+          return r;
+        }""")
+        check('folder by hand, open: the view follows the folder and saves the unsaved stroke there',
+              r['folder'] == 'Archive/By hand' and r['missing'] is None and r['strokes'] == [7] and r['old'] == 0 and r['notices'] == [], r)
+        check('folder by hand, open: the embeds are rewritten (percent-encoded)',
+              r['index'] == {'folder': 'By hand', 'pages': [pid]} and f'](By%20hand/{pid}.svg)' in r['md'], r)
+
+        # (5) a closed note: rename and move it, then rename its folder by hand
+        r = ev("""async () => {
+          await app.workspace.activeLeaf.detach();
+          await p.createInkNote('Closed', '', 'letter', 'blank');
+          await T.sleep(150);
+          const id = view.store.slots[0].id;
+          await T.stroke(0, T.wave(100, 200), 'pen', 7, 0);
+          await app.workspace.activeLeaf.detach();
+          await T.sleep(30);
+          await app.vault.createFolder('Moved');
+          await app.vault.rename(app.vault.getFile('Closed.md'), 'Moved/Closed 2.md');
+          await T.sleep(100);
+          const moved = { index: T.index('Moved/Closed 2.md'), files: T.under('Moved/Closed 2'), old: T.under('Closed').length + (dirs.has('Closed') ? 1 : 0) };
+          await app.vault.rename(app.vault.getFolder('Moved/Closed 2'), 'Moved/Pages');
+          await T.sleep(100);
+          const byHand = T.index('Moved/Closed 2.md');
+          const leaf = app.workspace.getLeaf('tab');
+          await leaf.openFile(app.vault.getFile('Moved/Closed 2.md'));
+          await T.sleep(150);
+          return { id, moved, byHand, type: view.getViewType(), folder: view.store.folder, loaded: view.stats.pagesLoaded,
+            strokes: view.store.page(view.store.slots[0]).strokes.length, ink: T.ink(0) };
+        }""")
+        check('closed note: renaming and moving it moves its page folder and rewrites the embeds',
+              r['moved'] == {'index': {'folder': 'Closed 2', 'pages': [r['id']]}, 'files': [f"Moved/Closed 2/{r['id']}.svg"], 'old': 0}, r)
+        check('closed note: renaming its folder by hand rewrites the embeds', r['byHand'] == {'folder': 'Pages', 'pages': [r['id']]}, r)
+        check('closed note: it reopens with its pages', r['type'] == 'notebook-ink' and r['folder'] == 'Moved/Pages' and r['loaded'] == 1
+              and r['strokes'] == 1 and r['ink'] > 500, r)
+
+        # (6) the collision note, whose folder isn't named after it, reopens with its pages
+        r = ev("""async () => {
+          const leaf = app.workspace.getLeaf('tab');
+          await leaf.openFile(app.vault.getFile('Archive/Taken.md'));
+          await T.sleep(150);
+          return { type: view.getViewType(), loaded: view.stats.pagesLoaded, ids: view.store.slots.map(s => s.id), strokes: view.store.page(view.store.slots[0]).strokes.length };
+        }""")
+        check('reopen: the renamed note lists its pages from the folder its embeds name', r == {'type': 'notebook-ink', 'loaded': 1, 'ids': [pid], 'strokes': 7}, r)
+        # ======== end of 17. Renaming or moving a note keeps its pages (#26) ========
 
         # --- unload removes the patch
         r = ev("""async () => {

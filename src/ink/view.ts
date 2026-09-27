@@ -103,6 +103,7 @@ export function vaultFiles(app: App): NoteFiles {
       const f = vault.getAbstractFileByPath(path);
       if (f instanceof TFile) await vault.delete(f);
     },
+    isFolder: path => vault.getAbstractFileByPath(path) instanceof TFolder,
   };
 }
 
@@ -243,6 +244,7 @@ export class InkView extends FileView {
     this.registerEvent(vault.on('create', onDisk('create')));
     this.registerEvent(vault.on('delete', onDisk('delete')));
     this.registerEvent(vault.on('rename', (file, oldPath) => {
+      if (this.store?.followRename(file.path, oldPath, file instanceof TFolder)) return; // the page folder moved (#26)
       if (!(file instanceof TFile) || !this.store) return;
       void this.store.external(oldPath, 'delete');
       void this.store.external(file.path, 'create');

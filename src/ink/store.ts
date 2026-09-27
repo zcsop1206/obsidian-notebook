@@ -5,7 +5,8 @@
 // the index, and the text of our own writes is remembered so their modify events are ignored.
 // Changes made on disk by others (a sync) reload the file unless it has unsaved changes here.
 import { newPageId } from '../format/ids';
-import { pagePath, readNote, writeNote, type NoteIndex } from '../format/note';
+import { readNote, writeNote, type NoteIndex } from '../format/note';
+import { dirOf, nameOf, rebase, relative, resolve, within } from './paths';
 import { newPage, PAPER_SIZES, readPage, writePage, type Page, type Size, type Stroke } from '../format/page';
 import { parseTemplate, parseTemplateName, templateName, type Template } from '../format/template';
 
@@ -27,6 +28,8 @@ export interface NoteFiles {
    * before page deletion still fit; without it a deleted page's file stays on disk, orphaned.
    */
   delete?(path: string): Promise<void>;
+  /** Whether a folder exists (#26: tells a page folder moved from a page file moved). */
+  isFolder?(path: string): boolean;
 }
 
 export interface StoreListener {
@@ -118,12 +121,16 @@ export class NoteStore {
   private newId: (taken: Set<string>) => string;
   /** Pages taken out of the index by removePageFromIndex, for insertPageInIndex (undo, #8). */
   private detached = new Map<string, { slot: PageSlot; dirty: boolean }>();
+  /** The pages' folder as a vault path, once loaded (#26: it needn't be next to the note). */
+  private pagesAt: string | null = null;
+  /** While movePages moves the page folder: saves wait for it, and changes on disk are ignored. */
+  private moving: Promise<void> | null = null;
 
   /**
    * `notePath` is the index's vault path; its pages are in the folder named after `basename`
    * next to it.
    */
-  constructor(private files: NoteFiles, public notePath: string, readonly basename: string,
+  constructor(private files: NoteFiles, public notePath: string, public basename: string,
     private listener: StoreListener, options: StoreOptions = {}) {
     this.delay = options.delay ?? SAVE_DELAY;
     this.maxDelay = options.maxDelay ?? MAX_SAVE_DELAY;
@@ -138,7 +145,7 @@ export class NoteStore {
 
   /** The folder holding the pages, e.g. `School/lecture`. */
   get folder(): string {
-    return this.dir + this.basename;
+    return this.pagesAt ?? this.dir + this.basename;
   }
 
   get paperSize(): Size {
@@ -146,7 +153,12 @@ export class NoteStore {
   }
 
   pagePath(id: string): string {
-    return this.dir + pagePath(this.basename, id);
+    return `${this.folder}/${id}.svg`;
+  }
+
+  /** The page folder a read index names, as a vault path (the default one if it leaves the vault). */
+  private pagesOf(index: NoteIndex): string {
+    return resolve(dirOf(this.notePath), index.folder) ?? this.dir + this.basename;
   }
 
   /** Reads the index (from `text` if given) and every page file. Throws if the index can't be read. */
@@ -154,6 +166,7 @@ export class NoteStore {
     const md = text ?? await this.files.read(this.notePath);
     if (md === null) throw new Error(`${this.notePath} not found`);
     this.index = readNote(md, this.basename);
+    this.pagesAt = this.pagesOf(this.index);
     this.remember(this.notePath, md);
     this.slots = await Promise.all(this.index.pages.map(id => this.loadSlot(id)));
   }
@@ -382,6 +395,7 @@ export class NoteStore {
 
   /** Writes every changed page, then the index if it changed. Resolves when they're written. */
   flush(): Promise<void> {
+    if (this.moving) return this.moving.then(() => this.flush());
     if (this.timer !== null) clearTimeout(this.timer);
     this.timer = null;
     this.firstChange = 0;
@@ -456,11 +470,98 @@ export class NoteStore {
     this.timer = null;
   }
 
-  /** The note was renamed or moved. Its pages stay where they are. */
+  /**
+   * The note was renamed or moved. Its pages stay where they are (movePages moves them), so the
+   * index's folder is recomputed from the new place; a save meanwhile embeds them correctly.
+   */
   renamed(notePath: string) {
+    if (notePath === this.notePath) return;
     const known = this.known.get(this.notePath);
     if (known) this.known.set(notePath, known);
+    const pages = this.folder;
     this.notePath = notePath;
+    this.basename = nameOf(notePath).replace(/\.md$/i, '');
+    if (!this.index) return;
+    this.index.basename = this.basename;
+    this.pagesAt = pages;
+    this.setFolder(pages);
+  }
+
+  /** Sets the index's relative folder for pages at `pages`, marking the index changed if it differs. */
+  private setFolder(pages: string) {
+    const rel = relative(dirOf(this.notePath), pages);
+    if (rel === this.index.folder) return;
+    this.index.folder = rel;
+    this.indexDirty = true;
+    this.schedule();
+  }
+
+  /**
+   * The page folder is now at `to` (moved by someone else, or by movePages): pages are read and
+   * written there from now on and the index's embeds follow. Slot paths change at once.
+   */
+  pagesMoved(to: string) {
+    const from = this.folder;
+    if (to === from || !this.index) return;
+    const move = (slot: PageSlot) => {
+      const path = rebase(slot.path, from, to);
+      const known = this.known.get(slot.path);
+      if (known) {
+        this.known.set(path, known);
+        this.known.delete(slot.path);
+      }
+      slot.path = path;
+    };
+    for (const slot of this.slots) move(slot);
+    for (const { slot } of this.detached.values()) move(slot);
+    this.pagesAt = to;
+    this.setFolder(to);
+  }
+
+  /**
+   * Moves the page folder to `to` with `move` (the vault rename), with no page written to the old
+   * place afterwards: saves wait until the move is done (queued writes finish first), then go
+   * to the new place along with the rewritten index. Resolves false if the move failed.
+   */
+  async movePages(to: string, move: () => Promise<void>): Promise<boolean> {
+    while (this.moving) await this.moving;
+    let release!: () => void;
+    this.moving = new Promise(r => { release = r; });
+    let ok = false;
+    try {
+      while (this.writes.size) await Promise.all([...this.writes.values()]);
+      await move();
+      this.pagesMoved(to);
+      ok = true;
+    } catch (e) {
+      this.listener.notice(`Couldn't move the pages of ${nameOf(this.notePath)}: ${errorText(e)}`);
+    } finally {
+      this.moving = null;
+      release();
+    }
+    return ok;
+  }
+
+  /**
+   * A file or folder in the vault was renamed. Returns true if that was the page folder (or a
+   * folder holding it) moving, which the store follows here, or a move by movePages; then the
+   * rename is not a change on disk to the note's files.
+   */
+  followRename(newPath: string, oldPath: string, isFolder: boolean): boolean {
+    const folder = this.folder;
+    if (this.moving) return within(folder, oldPath) || within(oldPath, folder);
+    if (!this.index) return false;
+    if (isFolder) {
+      if (!within(folder, oldPath)) return false;
+      this.pagesMoved(rebase(folder, oldPath, newPath));
+      return true;
+    }
+    // A page file whose folder moved, if its folder event hasn't come yet: the folder is gone.
+    if (dirOf(oldPath) === folder && nameOf(oldPath) === nameOf(newPath) && this.files.isFolder && !this.files.isFolder(folder)) {
+      this.pagesMoved(dirOf(newPath));
+      return true;
+    }
+    return false;
   }
 
   // ---- changes on disk
@@ -476,7 +577,7 @@ export class NoteStore {
    * kept (and saved over it) and a notice says so, once per change.
    */
   async external(path: string, kind: 'modify' | 'create' | 'delete'): Promise<void> {
-    if (this.closed || !this.owns(path)) return;
+    if (this.closed || this.moving || !this.owns(path)) return;
     if (kind === 'delete' && this.ownDeletes.has(path)) return; // deletePage's own delete (#17)
     let text: string | null = null;
     if (kind !== 'delete') {
@@ -487,7 +588,7 @@ export class NoteStore {
       }
       if (text === null || this.isKnown(path, text)) return;
     }
-    if (this.closed) return;
+    if (this.closed || this.moving || !this.owns(path)) return;
     // Checked after the read, so a stroke added meanwhile isn't lost.
     if (this.hasUnsaved(path)) {
       const key = text === null ? 'deleted' : fingerprint(text);
@@ -525,9 +626,16 @@ export class NoteStore {
       return;
     }
     this.remember(this.notePath, text);
+    // The embeds name another folder (edited by hand): its pages are other files, read afresh.
+    const pages = this.pagesOf(index);
+    const moved = pages !== this.folder;
+    if (moved) {
+      if (this.dirtyPages.size) await this.flush();
+      this.pagesAt = pages;
+    }
     // A page removed elsewhere that has changes here: save them now, so nothing is lost.
     if (this.slots.some(s => !index.pages.includes(s.id) && this.dirtyPages.has(s.id))) await this.flush();
-    const old = new Map(this.slots.map(s => [s.id, s] as const));
+    const old = new Map(moved ? [] : this.slots.map(s => [s.id, s] as const));
     const slots = await Promise.all(index.pages.map(id => old.get(id) ?? this.loadSlot(id)));
     if (this.closed) return;
     this.index = index;

@@ -8,6 +8,7 @@ import { cachedIsInk, installTakeover, VIEW_TYPE_INK } from './ink/takeover';
 import type { PenStats } from './ink/input';
 import type { NavStats } from './ink/navigate';
 import { InkView } from './ink/view';
+import { RenameHandler } from './ink/rename';
 import type { Paper } from './format/page';
 import { DEFAULT_SETTINGS, NotebookSettingTab, parseSettings, type NotebookSettings } from './settings';
 
@@ -25,6 +26,9 @@ export default class NotebookPlugin extends Plugin {
 
     this.registerView(VIEW_TYPE_INK, leaf => new InkView(leaf));
     this.register(installTakeover(this.app));
+    // Renaming or moving an ink note moves its page folder along (#26).
+    const renames = new RenameHandler(this.app);
+    this.registerEvent(this.app.vault.on('rename', (file, oldPath) => void renames.onRename(file, oldPath)));
     this.addRibbonIcon('pencil', 'New ink note', () => this.newInkNote());
     this.addCommand({ id: 'new-ink-note', name: 'New ink note', callback: () => this.newInkNote() });
     this.addCommand({
