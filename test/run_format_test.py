@@ -2,7 +2,9 @@
 # Chromium as <img>, the way Obsidian's reading view and GitHub show them, in light and dark.
 # Checks that drawn pages aren't blank, that the empty page is, that default black ink switches
 # colour with the colour scheme while other colours don't, and that crossing highlighter strokes
-# don't darken. Run by `npm test`; screenshots land in test/out/. Exits non-zero on a failure.
+# don't darken. The template pages (lined with margin, grid, dots) must show their lines in the
+# grey of each scheme (light grey on white, dark grey on dark), with the margin line pink in
+# both. Run by `npm test`; screenshots land in test/out/. Exits non-zero on a failure.
 import base64, os, re, subprocess, sys, time
 from playwright.sync_api import sync_playwright
 
@@ -29,20 +31,30 @@ BLUE = (0x1e, 0x5b, 0xd8)
 # Highlighters at 40% over white: green alone, and green over yellow if crossings darkened.
 GREEN_HL = (177, 241, 206)
 GREEN_OVER_YELLOW = (177, 231, 145)
+# Template lines, from the page's <style> (.t), and the margin line's fixed colour.
+LINE = {'light': (0xc9, 0xc9, 0xc9), 'dark': (0x3c, 0x3c, 0x3c)}
+PINK = (0xe8, 0xa0, 0xa0)
 
-# Counts pixels in a PNG screenshot: differing from the background, and near each given colour.
-COUNT_JS = """async ([png, bg, colors]) => {
+# Counts pixels in a PNG screenshot: differing from the background, near each given colour, and
+# (of those differing from the background) neutral greys between `grey[0]` and `grey[1]`; and
+# returns the colour at each sample point.
+COUNT_JS = """async ([png, bg, colors, grey, samples]) => {
   const img = await createImageBitmap(await (await fetch('data:image/png;base64,' + png)).blob());
   const c = new OffscreenCanvas(img.width, img.height), g = c.getContext('2d');
   g.drawImage(img, 0, 0);
   const d = g.getImageData(0, 0, img.width, img.height).data;
   const near = (i, [r, gg, b], tol) => Math.abs(d[i] - r) <= tol && Math.abs(d[i + 1] - gg) <= tol && Math.abs(d[i + 2] - b) <= tol;
-  let ink = 0; const counts = colors.map(() => 0);
+  let ink = 0, greys = 0; const counts = colors.map(() => 0);
   for (let i = 0; i < d.length; i += 4) {
-    if (!near(i, bg, 8)) ink++;
+    if (!near(i, bg, 8)) {
+      ink++;
+      const [r, gg, b] = [d[i], d[i + 1], d[i + 2]];
+      if (Math.max(r, gg, b) - Math.min(r, gg, b) <= 4 && r >= grey[0] && r <= grey[1]) greys++;
+    }
     colors.forEach((col, k) => { if (near(i, col, 4)) counts[k]++; });
   }
-  return { ink, counts, width: img.width, height: img.height };
+  const at = samples.map(([x, y]) => [...d.slice((y * img.width + x) * 4, (y * img.width + x) * 4 + 3)]);
+  return { ink, greys, counts, at, width: img.width, height: img.height };
 }"""
 
 def rgb(hex_):
@@ -50,7 +62,12 @@ def rgb(hex_):
 
 md = open(os.path.join(HERE, 'fixtures', 'sample.md'), encoding='utf8').read()
 pages = re.findall(r'^!\[[^\]]*\]\(sample/(p-[0-9a-f]{6})\.svg\)$', md, re.M)
-check('fixture: sample.md embeds three pages', len(pages) == 3, pages)
+check('fixture: sample.md embeds six pages', len(pages) == 6, pages)
+# Screenshot pixels (2 per page px): on the first ruled line (y 96) and between lines, at the
+# margin line (x 120), and at the first dot (18.9, 18.9).
+SAMPLES = [[20, 192], [300, 192], [20, 220], [240, 600], [37, 37], [48, 48]]
+# Neutral greys a template line can be drawn in, antialiased towards the paper.
+GREYS = {'light': [0xc9 - 6, 0xff], 'dark': [0x1e, 0x3c + 6]}
 
 try:
     with sync_playwright() as pw:
@@ -69,10 +86,11 @@ try:
                 page.wait_for_function("() => { const i = document.getElementById('p'); return i.complete; }")
                 size = page.evaluate("() => { const i = document.getElementById('p'); return [i.naturalWidth, i.naturalHeight]; }")
                 shot = page.locator('#p').screenshot(path=os.path.join(OUT, f'format_{pid}_{scheme}.png'))
-                colors = [INK['light'], INK['dark'], BLUE, GREEN_HL, GREEN_OVER_YELLOW]
-                r = page.evaluate(COUNT_JS, [base64.b64encode(shot).decode(), list(rgb(BG[scheme])), [list(c) for c in colors]])  # tuples don't serialize
+                colors = [INK['light'], INK['dark'], BLUE, GREEN_HL, GREEN_OVER_YELLOW, LINE['light'], LINE['dark'], PINK]
+                r = page.evaluate(COUNT_JS, [base64.b64encode(shot).decode(), list(rgb(BG[scheme])), [list(c) for c in colors], list(GREYS[scheme]), [list(p) for p in SAMPLES]])  # fresh lists: tuples, and objects reused across calls, don't serialize
                 results[(pid, scheme)] = r
-                print(f'{pid} {scheme}: natural {size}, {r["ink"]} non-background px, near [light ink, dark ink, blue, green hl, green over yellow] {r["counts"]}')
+                print(f'{pid} {scheme}: natural {size}, {r["ink"]} non-background px ({r["greys"]} template grey), '
+                      f'near [light ink, dark ink, blue, green hl, green over yellow, light line, dark line, pink] {r["counts"]}')
                 check(f'{pid} {scheme}: loads at 816 x 1056', size == [816, 1056], size)
             # The whole note as a reading view would stack it, for a human to look at.
             imgs = ''.join(f"<p><img style='max-width:100%;display:block' src='{base_url}/test/fixtures/sample/{pid}.svg'></p>" for pid in pages)
@@ -82,7 +100,30 @@ try:
             check(f'{scheme}: no page errors', not errors, errors)
             page.close()
 
-        pen, hl, empty = pages
+        pen, hl, empty, lined, grid, dots = pages
+        near = lambda a, b, tol=6: all(abs(x - y) <= tol for x, y in zip(a, b))
+        LINE_I = {'light': 5, 'dark': 6}  # indexes in counts
+        PINK_I = 7
+        for scheme in ['light', 'dark']:
+            bg = rgb(BG[scheme])
+            other = 'dark' if scheme == 'light' else 'light'
+            lr, gr, dr = results[(lined, scheme)], results[(grid, scheme)], results[(dots, scheme)]
+            # (The written page has a few pixels of antialiased ink in the other grey.)
+            for name, res in [('lined', lr), ('grid', gr), ('dots', dr)]:
+                ours, theirs = res['counts'][LINE_I[scheme]], res['counts'][LINE_I[other]]
+                check(f'{name} page {scheme}: lines in the {scheme} grey, not the {other} grey',
+                      ours > 1000 and theirs < (0.02 * ours if name == 'lined' else 20), res['counts'])
+            check(f'lined page {scheme}: ruled lines across the page', lr['counts'][LINE_I[scheme]] > 50000, lr['counts'])
+            check(f'lined page {scheme}: the first line at 1 in, paper between lines',
+                  near(lr['at'][0], LINE[scheme]) and near(lr['at'][1], LINE[scheme]) and near(lr['at'][2], bg), lr['at'][:3])
+            check(f'lined page {scheme}: the margin line is pink', lr['counts'][PINK_I] > 3000 and near(lr['at'][3], PINK), (lr['counts'][PINK_I], lr['at'][3]))
+            check(f'lined page {scheme}: the writing is there', lr['counts'][2] > 300 and lr['ink'] > lr['counts'][LINE_I[scheme]] + lr['counts'][PINK_I] + 5000, lr['counts'])
+            for name, res in [('grid', gr), ('dots', dr)]:
+                check(f'{name} page {scheme}: not blank', res['ink'] > (100000 if name == 'grid' else 10000), res['ink'])
+                check(f'{name} page {scheme}: nothing but template grey', res['greys'] == res['ink'], (res['greys'], res['ink']))
+            check(f'dots page {scheme}: a dot one spacing in, paper beside it', near(dr['at'][4], LINE[scheme], 30) and near(dr['at'][5], bg), dr['at'][4:])
+        check('lined page: the margin line is the same pink in light and dark',
+              abs(results[(lined, 'light')]['counts'][PINK_I] - results[(lined, 'dark')]['counts'][PINK_I]) < 50, [results[(lined, s)]['counts'][PINK_I] for s in BG])
         for scheme in ['light', 'dark']:
             check(f'pen page {scheme}: not blank', results[(pen, scheme)]['ink'] > 5000, results[(pen, scheme)]['ink'])
             check(f'highlighter page {scheme}: not blank', results[(hl, scheme)]['ink'] > 5000, results[(hl, scheme)]['ink'])

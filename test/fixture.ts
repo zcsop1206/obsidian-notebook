@@ -1,9 +1,11 @@
-// The sample note in test/fixtures/: three Letter pages drawn with handwriting-like curves from
-// a seeded generator, so the output is reproducible. `npm run fixture` writes it; a unit test
+// The sample note in test/fixtures/: six Letter pages drawn with handwriting-like curves from
+// a seeded generator, so the output is reproducible. Pages 1–3 are blank paper; pages 4–6 show
+// the templates (lined with margin, grid, dots). `npm run fixture` writes it; a unit test
 // regenerates it in memory and checks it matches the committed files byte for byte.
 import { newPageId, newStrokeId } from '../src/format/ids';
 import { readNote, writeNote } from '../src/format/note';
 import { DEFAULT_INK, LETTER, newPage, writePage, type Nib, type Page, type Point } from '../src/format/page';
+import { FIRST_LINE, MARGIN_X, parseTemplateName, RULE_SPACING, type Template } from '../src/format/template';
 import { seeded, type Seeded } from './seeded';
 
 export const FIXTURE_NAME = 'sample';
@@ -80,8 +82,8 @@ function ellipse(r: Seeded, cx: number, cy: number, rx: number, ry: number): Poi
 
 class PageBuilder {
   page: Page;
-  constructor(private r: Seeded, id: string) {
-    this.page = newPage(id, LETTER);
+  constructor(private r: Seeded, id: string, template?: Template) {
+    this.page = newPage(id, LETTER, template);
   }
   private nextId() {
     return newStrokeId(this.page.strokes.map(s => s.id), this.r.bytes);
@@ -157,6 +159,20 @@ export function buildFixture(): Map<string, string> {
   // Page 3: empty.
   const p3 = new PageBuilder(r, ids[2]);
 
+  // Pages 4–6, added after the first three so those stay byte for byte as they were.
+  for (let i = 0; i < 3; i++) ids.push(newPageId(ids, r.bytes));
+
+  // Page 4: lined, college rule with a margin, written on the lines right of the margin.
+  const p4 = new PageBuilder(r, ids[3], parseTemplateName('lined-college-margin'));
+  for (let k = 1; k <= 6; k++) {
+    const base = FIRST_LINE + k * RULE_SPACING.college - 3;
+    p4.write(k % 3 ? 'uniform' : 'pressure', k === 4 ? BLUE : DEFAULT_INK, MARGIN_X + 12, 744, base, 1.8);
+  }
+
+  // Pages 5 and 6: empty grid and dots.
+  const p5 = new PageBuilder(r, ids[4], parseTemplateName('grid-5mm'));
+  const p6 = new PageBuilder(r, ids[5], parseTemplateName('dots-5mm'));
+
   const files = new Map<string, string>();
   const note = readNote(
     '---\nink: 1\npaper: letter\ntemplate: blank\ntags: [fixture]\n---\n' +
@@ -165,6 +181,6 @@ export function buildFixture(): Map<string, string> {
   );
   note.pages = ids;
   files.set(`${FIXTURE_NAME}.md`, writeNote(note));
-  for (const b of [p1, p2, p3]) files.set(`${FIXTURE_NAME}/${b.page.id}.svg`, writePage(b.page));
+  for (const b of [p1, p2, p3, p4, p5, p6]) files.set(`${FIXTURE_NAME}/${b.page.id}.svg`, writePage(b.page));
   return files;
 }
