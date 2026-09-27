@@ -581,10 +581,10 @@ try:
           const points = live.trace.points.map(q => ({ ...q }));
           // alpha 145 over white paper is where the ink (#1f1f1f) gets darker than 128
           return { before, live: T.liveInk(), live145: T.liveInk(145), frames: live.frames.length, events: live.events,
-            same: inp.livePath === ink.strokePath({ tool: 'pen', nib: 'uniform', size: 2.5, points }), points: points.length };
+            same: inp.livePath === ink.strokePath({ tool: 'pen', nib: 'uniform', size: 2.5, points }, true), points: points.length };
         }""")
         check('pen: mid-stroke, the live overlay has ink after the frames', r['live'] > 300 and r['frames'] >= 10, r)
-        check('pen: the live outline is strokePath of the points so far (same options, same code)', r['same'], r)
+        check('pen: the live outline is strokePath of the points so far (same options, same code, live: not refitted)', r['same'], r)
         page.locator('.nb-ink-page').first.screenshot(path=os.path.join(OUT, 'pen_live_light.png'))
         live_px = r['live145']
         r = ev("""async () => {
@@ -2687,6 +2687,59 @@ try:
               r['dup'] == ['pdf', 1, True] and r['kept'], r)
         # ======== end of 20. Import a PDF and write on it (#14) ========
 
+        # ======== 21. Pen polish (#32): smooth edges and the settled stroke ========
+        # The same iPad-like stroke (a gentle arc, samples in 0.5 px steps as the Pencil reports
+        # them) rasterised at device pixel ratio 2, the way the page bitmap draws it: before, the
+        # raw points' outline as a straight-segment polygon (0.3.0); after, strokePath (the refitted
+        # points' outline as quadratic curves). Edge roughness is the RMS second difference, column
+        # by column, of the stroke's centre (alpha-weighted) and of its coverage: a staircase or a
+        # polygon's kinks show up in both, a smooth edge in neither.
+        r = ev("""() => {
+          const pts = [];
+          for (let j = 0, lastX = -1, lastY = -1; j < 700; j++) {
+            const a = j / 700, x = Math.round((60 + 300 * a) * 2) / 2, y = Math.round((80 - 60 * Math.sin(Math.PI * a) + 0.35 * Math.sin(j * 1.7)) * 2) / 2;
+            if (Math.hypot(x - lastX, y - lastY) < 0.25) continue;
+            pts.push({ x, y, p: 0.08, t: j * 2.1 });
+            lastX = x; lastY = y;
+          }
+          const s = { tool: 'pen', nib: 'uniform', size: 2.5, points: pts };
+          const paths = { before: ink.polygon(ink.strokeOutline(s, true)), after: ink.strokePath(s) };
+          const out = {}, R = 2, W = 420, H = 110;
+          for (const [k, d] of Object.entries(paths)) {
+            const c = document.createElement('canvas');
+            c.width = W * R; c.height = H * R;
+            const g = c.getContext('2d');
+            g.setTransform(R, 0, 0, R, 0, 0);
+            g.fillStyle = '#000';
+            g.fill(new Path2D(d));
+            const a = g.getImageData(0, 0, c.width, c.height).data, cen = [], cov = [];
+            for (let x = 100 * R; x < 320 * R; x++) {
+              let sw = 0, sy = 0;
+              for (let y = 0; y < c.height; y++) { const v = a[(y * c.width + x) * 4 + 3] / 255; sw += v; sy += v * y; }
+              cen.push(sy / sw); cov.push(sw);
+            }
+            const rough = v => { let q = 0; for (let i = 1; i < v.length - 1; i++) q += (v[i - 1] - 2 * v[i] + v[i + 1]) ** 2; return Math.sqrt(q / (v.length - 2)); };
+            out[k] = { centre: rough(cen), coverage: rough(cov) };
+            // Evidence: a 6x nearest-neighbour zoom of the device pixels of part of the arc.
+            const z = document.createElement('canvas'), zx = 70 * R, zy = 16 * R, zw = 80 * R, zh = 30 * R;
+            z.width = zw * 6; z.height = zh * 6;
+            const zg = z.getContext('2d');
+            zg.fillStyle = '#fff'; zg.fillRect(0, 0, z.width, z.height);
+            zg.imageSmoothingEnabled = false;
+            zg.drawImage(c, zx, zy, zw, zh, 0, 0, z.width, z.height);
+            out[k].png = z.toDataURL('image/png');
+          }
+          return { ...out, points: pts.length, d: [paths.before.length, paths.after.length] };
+        }""")
+        import base64
+        for k in ('before', 'after'):
+            with open(os.path.join(OUT, f'pen_edges_{k}.png'), 'wb') as f:
+                f.write(base64.b64decode(r[k].pop('png').split(',', 1)[1]))
+        print(f"pen edges: {r['points']} points; roughness (RMS second difference, device px) centre {r['before']['centre']:.4f} -> {r['after']['centre']:.4f}, "
+              f"coverage {r['before']['coverage']:.4f} -> {r['after']['coverage']:.4f}; path length {r['d'][0]} -> {r['d'][1]} chars")
+        check('pen edges (#32): the curved, refitted outline is smoother than the 0.3.0 polygon (centre and coverage roughness down by a third)',
+              r['after']['centre'] < 0.67 * r['before']['centre'] and r['after']['coverage'] < 0.67 * r['before']['coverage'], r)
+        # ======== end of 21. Pen polish (#32) ========
 
         # --- unload removes the patch
         r = ev("""async () => {

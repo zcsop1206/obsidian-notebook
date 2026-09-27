@@ -30,14 +30,15 @@
 //
 // Drawing: the event handlers only record samples; drawing happens at most once per animation
 // frame. The stroke in progress is the same perfect-freehand outline as the saved page
-// (strokePath in format/outline.ts with the stroke's options), filled through Path2D on two
+// (strokePath in format/outline.ts with the stroke's options) of the raw points, without the
+// refit a finished pen stroke gets (#32), filled through Path2D on two
 // overlay canvases over the page: the tail canvas is cleared and redrawn every frame with the
 // outline of the latest points plus the predicted tail; once more than LIVE_MAX points are
 // live, the older ones are drawn once onto the head canvas and dropped from the tail (keeping
 // LIVE_KEEP, with OVERLAP points shared so the pieces join inside the line). Per-frame work is
 // therefore bounded by LIVE_MAX + OVERLAP points however long the stroke. On release the
-// stroke goes to the host, which draws its exact outline into the page bitmap, and both
-// overlays are cleared.
+// stroke goes to the host, which draws its outline (refitted, as the file has it) into the
+// page bitmap, and both overlays are cleared: that swap is the stroke settling.
 //
 // The highlighter (#6) is drawn translucent, at HIGHLIGHT_ALPHA like the page's highlight layer,
 // but composited once so that its frozen head and its tail (and the stroke where it crosses
@@ -595,7 +596,7 @@ export class PenInput {
 
   /** Fills the outline of these points in the stroke's settings; returns the path `d`. */
   private fill(ctx: CanvasRenderingContext2D, live: Live, points: Point[]): string {
-    const d = strokePath({ ...live.style, points });
+    const d = strokePath({ ...live.style, points }, true);
     if (d) {
       ctx.fillStyle = live.color;
       ctx.fill(new Path2D(d));
@@ -616,7 +617,7 @@ export class PenInput {
   private highlight(live: Live, points: Point[]): string {
     const c = this.tail, ctx = this.tailCtx, size = live.target.size;
     const kx = c.width / size.width, ky = c.height / size.height;
-    const d = strokePath({ ...live.style, points });
+    const d = strokePath({ ...live.style, points }, true);
     const now = box(points, live.style.size), was = live.tailBox;
     const b = now && was ? [Math.min(now[0], was[0]), Math.min(now[1], was[1]), Math.max(now[2], was[2]), Math.max(now[3], was[3])] : now ?? was;
     if (!b) return d;
