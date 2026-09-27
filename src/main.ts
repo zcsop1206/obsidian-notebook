@@ -7,7 +7,7 @@ import { createInkNote, NewNoteModal, targetFolder } from './ink/new-note';
 import { cachedIsInk, installTakeover, VIEW_TYPE_INK } from './ink/takeover';
 import type { PenStats } from './ink/input';
 import type { NavStats } from './ink/navigate';
-import { InkView } from './ink/view';
+import { InkView, type InkClipboard } from './ink/view';
 import { RenameHandler } from './ink/rename';
 import { importPdf, PdfNameModal, PdfSourceModal, type PdfChoice } from './ink/pdf-import';
 import { PdfPages, type PdfNote } from './ink/pdf';
@@ -26,6 +26,8 @@ export default class NotebookPlugin extends Plugin {
   /** Sharp renders of PDF pages (#14); `renders` counts them, for the tests. */
   pdfPages!: PdfPages;
   settings: NotebookSettings = { ...DEFAULT_SETTINGS };
+  /** Strokes copied with the lasso (#11), in memory, so they paste into any open note. */
+  inkClipboard: InkClipboard | null = null;
 
   async onload() {
     this.settings = parseSettings(await this.loadData());
@@ -75,6 +77,18 @@ export default class NotebookPlugin extends Plugin {
     this.addInkCommand('toggle-pages-panel', 'Toggle pages panel', view => view.togglePagesPanel());
     // The toolbar (#10): the picker of the tool in use, as a second tap on its button opens it.
     this.addInkCommand('open-tool-picker', 'Open the picker of the tool in use', view => view.openPicker());
+    // The lasso (#11): select, move, resize, recolour; paste what was copied into this note.
+    this.addInkCommand('tool-lasso', 'Use the lasso', view => view.setTool('lasso'));
+    this.addCommand({
+      id: 'paste-strokes',
+      name: 'Paste strokes',
+      checkCallback: checking => {
+        const view = this.app.workspace.getActiveViewOfType(InkView);
+        if (!view || !view.store || !view.canPaste) return false;
+        if (!checking) view.pasteStrokes();
+        return true;
+      },
+    });
     this.registerEvent(this.app.workspace.on('file-menu', (menu, file, _source, leaf) => {
       if (!(file instanceof TFile) || !leaf || leaf.view.getViewType() !== 'markdown' || !cachedIsInk(this.app, file)) return;
       menu.addItem(item => item.setTitle('Open as ink note').setIcon('pencil').onClick(() => void this.openAsInk(file, leaf)));
