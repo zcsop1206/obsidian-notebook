@@ -4806,6 +4806,21 @@ try:
               r['pencilElsewhere'] == [False] * 10, r['pencilElsewhere'])
         check('controls: fingers and the Pencil scroll the Pages panel natively (touch-action pan-y, touchmove not prevented)',
               r['fingerOnPanel'] == [False, False] and r['listScrolls'] == 'pan-y', r)
+        # ... and a drag that starts on a control area never reaches Obsidian (a listener on the document), though not prevented
+        r = ev("""() => {
+          let reached = 0;
+          const count = () => reached++;
+          document.addEventListener('touchmove', count);
+          const menu = view.contentEl.querySelector('.nb-ink-selmenu'), picker = view.contentEl.querySelector('.nb-ink-picker');
+          const cases = [[T.tb('.nb-ink-undo'), 'stylus'], [T.bar(), 'stylus'], [T.tb('.nb-ink-undo'), 'direct'], [T.thumbs()[1], 'stylus'],
+            [T.thumbs()[1], 'direct'], [view.contentEl.querySelector('.nb-pages-list'), 'direct'], [menu, 'stylus'], [picker, 'direct']];
+          const out = cases.map(([el, type]) => { const n = reached, prevented = T.touch(el, 'touchmove', type); return [prevented, reached - n]; });
+          const start = T.touch(T.tb('.nb-ink-undo'), 'touchstart', 'stylus');
+          document.removeEventListener('touchmove', count);
+          return { out, start };
+        }""")
+        check('controls: a Pencil or finger touchmove on the toolbar, Pages panel, selection menu or picker is not prevented but never reaches the document (no sidebar swipe)',
+              r['out'] == [[False, 0]] * 8 and r['start'] is False, r)
 
         # (2) the audit: every interactive element the view creates, in each state, takes the Pencil
         r = ev("""async () => {
