@@ -3634,7 +3634,10 @@ try:
           const n = pdfjsStats.renders.length;
           view.setZoom(2);
           const c = () => T.pages()[0].querySelector('canvas.nb-ink-bitmap');
-          const sharp = await T.waitFor(() => c() && pdfjsStats.renders.slice(n).some(([pg, w]) => pg === 2 && w === c().width), 4000);
+          // The bitmap's width, or for a band bitmap (#52: past 16M pixels) the whole page's at up to 16M pixels.
+          const want = () => { const e = T.pages()[0], k = Math.min(devicePixelRatio, Math.sqrt(16e6 / (e.offsetWidth * e.offsetHeight)));
+            return c().classList.contains('nb-ink-band') ? Math.round(e.offsetWidth * k) : c().width; };
+          const sharp = await T.waitFor(() => c() && pdfjsStats.renders.slice(n).some(([pg, w]) => pg === 2 && w === want()), 4000);
           view.resetZoom();
           return { options, paper: note.paper, tpl: note.template, pages, copied: !!pdf && pdf.length === src.length, sharp, imgs,
             md: fs.get(path).slice(0, 80) };

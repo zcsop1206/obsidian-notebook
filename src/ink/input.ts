@@ -31,12 +31,14 @@
 // Drawing: the event handlers only record samples; drawing happens at most once per animation
 // frame. The stroke in progress is the same perfect-freehand outline as the saved page
 // (strokePath in format/outline.ts with the stroke's options) of the raw points, without the
-// refit a finished pen stroke gets (#32), filled through Path2D on two
-// overlay canvases over the page: the tail canvas is cleared and redrawn every frame with the
-// outline of the latest points plus the predicted tail; once more than LIVE_MAX points are
-// live, the older ones are drawn once onto the head canvas and dropped from the tail (keeping
-// LIVE_KEEP, with OVERLAP points shared so the pieces join inside the line). Per-frame work is
-// therefore bounded by LIVE_MAX + OVERLAP points however long the stroke. On release the
+// refit a finished pen stroke gets (#32), filled through Path2D on two overlay canvases over the
+// page (past the canvas limit, over the band of it a page bitmap would cover, at full device
+// resolution, moved when the view leaves it mid-stroke; see place and follow): the tail canvas
+// is cleared and redrawn every frame with the outline of the latest points plus the predicted
+// tail; once more than LIVE_MAX points are live, the older ones are drawn once onto the head
+// canvas and dropped from the tail (keeping LIVE_KEEP, with OVERLAP points shared so the pieces
+// join inside the line). Per-frame work is therefore bounded by LIVE_MAX + OVERLAP points
+// however long the stroke. On release the
 // stroke goes to the host, which draws its outline (refitted, as the file has it) into the
 // page bitmap, and both overlays are cleared: that swap is the stroke settling.
 //
@@ -84,6 +86,7 @@ import type { EraserMode, EraserSettings, PenSettings } from './pen';
 import { EDGE_REACH, projectOnto, type Edge } from './ruler';
 import { recognize, type Shape, type ShapeKind } from './shapes';
 import { HIGHLIGHT_ALPHA, pixelRatio } from './renderer';
+import { bandNeed, type Band } from './layout';
 
 /** A lasso gesture staying within this many CSS px of its start is a tap (#12). */
 export const LASSO_TAP_SLOP = 6;
@@ -171,6 +174,12 @@ export interface PenHost {
    * Absent: the shape is committed as an ordinary stroke.
    */
   commitShape?(target: PageTarget, shape: NewStroke, freehand: NewStroke, kind: ShapeKind): void;
+  /**
+   * The live overlays' extent on a page (#52): `band`, the part of the page box a bitmap of it
+   * covers now (null: the whole page; see bitmapBand in layout.ts), and `view`, what the
+   * viewport shows of it, both in CSS px of the page box. Absent: the overlays cover the page.
+   */
+  overlayBand?(target: PageTarget): { band: Band | null; view: Band } | null;
 }
 
 /** What a pointer going down grabs with the lasso: the selection's box, its corner handle, or nothing. */
@@ -665,12 +674,16 @@ export class PenInput {
     }
     const live = this.live;
     if (!live || e.pointerId !== live.pointerId) return;
+    this.endStroke(live, e.type === 'pointercancel');
+  }
+
+  /** Ends the stroke: commits it (as its shape if one is shown and it wasn't cancelled) and clears the overlays. */
+  private endStroke(live: Live, cancelled: boolean) {
     this.live = null;
     this.stopHold(live);
     this.untrack();
     cancelAnimationFrame(this.frame);
     this.frame = 0;
-    const cancelled = e.type === 'pointercancel';
     if (live.map.edge) this.host.rulerMeasure?.(live.target, null, null);
     this.record(live, cancelled);
     // A cancelled stroke (the system took the pointer) is kept, like a finished one.
@@ -710,15 +723,15 @@ export class PenInput {
       return;
     }
     const pts = live.trace.points;
-    const plan = livePlan(pts.length, live.frozen);
+    const plan = livePlan(this.drawnCount(live), live.frozen);
     if (plan.freeze) {
-      this.fill(this.headCtx, live, pts.slice(plan.freeze[0], plan.freeze[1]));
+      this.fill(this.headCtx, live, this.drawn(live, plan.freeze[0], plan.freeze[1]));
       live.frozen = plan.frozen;
       live.pieces++;
       live.head = true;
     }
     const ctx = this.tailCtx;
-    const tail = pts.slice(plan.tail).concat(live.predicted);
+    const tail = this.drawn(live, plan.tail).concat(live.predicted);
     if (live.style.tool === 'highlighter') this.livePath = this.highlight(live, tail);
     else {
       if (live.tailBox) {
@@ -730,6 +743,16 @@ export class PenInput {
     live.tailBox = box(tail, live.style.size);
     if (live.map.edge && pts.length) this.host.rulerMeasure?.(live.target, pts[0], pts[pts.length - 1]);
     live.frames.push(performance.now() - t0);
+  }
+
+  /** The number of points drawn. */
+  private drawnCount(live: Live): number {
+    return live.trace.points.length;
+  }
+
+  /** The drawn points from `from` to `to` (exclusive). */
+  private drawn(live: Live, from: number, to?: number): Point[] {
+    return live.trace.points.slice(from, to);
   }
 
   // ---- shapes (#16)
@@ -828,15 +851,15 @@ export class PenInput {
    * tail's path `d`.
    */
   private highlight(live: Live, points: Point[]): string {
-    const c = this.tail, ctx = this.tailCtx, size = live.target.size;
-    const kx = c.width / size.width, ky = c.height / size.height;
+    const c = this.tail, ctx = this.tailCtx;
+    const { kx, ky, ox, oy } = this.xf;
     const d = strokePath({ ...live.style, points }, true);
     const now = box(points, live.style.size), was = live.tailBox;
     const b = now && was ? [Math.min(now[0], was[0]), Math.min(now[1], was[1]), Math.max(now[2], was[2]), Math.max(now[3], was[3])] : now ?? was;
     if (!b) return d;
     // In whole device pixels, so the area cleared is exactly the area redrawn.
-    const x = Math.max(0, Math.floor(b[0] * kx)), y = Math.max(0, Math.floor(b[1] * ky));
-    const w = Math.min(c.width, Math.ceil(b[2] * kx)) - x, h = Math.min(c.height, Math.ceil(b[3] * ky)) - y;
+    const x = Math.max(0, Math.floor(b[0] * kx - ox)), y = Math.max(0, Math.floor(b[1] * ky - oy));
+    const w = Math.min(c.width, Math.ceil(b[2] * kx - ox)) - x, h = Math.min(c.height, Math.ceil(b[3] * ky - oy)) - y;
     if (w <= 0 || h <= 0) return d;
     const scratch = this.scratch ??= document.createElement('canvas');
     if (scratch.width < w || scratch.height < h) {
@@ -848,7 +871,7 @@ export class PenInput {
     s.clearRect(0, 0, w, h);
     if (live.head) s.drawImage(this.head, x, y, w, h, 0, 0, w, h);
     if (d) {
-      s.setTransform(kx, 0, 0, ky, -x, -y);
+      s.setTransform(kx, 0, 0, ky, -ox - x, -oy - y);
       s.fillStyle = live.color;
       s.fill(new Path2D(d));
     }
@@ -892,19 +915,44 @@ export class PenInput {
     stats.at = performance.now();
   }
 
-  /** Puts the overlays over the page and sizes them; drawing is in page px. */
+  /** The overlays' transform from page px to their device px: x' = kx x - ox, y' = ky y - oy. */
+  private xf = { kx: 1, ky: 1, ox: 0, oy: 0 };
+  /** Where the overlays are: the band of the page box they cover (null: all of it), and the box's CSS size then. */
+  private overlayAt: { band: Band | null; width: number; height: number } | null = null;
+
+  /**
+   * Puts the overlays over the page and sizes them; drawing is in page px. They cover the page
+   * at device resolution or, past MAX_CANVAS_PIXELS (#52), the band of it the host gives (the
+   * band a page bitmap would cover now), at full device resolution, placed over that part.
+   */
   private place(target: PageTarget, rect: DOMRect) {
-    const r = pixelRatio(rect.width, rect.height);
-    const w = Math.max(1, Math.round(rect.width * r)), h = Math.max(1, Math.round(rect.height * r));
+    const el = target.el, size = target.size;
+    const cw = el.offsetWidth || rect.width, ch = el.offsetHeight || rect.height;
+    const band = this.host.overlayBand?.(target)?.band ?? null;
+    const b = band ?? { x: 0, y: 0, width: cw, height: ch };
+    const r = pixelRatio(b.width, b.height);
+    const w = Math.max(1, Math.round(b.width * r)), h = Math.max(1, Math.round(b.height * r));
+    const dx = w / b.width, dy = h / b.height;
+    this.xf = { kx: dx * cw / size.width, ky: dy * ch / size.height, ox: b.x * dx, oy: b.y * dy };
+    this.overlayAt = { band, width: cw, height: ch };
     for (const [c, ctx] of [[this.head, this.headCtx], [this.tail, this.tailCtx]] as const) {
-      if (c.parentElement !== target.el) target.el.appendChild(c);
+      if (c.parentElement !== el) el.appendChild(c);
       if (c.width !== w || c.height !== h) {
         c.width = w;
         c.height = h;
       }
+      const st = c.style;
+      c.classList.toggle('nb-ink-band', !!band);
+      if (band) {
+        st.left = `${band.x}px`;
+        st.top = `${band.y}px`;
+        st.width = `${band.width}px`;
+        st.height = `${band.height}px`;
+      } else st.left = st.top = st.width = st.height = '';
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.clearRect(0, 0, w, h);
-      ctx.setTransform(w / target.size.width, 0, 0, h / target.size.height, 0, 0);
+      const { kx, ky, ox, oy } = this.xf;
+      ctx.setTransform(kx, 0, 0, ky, -ox, -oy);
     }
   }
 
@@ -915,10 +963,49 @@ export class PenInput {
     const la = this.lassoing;
     if (la) la.map = pageMap(la.target.el.getBoundingClientRect(), la.target.size, la.map.t0);
     const live = this.live;
-    if (!live) return;
-    const rect = live.target.el.getBoundingClientRect();
-    live.map = { ...pageMap(rect, live.target.size, live.map.t0), edge: live.map.edge };
+    if (live) {
+      const rect = live.target.el.getBoundingClientRect();
+      live.map = { ...pageMap(rect, live.target.size, live.map.t0), edge: live.map.edge };
+    }
+    this.follow();
   }
+
+  /**
+   * Moves the overlays when the view has zoomed or is leaving the band they cover (#52), then
+   * puts back what they showed: the frozen head (one piece now) and, next frame, the tail.
+   */
+  private follow() {
+    const g = this.live ?? this.erasing ?? this.lassoing, at = this.overlayAt;
+    if (!g || !at) return;
+    const el = g.target.el, o = this.host.overlayBand?.(g.target);
+    if (!o) return;
+    const zoomed = el.offsetWidth !== at.width || el.offsetHeight !== at.height;
+    const leaving = !!at.band && bandNeed(at.band, o.view, at.width, at.height) === 'now';
+    if (!zoomed && !leaving && !o.band === !at.band) return;
+    this.place(g.target, el.getBoundingClientRect());
+    this.overlayMoves++;
+    const live = this.live;
+    if (live) {
+      live.tailBox = null;
+      if (live.frozen > 0) {
+        this.fill(this.headCtx, live, this.drawn(live, 0, live.frozen));
+        if (live.style.tool === 'highlighter') {
+          // The highlighter's head is shown through the tail canvas, composited once (see highlight).
+          const ctx = this.tailCtx;
+          ctx.save();
+          ctx.setTransform(1, 0, 0, 1, 0, 0);
+          ctx.globalAlpha = HIGHLIGHT_ALPHA;
+          ctx.drawImage(this.head, 0, 0);
+          ctx.restore();
+        }
+      }
+    }
+    if (this.erasing) this.erasing.cursor = null;
+    this.schedule();
+  }
+
+  /** Times the overlays were moved during a gesture (#52), for tests. */
+  overlayMoves = 0;
 
   private clear() {
     for (const [c, ctx] of [[this.head, this.headCtx], [this.tail, this.tailCtx]] as const) {
@@ -970,6 +1057,11 @@ export class PenInput {
   private eraseUp(e: PointerEvent) {
     const er = this.erasing!;
     if (e.pointerId !== er.pointerId) return;
+    this.endErase(er);
+  }
+
+  /** Ends the erase gesture: erases along the samples not yet tested and records its measurements. */
+  private endErase(er: Erasing) {
     this.erasing = null;
     this.untrack();
     cancelAnimationFrame(this.frame);

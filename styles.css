@@ -736,3 +736,13 @@
 .nb-ink-ruler-angle-input {
   width: 72px;
 }
+
+/*
+ * Viewport bitmaps (#52): past iOS's canvas limit a page's bitmap and the pen's live overlays
+ * cover only a band of the page around the viewport, at full device resolution, placed in px
+ * (src/ink/renderer.ts PageBitmap, src/ink/input.ts place).
+ */
+.nb-ink-page canvas.nb-ink-band {
+  right: auto;
+  bottom: auto;
+}
