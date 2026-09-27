@@ -3,7 +3,8 @@
 # test/out/view-fixture.js (built by test/build.mjs). Covers creating a note, writing with
 # synthetic pen events, autosave timing, saving when hidden or closed, reopening, changes on
 # disk, adding pages, a 20-page note, the markdown takeover, page templates, and the pen (live
-# and committed outlines, nibs, stylus touches, the pen strip, stats and handler time). Run by
+# and committed outlines, nibs, stylus touches, the pen strip, stats and handler time), and the
+# highlighter (tools, layers, crossings, the live overlay, long strokes). Run by
 # `npm test`; screenshots land in test/out/. Exits non-zero if any check fails.
 import os, subprocess, sys, time
 from playwright.sync_api import sync_playwright
@@ -681,9 +682,9 @@ try:
         check('pen strip: one row with nib, 8 swatches, 3 sizes and a stepper', r['layout']['height'] < 44 and r['layout']['swatches'] == 8, r['layout'])
         check('pen strip: clicks set nib, colour and size, and show them', r['shown'] == {'nib': 'pressure', 'color': '#e0301e', 'value': '4.5 px'}, r['shown'])
         check('pen strip: the next stroke saves with them, drawn in red', r['disk'][0] == ['pressure', '#e0301e', 4.5] and r['red'] > 200, r)
-        check('pen commands: uniform nib, next colour and next size', r['afterCmds'] == {'nib': 'uniform', 'color': '#1f9d55', 'size': 1.5} and r['disk'][1] == ['uniform', '#1f9d55', 1.5], r)
+        check('pen commands: uniform nib, next colour and next size', r['afterCmds'] == {'tool': 'pen', 'nib': 'uniform', 'color': '#1f9d55', 'size': 1.5} and r['disk'][1] == ['uniform', '#1f9d55', 1.5], r)
         check('pen: setPen refuses a colour that is not #rrggbb, lowercases one that is, clamps sizes',
-              'Invalid pen colour' in r['threw'] and r['custom'] == {'nib': 'uniform', 'color': '#abcdef', 'size': 16, 'active': 0}, r)
+              'Invalid pen colour' in r['threw'] and r['custom'] == {'tool': 'pen', 'nib': 'uniform', 'color': '#abcdef', 'size': 16, 'active': 0}, r)
         page.locator('#leaf').screenshot(path=os.path.join(OUT, 'pen_strip.png'))
 
         # (8) the stats overlay toggles
@@ -735,6 +736,185 @@ try:
           return view.hud.textContent;
         }""")
         check('debug view: the readout includes the ink view pen stats', 'ink view last stroke:' in r and 'handler' in r, r)
+
+        # ======== 12. The highlighter (#6) ========
+        def near(a, b, tol):
+            return len(a) == len(b) and all(abs(x - y) <= tol for x, y in zip(a, b))
+        ev("async () => { await app.workspace.getLeaf(false).openFile(app.vault.getFile('Pen.md')); await p.createInkNote('Highlights', undefined, 'letter', 'blank'); await T.sleep(150); }")
+        hl_path = ev("() => view.store.slots[0].path")
+        # The colour and alpha at page px (x, y) of the live tail canvas.
+        ev("""() => {
+          T.tailPixel = (x, y) => {
+            const c = view.contentEl.querySelector('canvas.nb-ink-live-tail'), s = c.width / view.store.slots[0].size.width;
+            return [...c.getContext('2d').getImageData(Math.round(x * s), Math.round(y * s), 1, 1).data];
+          };
+        }""")
+        # (1) switching tools: the command, then the strip; each tool shows its own groups
+        r = ev("""() => {
+          const strip = view.contentEl.querySelector('.nb-ink-strip'), q = sel => strip.querySelector(sel);
+          const shown = sel => q(sel).style.display !== 'none';
+          const groups = () => ({ tool: view.pen.tool, active: q('.nb-ink-tool.is-active').dataset.tool,
+            pen: ['.nb-ink-nibs', '.nb-ink-colors', '.nb-ink-sizes', '.nb-ink-stepper'].map(shown), hl: shown('.nb-ink-highlighter') });
+          const first = strip.firstElementChild.classList.contains('nb-ink-tools');
+          const start = groups();
+          const visible = commands['tool-highlighter'].checkCallback(true);
+          commands['tool-highlighter'].checkCallback(false);
+          const byCommand = groups();
+          commands['tool-pen'].checkCallback(false);
+          const back = groups();
+          q('[data-tool="highlighter"]').click();
+          const byStrip = { ...groups(), swatches: strip.querySelectorAll('.nb-ink-hl-swatch').length,
+            sizes: [...strip.querySelectorAll('.nb-ink-hl-size')].map(b => Number(b.dataset.size)),
+            color: q('.nb-ink-hl-swatch.is-active').dataset.color, height: strip.offsetHeight };
+          return { first, start, visible, byCommand, back, byStrip };
+        }""")
+        print('highlighter: tools:', r)
+        check('highlighter: the strip starts with the tool group; the pen is the default tool with its groups shown',
+              r['first'] and r['start'] == {'tool': 'pen', 'active': 'pen', 'pen': [True] * 4, 'hl': False}, r)
+        check('highlighter: "Use the highlighter" switches to it and shows only its group',
+              r['visible'] and r['byCommand'] == {'tool': 'highlighter', 'active': 'highlighter', 'pen': [False] * 4, 'hl': True}, r)
+        check('highlighter: "Use the pen" switches back', r['back'] == r['start'], r['back'])
+        check('highlighter: the strip button switches to it; 5 swatches and 2 sizes, yellow active; still one row',
+              r['byStrip']['tool'] == 'highlighter' and r['byStrip']['swatches'] == 5 and r['byStrip']['sizes'] == [14, 24]
+              and r['byStrip']['color'] == '#ffd400' and r['byStrip']['height'] < 44, r['byStrip'])
+        page.locator('#leaf').screenshot(path=os.path.join(OUT, 'highlighter_strip.png'))
+
+        # (2) a pen stroke, a highlight over it, a pen stroke after it, and a crossing highlight of the same colour
+        r = ev(f"""async () => {{
+          const strip = view.contentEl.querySelector('.nb-ink-strip'), q = sel => strip.querySelector(sel);
+          view.setTool('pen');
+          await T.pen(0, Array.from({{ length: 60 }}, (_, j) => [200, 150 + j * 2, 0.3]));   // pen, before
+          q('[data-tool="highlighter"]').click();
+          q('.nb-ink-hl-size[data-size="24"]').click();
+          await T.pen(0, Array.from({{ length: 200 }}, (_, j) => [100 + j * 2, 200, 0.3]));  // highlight along y 200
+          view.setTool('pen');
+          await T.pen(0, Array.from({{ length: 60 }}, (_, j) => [400, 150 + j * 2, 0.3]));   // pen, after
+          view.setTool('highlighter');
+          await T.pen(0, Array.from({{ length: 100 }}, (_, j) => [300, 100 + j * 2, 0.3]));  // highlight along x 300
+          await view.save();
+          const text = fs.get('{hl_path}'), disk = ink.readPage(text).strokes;
+          const hlGroup = /<g id="highlight" opacity="0.4">([^]*?)<\\/g>/.exec(text)[1], inkGroup = /<g id="ink"[^>]*>([^]*?)<\\/g>/.exec(text)[1];
+          const inLayer = (g, s) => g.includes(`data-id="${{s.id}}"`);
+          return {{
+            disk: disk.map(s => ({{ tool: s.tool, nib: s.nib ?? null, color: s.color, size: s.size }})),
+            layers: disk.map(s => [inLayer(hlGroup, s), inLayer(inkGroup, s)]),
+            order: text.indexOf('id="highlight"') < text.indexOf('id="ink"'),
+            before: T.pixel(0, 200, 200), after: T.pixel(0, 400, 200),
+            single: [T.pixel(0, 250, 200), T.pixel(0, 300, 125), T.pixel(0, 350, 200)], cross: T.pixel(0, 300, 200),
+          }};
+        }}""")
+        print('highlighter: strokes and pixels:', r)
+        check('highlighter: strokes save as tool "highlighter" with no nib, in its colour and size',
+              r['disk'][1] == {'tool': 'highlighter', 'nib': None, 'color': '#ffd400', 'size': 24} and r['disk'][3]['tool'] == 'highlighter'
+              and r['disk'][0]['tool'] == 'pen' and r['disk'][2] == {'tool': 'pen', 'nib': 'uniform', 'color': '#000000', 'size': 2.5}, r['disk'])
+        check("highlighter: highlights are in the file's highlight layer, under the ink layer; pen strokes in the ink layer",
+              r['order'] and r['layers'] == [[False, True], [True, False], [False, True], [True, False]], r['layers'])
+        yellow = [255, round(255 * 0.6 + 0xd4 * 0.4), round(255 * 0.6)]
+        check('highlighter: a single highlight is #ffd400 at 40% over the paper', all(near(px, yellow, 3) for px in r['single']), (r['single'], yellow))
+        check('highlighter: two crossing highlights of one colour give the same pixel as one (no darker overlap)',
+              near(r['cross'], r['single'][0], 2), (r['cross'], r['single']))
+        check('highlighter: ink written before a highlight is drawn over it (ink colour at the crossing)', near(r['before'], [0x1f] * 3, 12), r['before'])
+        check('highlighter: ink written after a highlight is drawn over it (ink colour at the crossing)', near(r['after'], [0x1f] * 3, 12), r['after'])
+        page.locator('.nb-ink-page').first.screenshot(path=os.path.join(OUT, 'highlighter_light.png'))
+        # The saved SVG, rendered as an image, shows the same.
+        r = ev(f"""async () => {{
+          const img = new Image();
+          img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(fs.get('{hl_path}'));
+          await img.decode();
+          const c = new OffscreenCanvas(816, 1056), g = c.getContext('2d');
+          g.fillStyle = '#fff'; g.fillRect(0, 0, 816, 1056); g.drawImage(img, 0, 0, 816, 1056);
+          const px = (x, y) => [...g.getImageData(x, y, 1, 1).data.slice(0, 3)];
+          return {{ single: px(250, 200), cross: px(300, 200), before: px(200, 200), after: px(400, 200), view: T.pixel(0, 250, 200) }};
+        }}""")
+        check('highlighter: in the saved SVG crossings are not darker, ink is over the highlights, and the colour matches the editor',
+              near(r['cross'], r['single'], 3) and all(v < 60 for v in r['before'] + r['after']) and near(r['single'], r['view'], 3), r)
+        ev("async () => { document.body.classList.add('theme-dark'); app.workspace.trigger('css-change'); await T.sleep(150); }")
+        page.locator('.nb-ink-page').first.screenshot(path=os.path.join(OUT, 'highlighter_dark.png'))
+        r = ev("() => ({ single: T.pixel(0, 250, 200), cross: T.pixel(0, 300, 200), before: T.pixel(0, 200, 200), after: T.pixel(0, 400, 200) })")
+        print('highlighter: dark theme pixels:', r)
+        check('highlighter: dark theme, crossing highlights match a single one and ink stays on top',
+              near(r['cross'], r['single'], 2) and near(r['before'], [0xe6, 0xe3, 0xde], 12) and near(r['after'], [0xe6, 0xe3, 0xde], 12), r)
+        ev("async () => { document.body.classList.remove('theme-dark'); app.workspace.trigger('css-change'); await T.sleep(150); }")
+
+        # (3) mid-stroke: the overlay holds translucent highlight pixels; the live outline is the saved one's
+        r = ev("""async () => {
+          view.setHighlighter({ color: '#3ddc84', size: 24 });
+          T.pts = Array.from({ length: 120 }, (_, j) => [100 + j * 2, 400 + 10 * Math.sin(j / 15), 0.3]);
+          await T.pen(0, T.pts, { predict: 0, up: false });
+          const live = view.input.live, points = live.trace.points.map(q => ({ ...q }));
+          const c = view.contentEl.querySelector('canvas.nb-ink-live-tail'), d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+          let n = 0, opaque = 0, maxA = 0;
+          for (let k = 3; k < d.length; k += 4) if (d[k]) { n++; if (d[k] === 255) opaque++; maxA = Math.max(maxA, d[k]); }
+          return { n, opaque, maxA, mid: T.tailPixel(200, 400 + 10 * Math.sin(50 / 15)), headHidden: view.input.head.style.visibility === 'hidden',
+            same: view.input.livePath === ink.strokePath({ tool: 'highlighter', size: 24, points }) };
+        }""")
+        print('highlighter: live overlay:', r)
+        check('highlighter: mid-stroke the overlay has translucent highlight pixels (the colour at 40% alpha, none opaque)',
+              r['n'] > 2000 and r['opaque'] == 0 and abs(r['maxA'] - 102) <= 1 and near(r['mid'], [0x3d, 0xdc, 0x84, 102], 3), r)
+        check('highlighter: the live outline is strokePath of the highlighter stroke so far', r['same'], r)
+        page.locator('.nb-ink-page').first.screenshot(path=os.path.join(OUT, 'highlighter_live_light.png'))
+        r = ev("""async () => {
+          T.penUp(0, T.pts[T.pts.length - 1]);
+          const s = view.store.slots[0].page.strokes, last = s[s.length - 1];
+          return { live: T.liveInk(), tool: last.tool, color: last.color };
+        }""")
+        check('highlighter: after pointerup the overlay is clear and the green highlight is in the page', r['live'] == 0 and r['tool'] == 'highlighter' and r['color'] == '#3ddc84', r)
+
+        # (4) a long highlight (600+ samples, frozen in pieces) shows no darker seam, live or committed
+        r = ev("""async () => {
+          view.setHighlighter({ color: '#ffd400', size: 14 });
+          T.pts = Array.from({ length: 700 }, (_, j) => [60 + j, 700, 0.3]);
+          await T.pen(0, T.pts, { up: false, per: 8 });
+          const live = view.input.live, alphas = [];
+          for (let x = 62; x <= 755; x++) alphas.push(T.tailPixel(x, 700)[3]);
+          const r = { pieces: live.pieces, points: live.trace.points.length, min: Math.min(...alphas), max: Math.max(...alphas) };
+          T.penUp(0, T.pts[T.pts.length - 1]);
+          const px = [];
+          for (let x = 62; x <= 755; x++) px.push(T.pixel(0, x, 700));
+          r.bitmapMin = [0, 1, 2].map(k => Math.min(...px.map(p => p[k])));
+          r.bitmapMax = [0, 1, 2].map(k => Math.max(...px.map(p => p[k])));
+          return r;
+        }""")
+        print('highlighter: long highlight:', r)
+        check('highlighter: a long live highlight is frozen in pieces and shows no darker seam (even alpha along it)',
+              r['points'] >= 600 and r['pieces'] >= 2 and r['min'] >= 100 and r['max'] <= 104, r)
+        check('highlighter: committed, the long highlight is even along its length', all(r['bitmapMax'][k] - r['bitmapMin'][k] <= 3 for k in range(3)), r)
+
+        # (5) switching back to the pen restores the pen's colour and size; the highlighter keeps its own
+        r = ev(f"""async () => {{
+          view.setTool('pen');
+          view.setPen({{ color: '#e0301e', size: 4 }});
+          view.setTool('highlighter');
+          commands['highlighter-next-color'].checkCallback(false);
+          commands['highlighter-next-size'].checkCallback(false);
+          const hl = {{ ...view.highlighter }};
+          await T.pen(0, Array.from({{ length: 60 }}, (_, j) => [100 + j * 3, 800, 0.3]));
+          view.setTool('pen');
+          const pen = {{ ...view.pen }}, penColor = view.contentEl.querySelector('.nb-ink-strip .nb-ink-swatch.is-active')?.dataset.color ?? null;
+          await T.pen(0, Array.from({{ length: 60 }}, (_, j) => [100 + j * 3, 850, 0.3]));
+          view.setTool('highlighter');
+          const hlAgain = {{ ...view.highlighter }};
+          let threw = '';
+          try {{ view.setHighlighter({{ color: 'yellow' }}); }} catch (e) {{ threw = e.message; }}
+          view.setTool('pen');
+          view.setPen({{ color: '#000000', size: 2.5 }});
+          await view.save();
+          const disk = ink.readPage(fs.get('{hl_path}')).strokes.slice(-2).map(s => [s.tool, s.nib ?? null, s.color, s.size]);
+          return {{ hl, pen, hlAgain, threw, disk, penColor }};
+        }}""")
+        print('highlighter: switching back:', r)
+        check('highlighter commands: next colour and next size', r['hl'] == {'color': '#3ddc84', 'size': 24}, r['hl'])
+        check("highlighter: switching back to the pen restores the pen's colour and size",
+              r['pen']['tool'] == 'pen' and r['pen']['color'] == '#e0301e' and r['pen']['size'] == 4 and r['penColor'] == '#e0301e'
+              and r['disk'] == [['highlighter', None, '#3ddc84', 24], ['pen', 'uniform', '#e0301e', 4]], r)
+        check('highlighter: switching back to it restores its own colour and size; setHighlighter refuses a bad colour',
+              r['hlAgain'] == r['hl'] and 'Invalid highlighter colour' in r['threw'], r)
+        r = ev("""async () => {
+          await app.workspace.getLeaf(false).openFile(app.vault.getFile('Plain.md'));
+          return ['tool-pen', 'tool-highlighter', 'highlighter-next-color', 'highlighter-next-size'].map(id => commands[id].checkCallback(true));
+        }""")
+        check('highlighter: the tool commands are hidden outside an ink view', r == [False] * 4, r)
+        # ======== end of the highlighter (#6) ========
 
         # --- unload removes the patch
         r = ev("""async () => {
