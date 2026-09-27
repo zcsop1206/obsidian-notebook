@@ -19,7 +19,8 @@
 // target, and stylus touchmoves anywhere in the window are prevented meanwhile, so nothing
 // outside the view scrolls under the Pencil or cancels its pointer. Fingers are unaffected: the
 // listeners ignore other pointerIds and finger touches. A gesture that starts off the pages
-// (in the gap) does nothing.
+// (in the gap) does nothing. A pointercancel doesn't end a stroke or erase at once (#52): see
+// "pointercancel" below.
 //
 // Sampling: every coalesced sample of each pointermove (about 4 per event on the iPad), in
 // page px, rounded as the file stores them, so the live stroke and the saved one are computed
@@ -106,6 +107,13 @@ export const LIVE_MAX = 192;
 export const LIVE_KEEP = 64;
 /** Points shared by a frozen piece and the piece after it. */
 export const OVERLAP = 16;
+/**
+ * A stroke or erase whose pointer is cancelled (pointercancel) stays open this long, ms (#52): a
+ * pointerdown of the same pointer type within CANCEL_REACH CSS px of its last sample in that time
+ * continues it; otherwise it ends as it was.
+ */
+export const CANCEL_GRACE = 300;
+export const CANCEL_REACH = 24;
 
 export interface PageTarget {
   /** Identifies the page to the host. */
@@ -349,6 +357,9 @@ export interface PenStats {
   strokes: number;
   /** Strokes ended by pointercancel (still kept). */
   cancelled: number;
+  /** pointercancels of a stroke or erase in progress (#52), and those continued by a pointerdown within CANCEL_GRACE. */
+  cancels?: number;
+  joined?: number;
   /** Touch pointers that went down and were ignored (palm rejection). */
   touchesIgnored: number;
   /** Whether getCoalescedEvents / getPredictedEvents exist (null before the first stroke). */
@@ -364,7 +375,7 @@ export interface PenStats {
 }
 
 export const newPenStats = (): PenStats => ({
-  strokes: 0, cancelled: 0, touchesIgnored: 0, coalesced: null, predicted: null, maxPredicted: 0, last: null, recent: [], at: 0,
+  strokes: 0, cancelled: 0, cancels: 0, joined: 0, touchesIgnored: 0, coalesced: null, predicted: null, maxPredicted: 0, last: null, recent: [], at: 0,
 });
 
 /** Medians over the recent strokes. */
@@ -384,6 +395,7 @@ export function penStatsLines(stats: PenStats, pen?: Readonly<PenSettings>): str
     : 'last stroke: none yet');
   lines.push(`last ${r.strokes} strokes (median): ${fmt(r.eventsPerS)} events/s, ${fmt(r.samplesPerS)} samples/s, handler ${fmt(r.handlerMs, 2)} ms, frame ${fmt(r.frameMs, 2)} ms`);
   lines.push(`coalesced ${yn(stats.coalesced)}, predicted ${yn(stats.predicted)} (up to ${stats.maxPredicted} ahead); strokes ${stats.strokes}, cancelled ${stats.cancelled}, touches ignored ${stats.touchesIgnored}`);
+  lines.push(`pointercancels ${stats.cancels ?? 0}, continued ${stats.joined ?? 0} (a pointerdown within ${CANCEL_GRACE} ms and ${CANCEL_REACH} px joins the stroke)`);
   return lines;
 }
 
@@ -678,6 +690,7 @@ export class PenInput {
     }
     const live = this.live;
     if (!live || e.pointerId !== live.pointerId) return;
+    if (e.type === 'pointercancel' && this.suspend()) return;
     this.endStroke(live, e.type === 'pointercancel');
   }
 
@@ -1035,6 +1048,7 @@ export class PenInput {
 
   /** Abandons a stroke in progress (the page it was on went away). */
   cancel() {
+    this.endGrace();
     this.untrack();
     if (this.live?.map.edge) this.host.rulerMeasure?.(this.live.target, null, null);
     if (this.live) this.stopHold(this.live);
@@ -1074,6 +1088,7 @@ export class PenInput {
   private eraseUp(e: PointerEvent) {
     const er = this.erasing!;
     if (e.pointerId !== er.pointerId) return;
+    if (e.type === 'pointercancel' && this.suspend()) return;
     this.endErase(er);
   }
 
@@ -1134,6 +1149,84 @@ export class PenInput {
       er.cursor = [p.x - m, p.y - m, p.x + m, p.y + m];
     }
     er.frames.push(performance.now() - t0);
+  }
+
+  // ---- pointercancel (#52)
+  //
+  // WebKit may cancel the Pencil's pointer (pointercancel) when it leaves the web view or
+  // crosses some boundary, even with the window listeners above (#35), which broke strokes run
+  // off the page on the iPad. So a cancelled stroke or erase isn't ended at once: for
+  // CANCEL_GRACE ms it stays open, still shown, and a pointerdown of the same pointer type
+  // anywhere in the window within CANCEL_REACH CSS px of its last sample continues it (the
+  // sample appended, the listeners armed again for the new pointer), so it's saved as one
+  // stroke. Anything else, or the time running out, ends it as it was. stats.cancels and
+  // stats.joined count both, for the stats overlay.
+
+  /** The stroke or erase kept open after a pointercancel, or null. */
+  private grace: { win: Window; timer: number; down: (e: PointerEvent) => void } | null = null;
+
+  /** Whether a cancelled stroke or erase is waiting for its pointer to come back (for tests). */
+  get suspended(): boolean {
+    return this.grace !== null;
+  }
+
+  /** The pointer of the stroke or erase in progress was cancelled: keep it open. Returns false if there's none. */
+  private suspend(): boolean {
+    const g = this.live ?? this.erasing;
+    if (!g) return false;
+    this.stats.cancels = (this.stats.cancels ?? 0) + 1;
+    this.stats.at = performance.now();
+    this.host.statsChanged();
+    this.untrack();
+    this.endGrace();
+    g.pointerId = NaN; // no event is of this pointer until it continues
+    if (this.live) {
+      this.stopHold(this.live);
+      this.live.predicted = [];
+      this.schedule();
+    }
+    const win = g.target.el.ownerDocument.defaultView ?? window;
+    const grace = this.grace = { win, timer: 0, down: (e: PointerEvent) => this.graceDown(e) };
+    grace.timer = win.setTimeout(() => this.graceOver(), CANCEL_GRACE);
+    win.addEventListener('pointerdown', grace.down, true);
+    return true;
+  }
+
+  private endGrace() {
+    const g = this.grace;
+    if (!g) return;
+    this.grace = null;
+    g.win.clearTimeout(g.timer);
+    g.win.removeEventListener('pointerdown', g.down, true);
+  }
+
+  /** The pointer didn't come back in time: the stroke or erase ends as it was. */
+  private graceOver() {
+    this.endGrace();
+    if (this.live) this.endStroke(this.live, true);
+    else if (this.erasing) this.endErase(this.erasing);
+  }
+
+  /** A pointerdown while a cancelled stroke or erase is open: continue it, or end it and let the event through. */
+  private graceDown(e: PointerEvent) {
+    const g = this.live ?? this.erasing, pts = g?.trace.points, last = pts?.[pts.length - 1];
+    if (!g || !last || e.pointerType === 'touch') return; // fingers never draw (and may be a palm)
+    const m = g.map, x = m.left + last.x / m.sx, y = m.top + last.y / m.sy;
+    const same = e.pointerType === g.pointerType && (e.pointerType !== 'mouse' || e.button === 0);
+    if (!same || Math.hypot(e.clientX - x, e.clientY - y) > CANCEL_REACH) {
+      this.graceOver();
+      return;
+    }
+    this.endGrace();
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    this.stats.joined = (this.stats.joined ?? 0) + 1;
+    g.pointerId = e.pointerId;
+    this.track(g.target.el);
+    addSamples(g.trace, [e], g.map);
+    if (this.live) this.holdMove(this.live, e);
+    this.schedule();
+    this.host.statsChanged();
   }
 
   // ---- the ruler (#20)
