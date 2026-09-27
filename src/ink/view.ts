@@ -16,16 +16,16 @@ import { DEFAULT_PEN, nextColor, nextSize, withPen, type PenSettings } from './p
 import { DEFAULT_HIGHLIGHTER, nextHighlighterColor, nextHighlighterSize, withHighlighter, type HighlighterSettings, type ToolKind } from './pen';
 import { DEFAULT_ERASER, nextEraserSize, withEraser, type EraserMode, type EraserSettings } from './pen';
 import { DEFAULT_PRESETS, MAX_PRESETS, parseToolState, presetOf, type PenPreset } from './pen';
-import { A4, LETTER, roundXY } from '../format/page';
+import { A4, LETTER, newPage, roundXY } from '../format/page';
 import type { NotebookSettings } from '../settings';
 import { Toolbar } from './toolbar';
 import { splitStroke } from './split';
-import { layoutPages, MARGIN, mostVisiblePage, pageAtY, pagesInBand, type Layout } from './layout';
+import { emptyGhostPages, inksGhost, layoutPages, MARGIN, mostVisiblePage, pageAtY, pagesInBand, type Layout } from './layout';
 import { anchorAt, clampZoom, navStatsLines, Navigator, newNavStats, scrollToKeep, zoomStep, type NavStats } from './navigate';
 import { currentTheme, PageBitmap, pageTheme, releaseScratch, strokeColor, TemplateImages, warmOutlines, type Theme } from './renderer';
 import { SpatialIndex } from './spatial';
 import { PagesPanel } from './pages-panel';
-import { NoteStore, type NoteFiles, type PageSlot, type TemplatesBefore } from './store';
+import { NoteStore, noteTemplate, type NoteFiles, type PageSlot, type TemplatesBefore } from './store';
 import { VIEW_TYPE_INK } from './takeover';
 import { TemplateChooser } from './template-chooser';
 import { centreOn, encodeClip, isIdentity, lassoSelect, moveBy, resizeBy, resizeScale, strokesBounds, transformStroke, withIds, type Box, type Transform } from './lasso';
@@ -396,6 +396,7 @@ export class InkView extends FileView {
     this.clearSelection();
     this.nav.reset();
     this.preview(1, 0, 0);
+    this.dropEmptyGhostPages(store); // #28
     const saved = store.flush();
     store.close();
     this.clearPages();
@@ -419,6 +420,7 @@ export class InkView extends FileView {
       pv.el.remove();
     }
     this.pages = [];
+    this.removeGhost(); // #28
     this.pagesPanel?.sync();
     this.footer.hide();
     this.pagesEl.style.height = this.pagesEl.style.width = '';
@@ -429,6 +431,7 @@ export class InkView extends FileView {
   private buildPages() {
     this.clearPages();
     this.pages = this.store!.slots.map(slot => this.makePage(slot));
+    this.makeGhost(); // #28
     this.footer.show();
     this.updateStats();
   }
@@ -469,7 +472,7 @@ export class InkView extends FileView {
       const box = old.pages[index];
       anchor = { index, at: (this.scroller.scrollTop - box.top) / box.height };
     }
-    const layout = layoutPages(this.pages.map(pv => pv.slot.size), width, store.paperSize, this.zoomLevel);
+    const layout = layoutPages(this.pages.map(pv => pv.slot.size), width, store.paperSize, this.zoomLevel, this.ghost?.page.size);
     this.layout = layout;
     this.width = width;
     for (const el of [this.pagesEl, this.sizer]) {
@@ -483,6 +486,7 @@ export class InkView extends FileView {
       s.width = `${b.width}px`;
       s.height = `${b.height}px`;
     });
+    this.placeGhost(layout); // #28
     this.footer.style.top = `${layout.footerTop}px`;
     this.pagesPanel?.sync(); // #17: pages may have been added, removed or reordered
     if (anchor && old && old.scale !== layout.scale && anchor.index < layout.pages.length) {
@@ -548,6 +552,7 @@ export class InkView extends FileView {
       const pv = this.pages[i];
       if (!pv.bitmap || pv.pending != null) this.renderPage(pv);
     }
+    this.updateGhost(); // #28
     this.updateStats();
     this.pump();
     if (this.sel && !this.selDrag) this.showSelection();
@@ -649,12 +654,14 @@ export class InkView extends FileView {
     if (theme === this.theme) return;
     this.theme = theme;
     for (const pv of this.pages) if (pv.bitmap) this.renderPage(pv);
+    if (this.ghost?.bitmap) this.renderGhost(); // #28
   }
 
   // ---- writing
 
   private pageAt(target: EventTarget | null): PageTarget | null {
     if (!this.store || !(target instanceof Element)) return null;
+    if (this.ghost && target.closest('.nb-ink-ghost') === this.ghost.el) return this.materialiseGhost(); // #28
     const el = target.closest('.nb-ink-page');
     const pv = el && this.pages.find(p => p.el === el);
     if (!pv) return null;
@@ -1889,5 +1896,130 @@ export class InkView extends FileView {
     this.clearSelection();
     this.appendRecorded('Paste', pv, copies);
     return true;
+  }
+
+  // ---- virtual page (#28)
+  // As in Notability, a blank page always follows the last page, so writing never stops to add
+  // one. It's only in the view: an element (.nb-ink-ghost, not .nb-ink-page) laid out after the
+  // last page at the size and with the template a new page gets (the note's paper and default
+  // template, as store.insertPage makes them), drawn from a blank Page that is never in the
+  // store, its index, the history, the pages panel or the stats. When the pen or highlighter
+  // goes down on it, pageAt makes it real first: store.addPage() (as "Add page"), a page element
+  // in its place (same box, so nothing moves), a new virtual page below and an "Add page" undo
+  // step; the stroke then lands on the real page. The eraser and lasso do nothing on it.
+  // Pages made this way that are still empty when the note closes, at the end of the note, are
+  // dropped (store.deletePage: out of the index, the file deleted if autosave wrote it), so
+  // reopening shows the written pages plus the virtual one. Pages added with "Add page" or the
+  // pages panel are kept.
+
+  /** The virtual page: its element, its bitmap while near the viewport, and the blank page it draws. */
+  private ghost: { el: HTMLElement; bitmap: PageBitmap | null; page: Page; key: string } | null = null;
+  /** Ids of pages made from the virtual page since the note opened, for dropEmptyGhostPages. */
+  private fromGhost = new Set<string>();
+
+  /** The virtual page's element (for tests), or null. */
+  get ghostEl(): HTMLElement | null {
+    return this.ghost?.el ?? null;
+  }
+
+  /** The blank page a new page would be (paper size and default template), and a key for it. */
+  private ghostModel(): { page: Page; key: string } {
+    const store = this.store!;
+    const size = store.paperSize;
+    return { page: newPage('p-000000', size, noteTemplate(store.index.template)), key: `${store.index.template} ${size.width}x${size.height}` };
+  }
+
+  private makeGhost() {
+    this.removeGhost();
+    const el = this.pagesEl.createDiv({ cls: 'nb-ink-ghost' });
+    el.setAttribute('aria-label', 'New page: write here to add it');
+    this.pagesEl.insertBefore(el, this.footer);
+    this.ghost = { el, bitmap: null, ...this.ghostModel() };
+  }
+
+  private removeGhost() {
+    const g = this.ghost;
+    if (!g) return;
+    g.bitmap?.release();
+    g.el.remove();
+    this.ghost = null;
+  }
+
+  private placeGhost(layout: Layout) {
+    const g = this.ghost, b = layout.ghost;
+    if (!g || !b) return;
+    const s = g.el.style;
+    s.top = `${b.top}px`;
+    s.left = `${b.left}px`;
+    s.width = `${b.width}px`;
+    s.height = `${b.height}px`;
+  }
+
+  /** Keeps the virtual page's bitmap while it's near the viewport, at its size and template. */
+  private updateGhost() {
+    const g = this.ghost, box = this.layout?.ghost;
+    if (!g || !box || !this.store) return;
+    const model = this.ghostModel();
+    const stale = model.key !== g.key; // the note's default template changed
+    if (stale) Object.assign(g, model);
+    const top = this.scroller.scrollTop, height = this.scroller.clientHeight;
+    const pageHeight = box.height / Math.max(1, this.layout!.zoom);
+    const near = box.top < top + height + pageHeight && box.top + box.height > top - pageHeight;
+    if (!near) {
+      g.bitmap?.release();
+      g.bitmap = null;
+      return;
+    }
+    if (g.bitmap && (stale || g.bitmap.cssWidth !== box.width || g.bitmap.cssHeight !== box.height)) {
+      g.bitmap.release();
+      g.bitmap = null;
+    }
+    if (!g.bitmap) this.renderGhost();
+  }
+
+  private renderGhost() {
+    const g = this.ghost, box = this.layout?.ghost;
+    if (!g || !box) return;
+    if (!g.bitmap || g.bitmap.cssWidth !== box.width || g.bitmap.cssHeight !== box.height) {
+      g.bitmap?.release();
+      g.bitmap = new PageBitmap(box.width, box.height);
+      g.el.insertBefore(g.bitmap.canvas, g.el.firstChild);
+    }
+    const c = g.bitmap.canvas;
+    const img = this.templates.get(g.page.template, g.page.size, c.width, c.height, this.theme, () => {
+      if (this.ghost === g && g.bitmap) this.renderGhost();
+    });
+    g.bitmap.render(g.page, this.theme, img);
+  }
+
+  /**
+   * The pen or highlighter went down on the virtual page: makes it a real page and returns that
+   * page's target (null for the eraser and lasso, which do nothing there).
+   */
+  private materialiseGhost(): PageTarget | null {
+    const store = this.store;
+    if (!store || !this.ghost || !inksGhost(this.pen.tool)) return null;
+    const slot = store.addPage();
+    const page = store.page(slot);
+    const pv = this.makePage(slot);
+    this.pages.push(pv);
+    this.fromGhost.add(slot.id);
+    this.relayout(); // the new page takes the virtual page's box; the virtual page moves below
+    this.update(); // draws the new page (it's where the pen is, so visible)
+    this.recordAddPage(slot.id);
+    if (!page) return null;
+    this.penPage = page;
+    return { key: pv, el: pv.el, size: page.size };
+  }
+
+  /** Drops the empty pages made from the virtual page at the end of the note (see above). */
+  private dropEmptyGhostPages(store: NoteStore) {
+    const pages = store.slots.map(slot => {
+      // Only pages made here are looked at (parsing every page on close would be slow).
+      const page = this.fromGhost.has(slot.id) && !slot.error ? store.page(slot) : null;
+      return { id: slot.id, strokes: page ? page.strokes.length : null };
+    });
+    for (const id of emptyGhostPages(pages, this.fromGhost)) store.deletePage(id);
+    this.fromGhost.clear();
   }
 }
