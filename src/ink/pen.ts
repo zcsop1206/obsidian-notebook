@@ -88,3 +88,60 @@ export function nextColor(color: string): string {
 export function nextSize(size: number): number {
   return SIZE_PRESETS.find(s => s > size) ?? SIZE_PRESETS[0];
 }
+
+// ---- the highlighter (#6)
+
+/** The highlighter's own colour and size, kept while the pen is in use. */
+export interface HighlighterSettings {
+  /** Lowercase `#rrggbb`, drawn as is in both themes. */
+  color: string;
+  /** Width in page px, 4 to 48 in 0.5 steps. */
+  size: number;
+}
+
+export const DEFAULT_HIGHLIGHTER: Readonly<HighlighterSettings> = Object.freeze({ color: '#ffd400', size: 18 });
+
+/** The five highlighter colours, yellow first. */
+export const HIGHLIGHTER_COLORS: readonly ColorPreset[] = Object.freeze([
+  { color: '#ffd400', name: 'Yellow' },
+  { color: '#3ddc84', name: 'Green' },
+  { color: '#ff5fa2', name: 'Pink' },
+  { color: '#4fc3f7', name: 'Blue' },
+  { color: '#ffa726', name: 'Orange' },
+]);
+
+/** The two highlighter sizes. */
+export const HIGHLIGHTER_SIZES: readonly number[] = Object.freeze([14, 24]);
+
+export const HIGHLIGHTER_MIN_SIZE = 4;
+export const HIGHLIGHTER_MAX_SIZE = 48;
+
+/** Limits a highlighter size to 4–48 px, rounded to the nearest 0.5 px. */
+export function clampHighlighterSize(n: number): number {
+  if (!Number.isFinite(n)) return DEFAULT_HIGHLIGHTER.size;
+  const r = Math.round(n / SIZE_STEP) * SIZE_STEP;
+  return Math.min(HIGHLIGHTER_MAX_SIZE, Math.max(HIGHLIGHTER_MIN_SIZE, r));
+}
+
+/** The settings with `change` applied. Sizes are clamped; a colour that isn't `#rrggbb` throws. */
+export function withHighlighter(settings: Readonly<HighlighterSettings>, change: Partial<HighlighterSettings>): HighlighterSettings {
+  const next = { ...settings };
+  if (change.color !== undefined) {
+    const color = parseColor(change.color);
+    if (!color) throw new Error(`Invalid highlighter colour ${JSON.stringify(change.color)} (expected #rrggbb)`);
+    next.color = color;
+  }
+  if (change.size !== undefined) next.size = clampHighlighterSize(change.size);
+  return next;
+}
+
+/** The highlighter preset after `color`, wrapping round; a custom colour goes to the first preset. */
+export function nextHighlighterColor(color: string): string {
+  const i = HIGHLIGHTER_COLORS.findIndex(c => c.color === color);
+  return HIGHLIGHTER_COLORS[(i + 1) % HIGHLIGHTER_COLORS.length].color;
+}
+
+/** The smallest highlighter size above `size`, or the first after the largest. */
+export function nextHighlighterSize(size: number): number {
+  return HIGHLIGHTER_SIZES.find(s => s > size) ?? HIGHLIGHTER_SIZES[0];
+}
