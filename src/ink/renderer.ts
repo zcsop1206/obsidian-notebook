@@ -4,9 +4,17 @@
 // the existing bitmap; the whole page is redrawn only on load, resize, theme change or when
 // strokes are removed. Images placed on the page (#12) are drawn over the template, under the
 // highlighter layer, from decoded <img>s cached per image (ObjectImages).
+//
+// Viewport bitmaps (#52): when a whole page at device resolution would exceed MAX_CANVAS_PIXELS
+// (a Letter page from about 200% up on the iPad), the view gives the page a bitmap of only the
+// band of it around the viewport (`band`, see bitmapBand in layout.ts), at full device
+// resolution, positioned over that part of the page; below the cap a bitmap is the whole page,
+// as before. Everything is drawn in page px through pageTransform, so strokes, images and the
+// highlighter layer outside the band are simply clipped.
 import { DEFAULT_INK, prepareSave, type Page, type PageImage, type Size, type Stroke } from '../format/page';
 import { strokePathCached } from '../format/outline';
 import { fixedPaper, renderTemplate, type PdfTemplate, type Template } from '../format/template';
+import type { Band } from './layout';
 
 export interface Theme {
   dark: boolean;
@@ -60,6 +68,27 @@ export function strokePath2D(stroke: Stroke): Path2D {
     prepareSave(stroke);
   }
   return p;
+}
+
+// A stroke's bounds in page px (its points grown by its size, which covers the widest nib), kept
+// per stroke object like its outline: a band bitmap (#52) skips strokes outside its band.
+const bounds = new WeakMap<Stroke, [number, number, number, number]>();
+
+export function strokeBounds(stroke: Stroke): [number, number, number, number] {
+  let b = bounds.get(stroke);
+  if (!b) {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const { x, y } of stroke.points) {
+      if (x < x0) x0 = x;
+      if (x > x1) x1 = x;
+      if (y < y0) y0 = y;
+      if (y > y1) y1 = y;
+    }
+    const m = stroke.size + 1;
+    b = [x0 - m, y0 - m, x1 + m, y1 + m];
+    bounds.set(stroke, b);
+  }
+  return b;
 }
 
 /**
@@ -121,11 +150,85 @@ export class TemplateImages {
     return null;
   }
 
+  /** Template images of bands of pages (#52), least recently used first out. */
+  private bands = new Map<string, BandImage>();
+  static MAX_BANDS = 4;
+
+  /**
+   * The template layer for `bitmap`: what renderBase draws, null when there's nothing to draw,
+   * or 'loading' (then `onReady` is called once it's ready). For a whole-page bitmap this is
+   * get(). For a band bitmap (#52), lines, grids and dots are rasterised for the band alone (an
+   * SVG whose viewBox is the band, at the band's pixel size); a pdf page (its sharp render at no
+   * more than MAX_CANVAS_PIXELS for the whole page, as a whole-page bitmap would get) and an
+   * image page are drawn over the whole page in page px, the band clipping them.
+   */
+  layer(template: Template, size: Size, bitmap: PageBitmap, theme: Theme, onReady: () => void): TemplateSource | null | 'loading' {
+    const { canvas, band } = bitmap;
+    if (!band) return this.get(template, size, canvas.width, canvas.height, theme, onReady) ?? (this.pending(template, size, canvas.width, canvas.height, theme) ? 'loading' : null);
+    if (template.kind === 'pdf' || template.kind === 'image') {
+      const r = pixelRatio(bitmap.cssWidth, bitmap.cssHeight);
+      const w = Math.max(1, Math.round(bitmap.cssWidth * r)), h = Math.max(1, Math.round(bitmap.cssHeight * r));
+      const img = this.get(template, size, w, h, theme, onReady);
+      return img ? { page: img } : null;
+    }
+    const items = renderTemplate(template, size);
+    if (!items.length) return null;
+    // The band in page px.
+    const kx = size.width / bitmap.cssWidth, ky = size.height / bitmap.cssHeight;
+    const vb = [band.x * kx, band.y * ky, band.width * kx, band.height * ky].map(v => Math.round(v * 1000) / 1000);
+    const key = `${JSON.stringify(template)} ${size.width}x${size.height} ${vb.join(',')} ${canvas.width}x${canvas.height} ${theme.line}`;
+    let e = touch(this.bands, key);
+    if (!e) {
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${vb.join(' ')}" width="${canvas.width}" height="${canvas.height}" preserveAspectRatio="none">` +
+        `<style>.t{stroke:${theme.line}}</style>${items.join('')}</svg>`;
+      const img = new Image();
+      const entry: BandImage = e = { img, ready: false, failed: false, waiting: [] };
+      img.onload = () => {
+        entry.ready = true;
+        entry.waiting.splice(0).forEach(f => f());
+      };
+      img.onerror = () => {
+        console.error('[notebook] template image failed to load', key);
+        entry.failed = true;
+        entry.waiting.length = 0;
+      };
+      img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+      this.bands.set(key, entry);
+      while (this.bands.size > TemplateImages.MAX_BANDS) {
+        const [k, old] = this.bands.entries().next().value!;
+        this.bands.delete(k);
+        old.waiting.length = 0;
+        releaseImage(old.img);
+      }
+    }
+    if (e.ready) return e.img;
+    if (e.failed) return null;
+    e.waiting = [onReady]; // one redraw when it arrives, for the latest caller
+    return 'loading';
+  }
+
+  /** Whether get() of these arguments is waiting for its image (a line template being decoded). */
+  private pending(template: Template, size: Size, width: number, height: number, theme: Theme): boolean {
+    if (template.kind === 'pdf' || template.kind === 'image') return false;
+    const e = this.cache.get(`${JSON.stringify(template)} ${size.width}x${size.height} ${width}x${height} ${theme.line}`);
+    return !!e && !e.ready && e.waiting.length > 0;
+  }
+
   clear() {
     this.cache.clear();
     this.pdf.clear();
+    for (const e of this.bands.values()) releaseImage(e.img);
+    this.bands.clear();
   }
 }
+
+type BandImage = { img: HTMLImageElement; ready: boolean; failed: boolean; waiting: (() => void)[] };
+
+/**
+ * What renderBase draws as the template layer: an image covering the bitmap (the whole page, or
+ * the band of a band bitmap), or `{ page }`, an image covering the whole page, drawn in page px.
+ */
+export type TemplateSource = CanvasImageSource | { page: CanvasImageSource };
 
 // ---- PDF pages (#14)
 
@@ -240,6 +343,12 @@ class PdfImages {
   }
 }
 
+/** Whether two bands (or the whole page, null) are the same. */
+export function sameBand(a: Band | null, b: Band | null): boolean {
+  if (!a || !b) return a === b;
+  return a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
+}
+
 /** The entry for `key`, moved to the most recently used end, or undefined. */
 function touch<V>(cache: Map<string, V>, key: string): V | undefined {
   const v = cache.get(key);
@@ -334,29 +443,75 @@ export function releaseScratch() {
   scratch = null;
 }
 
-/** One page's bitmap: a canvas the size of the page element at device resolution. */
+/**
+ * One page's bitmap: a canvas the size of the page element at device resolution, or (#52) of a
+ * band of it (`band`, CSS px of the page box), positioned over that part of the page.
+ */
 export class PageBitmap {
   readonly canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
+  /** The part of the page drawn, CSS px of the page box; null: the whole page. */
+  band: Band | null = null;
 
-  constructor(readonly cssWidth: number, readonly cssHeight: number) {
-    const r = pixelRatio(cssWidth, cssHeight);
+  constructor(readonly cssWidth: number, readonly cssHeight: number, band: Band | null = null) {
     this.canvas = document.createElement('canvas');
     this.canvas.className = 'nb-ink-bitmap';
-    this.canvas.width = Math.max(1, Math.round(cssWidth * r));
-    this.canvas.height = Math.max(1, Math.round(cssHeight * r));
     this.ctx = this.canvas.getContext('2d')!;
+    this.setBand(band);
+  }
+
+  /**
+   * Makes the bitmap cover `band` (null: the whole page), sized at device resolution (lowered
+   * only past MAX_CANVAS_PIXELS) and placed over it. Clears it, unless nothing changed.
+   */
+  setBand(band: Band | null) {
+    const c = this.canvas, b = band ?? { x: 0, y: 0, width: this.cssWidth, height: this.cssHeight };
+    const r = pixelRatio(b.width, b.height);
+    const w = Math.max(1, Math.round(b.width * r)), h = Math.max(1, Math.round(b.height * r));
+    const same = sameBand(this.band, band) && c.width === w && c.height === h;
+    this.band = band;
+    if (same) return;
+    c.width = w;
+    c.height = h;
+    const s = c.style;
+    c.classList.toggle('nb-ink-band', !!band);
+    if (band) {
+      s.left = `${band.x}px`;
+      s.top = `${band.y}px`;
+      s.width = `${band.width}px`;
+      s.height = `${band.height}px`;
+    } else s.left = s.top = s.width = s.height = '';
+  }
+
+  /** Device pixels of the bitmap. */
+  get pixels(): number {
+    return this.canvas.width * this.canvas.height;
+  }
+
+  /** Whether a stroke can show on the bitmap: always for a whole page; for a band, if its bounds meet it. */
+  private shows(s: Stroke, size: Size): boolean {
+    const b = this.band;
+    if (!b) return true;
+    const kx = size.width / this.cssWidth, ky = size.height / this.cssHeight, [x0, y0, x1, y1] = strokeBounds(s);
+    return x1 >= b.x * kx && x0 <= (b.x + b.width) * kx && y1 >= b.y * ky && y0 <= (b.y + b.height) * ky;
   }
 
   private pageTransform(ctx: CanvasRenderingContext2D, size: Size) {
-    ctx.setTransform(this.canvas.width / size.width, 0, 0, this.canvas.height / size.height, 0, 0);
+    const c = this.canvas, b = this.band;
+    if (!b) {
+      ctx.setTransform(c.width / size.width, 0, 0, c.height / size.height, 0, 0);
+      return;
+    }
+    // Device px per CSS px of the band, times CSS px per page px; the band's corner at the origin.
+    const dx = c.width / b.width, dy = c.height / b.height;
+    ctx.setTransform(dx * this.cssWidth / size.width, 0, 0, dy * this.cssHeight / size.height, -b.x * dx, -b.y * dy);
   }
 
   /**
    * Draws the whole page. `template` is the rasterised template layer, if any. Strokes whose id
    * is in `skip` are left out (the lasso's selection while it's dragged, #11).
    */
-  render(page: Page, theme: Theme, template: CanvasImageSource | null, skip?: ReadonlySet<string> | null, onImage?: () => void) {
+  render(page: Page, theme: Theme, template: TemplateSource | null, skip?: ReadonlySet<string> | null, onImage?: () => void) {
     this.renderBase(page, theme, template, skip, onImage);
     this.renderPen(page, theme, 0, Infinity, skip);
   }
@@ -365,7 +520,7 @@ export class PageBitmap {
    * Draws the page without its pen strokes: paper, template and highlighter layer. With
    * renderPen, a page can be drawn over several frames (#9), each rasterising only part of it.
    */
-  renderBase(page: Page, theme: Theme, template: CanvasImageSource | null, skip?: ReadonlySet<string> | null, onImage?: () => void) {
+  renderBase(page: Page, theme: Theme, template: TemplateSource | null, skip?: ReadonlySet<string> | null, onImage?: () => void) {
     theme = pageTheme(page, theme);
     const { ctx, canvas } = this;
     const w = canvas.width, h = canvas.height;
@@ -373,7 +528,12 @@ export class PageBitmap {
     ctx.globalAlpha = 1;
     ctx.fillStyle = theme.paper;
     ctx.fillRect(0, 0, w, h);
-    if (template) ctx.drawImage(template, 0, 0, w, h);
+    if (template && 'page' in template) {
+      // A whole-page image over a band bitmap (#52): in page px, clipped to the band.
+      this.pageTransform(ctx, page.size);
+      ctx.drawImage(template.page, 0, 0, page.size.width, page.size.height);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+    } else if (template) ctx.drawImage(template, 0, 0, w, h);
     if (page.images?.length) {
       // The objects layer (#12); `onImage` redraws once an image not yet decoded is.
       this.pageTransform(ctx, page.size);
@@ -382,7 +542,7 @@ export class PageBitmap {
     }
     // Highlighters at full opacity on their own canvas, then composited once at 40%, so
     // crossing highlighter strokes don't darken (as in the SVG).
-    const highlights = page.strokes.filter(s => s.tool === 'highlighter' && !skip?.has(s.id));
+    const highlights = page.strokes.filter(s => s.tool === 'highlighter' && !skip?.has(s.id) && this.shows(s, page.size));
     if (highlights.length) {
       const hctx = scratchCanvas(w, h);
       this.pageTransform(hctx, page.size);
@@ -398,7 +558,8 @@ export class PageBitmap {
 
   /**
    * Draws up to `count` pen strokes, in order, from stroke index `from`, over what's drawn.
-   * Returns the index to continue from (the number of strokes once all are drawn).
+   * Returns the index to continue from (the number of strokes once all are drawn). A band
+   * bitmap skips (and doesn't count) strokes outside its band.
    */
   renderPen(page: Page, theme: Theme, from: number, count: number, skip?: ReadonlySet<string> | null): number {
     theme = pageTheme(page, theme);
@@ -406,7 +567,7 @@ export class PageBitmap {
     const strokes = page.strokes;
     let i = from;
     for (let n = 0; i < strokes.length && n < count; i++) {
-      if (strokes[i].tool !== 'pen' || skip?.has(strokes[i].id)) continue;
+      if (strokes[i].tool !== 'pen' || skip?.has(strokes[i].id) || !this.shows(strokes[i], page.size)) continue;
       this.fill(strokes[i], theme);
       n++;
     }
@@ -417,7 +578,7 @@ export class PageBitmap {
    * Draws a stroke just appended to the page. A pen stroke goes on top of the bitmap; a
    * highlighter stroke belongs under the pen strokes, so it redraws the page.
    */
-  addStroke(page: Page, stroke: Stroke, theme: Theme, template: CanvasImageSource | null) {
+  addStroke(page: Page, stroke: Stroke, theme: Theme, template: TemplateSource | null) {
     if (stroke.tool === 'highlighter') {
       this.render(page, theme, template);
       return;

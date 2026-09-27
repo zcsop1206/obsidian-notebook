@@ -20,9 +20,9 @@ import { A4, LETTER, newPage, roundXY } from '../format/page';
 import type { NotebookSettings } from '../settings';
 import { Toolbar } from './toolbar';
 import { splitStroke } from './split';
-import { emptyGhostPages, inksGhost, layoutPages, MARGIN, mostVisiblePage, pageAtY, pagesInBand, type Layout } from './layout';
+import { bandNeed, bitmapBand, emptyGhostPages, inksGhost, layoutPages, MARGIN, mostVisiblePage, pageAtY, pagesInBand, type Band, type Layout, type PageBox } from './layout';
 import { anchorAt, clampZoom, navStatsLines, Navigator, newNavStats, scrollToKeep, zoomStep, type NavStats } from './navigate';
-import { currentTheme, PageBitmap, pageTheme, releaseScratch, strokeColor, TemplateImages, warmOutlines, type Theme } from './renderer';
+import { currentTheme, MAX_CANVAS_PIXELS, PageBitmap, pageTheme, releaseScratch, sameBand, strokeColor, TemplateImages, warmOutlines, type TemplateSource, type Theme } from './renderer';
 import { SpatialIndex } from './spatial';
 import { PagesPanel } from './pages-panel';
 import { NoteStore, type NoteFiles, type PageSlot, type TemplatesBefore } from './store';
@@ -55,6 +55,8 @@ const SAVE_TOOLS_DELAY = 400;
 const PUMP_BUDGET = 4;
 /** Pen strokes the pump draws into a bitmap per frame. */
 const PUMP_STROKES = 100;
+/** A band bitmap nearing the edge of what it covers is moved once scrolling has been still this long, ms (#52). */
+const BAND_SETTLE = 100;
 
 /** Counters for tests and debugging. */
 export interface InkStats {
@@ -62,6 +64,10 @@ export interface InkStats {
   pagesLoaded: number;
   /** Pages that currently have a bitmap. */
   pagesRendered: number;
+  /** Device pixels of the page bitmaps (those shown and those being drawn for a new band, #52). */
+  bitmapPixels?: number;
+  /** Band bitmaps redrawn over another part of their page as the view scrolled (#52). */
+  rebands?: number;
   /** Time of the last full page render, in ms. */
   lastRenderMs: number;
   /** Time from starting to load the note to its visible pages drawn, in ms. */
@@ -105,6 +111,12 @@ interface PageView {
    * draw. Null or absent when the bitmap is complete.
    */
   pending?: number | null;
+  /**
+   * A band bitmap (#52) being drawn over frames, off screen, for the part of the page the view
+   * has scrolled to; it replaces `bitmap` when done. `pending` is the next stroke to draw, null
+   * before the paper and template are; `waiting` while the template image loads.
+   */
+  next?: { bitmap: PageBitmap; pending: number | null; waiting: boolean } | null;
 }
 
 /** NoteStore's file access through the vault API, so Obsidian's embeds and caches follow. */
@@ -188,6 +200,9 @@ export class InkView extends FileView {
   private resizeTimer = 0;
   private updateFrame = 0;
   private pumpFrame = 0;
+  /** When the view last scrolled, resized or zoomed (update ran), and the timer for band bitmaps to follow once it's still (#52). */
+  private movedAt = 0;
+  private bandTimer = 0;
   private width = 0;
   private loads = 0;
 
@@ -252,6 +267,7 @@ export class InkView extends FileView {
       rulerMeasure: (target, from, to) => this.rulerMeasure(target, from, to),
       shapesOn: () => this.shapesOn,
       commitShape: (target, shape, freehand) => this.commit(target, shape, freehand),
+      overlayBand: target => this.overlayBand(target),
     }, (type, fn, options) => this.registerDomEvent(this.pagesEl, type, fn, options), this.stats.pen);
     // A Pencil drag over the pages never scrolls them (blockStylusTouch); finger drags over the
     // pages move them through the navigator, never natively, and never reach Obsidian's sidebar
@@ -451,7 +467,7 @@ export class InkView extends FileView {
 
   private clearPages() {
     for (const pv of this.pages) {
-      pv.bitmap?.release();
+      this.dropBitmap(pv);
       pv.el.remove();
     }
     this.pages = [];
@@ -587,6 +603,13 @@ export class InkView extends FileView {
       const pv = this.pages[i];
       if (!pv.bitmap || pv.pending != null) this.renderPage(pv);
     }
+    // Band bitmaps (#52) follow the view: the pump redraws one whose band the view is leaving,
+    // at once when part of what's visible isn't covered, else once scrolling has been still.
+    this.movedAt = performance.now();
+    if ([...near].some(i => this.rebandTo(this.pages[i]) === 'soon')) {
+      window.clearTimeout(this.bandTimer);
+      this.bandTimer = window.setTimeout(() => this.pump(), BAND_SETTLE + 5);
+    }
     this.updateGhost(); // #28
     this.updateStats();
     this.pump();
@@ -611,7 +634,7 @@ export class InkView extends FileView {
       const { near, visible } = this.band();
       const mid = visible.length ? (visible[0] + visible[visible.length - 1]) / 2 : 0;
       const next = [...near]
-        .filter(i => (!this.pages[i].bitmap || this.pages[i].pending != null) && !this.pages[i].slot.error)
+        .filter(i => this.needsDrawing(this.pages[i]))
         .sort((a, b) => Math.abs(a - mid) - Math.abs(b - mid))[0];
       if (next === undefined) return;
       const pv = this.pages[next], parsed = !!pv.slot.page, page = this.store.page(pv.slot);
@@ -626,8 +649,21 @@ export class InkView extends FileView {
     });
   }
 
+  /** Whether the pump has drawing to do for a page: a bitmap to make or finish, or a band to move (#52). */
+  private needsDrawing(pv: PageView): boolean {
+    if (pv.slot.error) return false;
+    if (!pv.bitmap || pv.pending != null) return true;
+    if (pv.next) return !pv.next.waiting;
+    const need = this.rebandTo(pv);
+    return need === 'now' || (need === 'soon' && performance.now() - this.movedAt >= BAND_SETTLE);
+  }
+
   /** Draws the next PUMP_STROKES strokes of a page's bitmap, starting it if needed. */
   private renderStep(pv: PageView, page: Page) {
+    if (pv.bitmap && pv.pending == null) {
+      this.rebandStep(pv, page);
+      return;
+    }
     if (pv.pending == null || !pv.bitmap) {
       if (!this.bitmapFor(pv)) return;
       pv.bitmap!.renderBase(page, this.theme, this.template(pv, page), this.hiddenOn(pv), this.imageReady(pv));
@@ -637,15 +673,112 @@ export class InkView extends FileView {
     pv.pending = next < page.strokes.length ? next : null;
   }
 
-  /** Gives the page a bitmap of its current size (keeping one that has it); false if it has no box. */
+  // ---- band bitmaps (#52)
+  //
+  // Past MAX_CANVAS_PIXELS a whole page can't be drawn at device resolution, so its bitmap
+  // covers only a band around the viewport (bitmapBand in layout.ts), at full resolution. As the
+  // view scrolls towards the edge of a band, the pump draws a new band off screen over several
+  // frames, the old one staying visible, and swaps it in (rebandStep). Everything else treats a
+  // band bitmap like a whole one: renderPage draws it from scratch where it is (or where the
+  // view now is, if it has left it), commit draws new strokes onto it, the eraser and the
+  // lasso redraw it.
+
+  /** The page's box in the current layout, or undefined. */
+  private boxOf(pv: PageView): PageBox | undefined {
+    return this.layout?.pages[this.pages.indexOf(pv)];
+  }
+
+  /** What the viewport shows of a page box, in the box's CSS px (may reach past it or miss it). */
+  private viewOf(box: PageBox): Band {
+    const sc = this.scroller;
+    return { x: sc.scrollLeft - box.left, y: sc.scrollTop - box.top, width: sc.clientWidth, height: sc.clientHeight };
+  }
+
+  /** The band a new bitmap of this page box should cover now; null: the whole page. */
+  private idealBand(box: PageBox): Band | null {
+    return bitmapBand(box.width, box.height, this.viewOf(box), window.devicePixelRatio || 1, MAX_CANVAS_PIXELS);
+  }
+
+  /** Whether a page's finished band bitmap should move ('soon' or 'now'), or 'ok'. */
+  private rebandTo(pv: PageView): 'ok' | 'soon' | 'now' {
+    const b = pv.bitmap, box = this.boxOf(pv);
+    if (!b?.band || pv.pending != null || !box || b.cssWidth !== box.width || b.cssHeight !== box.height) return 'ok';
+    const need = bandNeed(b.band, this.viewOf(box), box.width, box.height);
+    return need !== 'ok' && sameBand(this.idealBand(box), b.band) ? 'ok' : need;
+  }
+
+  /**
+   * One frame of moving a band bitmap: starts the new band (paper, template, images and
+   * highlighters), then draws PUMP_STROKES pen strokes a frame, then puts it in place of the old
+   * one. Strokes added meanwhile are drawn too (they're appended); anything that redraws the
+   * page (renderPage) drops it.
+   */
+  private rebandStep(pv: PageView, page: Page) {
+    const box = this.boxOf(pv);
+    if (!box || !pv.bitmap) return;
+    let n = pv.next;
+    if (!n) {
+      const band = this.idealBand(box);
+      if (sameBand(band, pv.bitmap.band)) return;
+      n = pv.next = { bitmap: new PageBitmap(box.width, box.height, band), pending: null, waiting: false };
+    }
+    const job = n;
+    if (job.pending == null) {
+      const tpl = this.templates.layer(page.template, page.size, job.bitmap, this.theme, () => {
+        if (pv.next !== job) return;
+        job.waiting = false;
+        this.pump();
+      });
+      if (tpl === 'loading') {
+        job.waiting = true;
+        return;
+      }
+      job.bitmap.renderBase(page, this.theme, tpl, this.hiddenOn(pv), this.imageReady(pv));
+      job.pending = 0;
+    }
+    job.pending = job.bitmap.renderPen(page, this.theme, job.pending, PUMP_STROKES, this.hiddenOn(pv));
+    if (job.pending < page.strokes.length) return;
+    pv.el.insertBefore(job.bitmap.canvas, pv.bitmap.canvas);
+    pv.bitmap.release();
+    pv.bitmap = job.bitmap;
+    pv.next = null;
+    this.stats.rebands = (this.stats.rebands ?? 0) + 1;
+  }
+
+  /** Drops a band being drawn off screen. */
+  private dropNext(pv: PageView) {
+    if (!pv.next) return;
+    pv.next.bitmap.release();
+    pv.next = null;
+  }
+
+  /**
+   * The live overlays' band for a page (#52; the pen asks at pointerdown and when the view
+   * moves): the band a bitmap of the page would get now (null: the whole page) and what the
+   * viewport shows of it, CSS px of the page box.
+   */
+  private overlayBand(target: PageTarget): { band: Band | null; view: Band } | null {
+    const box = this.boxOf(target.key as PageView);
+    if (!box) return null;
+    return { band: this.idealBand(box), view: this.viewOf(box) };
+  }
+
+  /**
+   * Gives the page a bitmap of its current size (keeping one that has it), covering the whole
+   * page or, past MAX_CANVAS_PIXELS, a band around the viewport (#52: kept where it is unless
+   * the view is leaving it); false if it has no box. The caller draws it from scratch.
+   */
   private bitmapFor(pv: PageView): boolean {
-    const box = this.layout?.pages[this.pages.indexOf(pv)];
+    const box = this.boxOf(pv);
     if (!box) return false;
     if (pv.bitmap && (pv.bitmap.cssWidth !== box.width || pv.bitmap.cssHeight !== box.height)) this.dropBitmap(pv);
+    this.dropNext(pv);
+    const old = pv.bitmap?.band;
+    const band = old && bandNeed(old, this.viewOf(box), box.width, box.height) !== 'now' ? old : this.idealBand(box);
     if (!pv.bitmap) {
-      pv.bitmap = new PageBitmap(box.width, box.height);
+      pv.bitmap = new PageBitmap(box.width, box.height, band);
       pv.el.insertBefore(pv.bitmap.canvas, pv.el.firstChild);
-    }
+    } else pv.bitmap.setBand(band);
     return true;
   }
 
@@ -666,15 +799,16 @@ export class InkView extends FileView {
   }
 
   /** The page's rasterised template, or null (then it's redrawn when the image is ready). */
-  private template(pv: PageView, page: Page): HTMLImageElement | null {
-    const c = pv.bitmap!.canvas;
-    return this.templates.get(page.template, page.size, c.width, c.height, this.theme, () => {
+  private template(pv: PageView, page: Page): TemplateSource | null {
+    const t = this.templates.layer(page.template, page.size, pv.bitmap!, this.theme, () => {
       if (pv.bitmap && this.pages.includes(pv)) this.renderPage(pv);
     });
+    return t === 'loading' ? null : t;
   }
 
   private dropBitmap(pv: PageView) {
     pv.pending = null;
+    this.dropNext(pv);
     if (!pv.bitmap) return;
     pv.bitmap.release();
     pv.bitmap = null;
@@ -682,6 +816,7 @@ export class InkView extends FileView {
 
   private updateStats() {
     this.stats.pagesRendered = this.pages.filter(pv => pv.bitmap).length;
+    this.stats.bitmapPixels = this.pages.reduce((n, pv) => n + (pv.bitmap?.pixels ?? 0) + (pv.next?.bitmap.pixels ?? 0), 0);
     this.stats.pagesLoaded = this.store ? this.store.pagesLoaded : 0;
   }
 
@@ -718,6 +853,7 @@ export class InkView extends FileView {
     const stroke: Stroke = { id: newStrokeId(page.strokes.map(s => s.id)), ...drawn, ...this.writtenOn(page, drawn) };
     store.addStroke(pv.slot, stroke);
     pv.spatial?.add(stroke);
+    if (stroke.tool === 'highlighter') this.dropNext(pv); // a band being drawn has its highlighter layer already (#52)
     if (pv.bitmap && pv.pending == null) pv.bitmap.addStroke(page, stroke, this.theme, this.template(pv, page));
     else this.renderPage(pv);
     this.updateStats();
@@ -1354,7 +1490,7 @@ export class InkView extends FileView {
       },
       bitmap: id => {
         const pv = this.pages.find(p => p.slot.id === id);
-        return pv?.bitmap && pv.pending == null && !this.nav.previewing ? pv.bitmap.canvas : null;
+        return pv?.bitmap && !pv.bitmap.band && pv.pending == null && !this.nav.previewing ? pv.bitmap.canvas : null; // not a band (#52)
       },
       theme: () => this.theme,
       template: (template, size, w, h, onReady) => this.templates.get(template, size, w, h, this.theme, onReady),

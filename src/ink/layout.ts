@@ -114,3 +114,63 @@ export function emptyGhostPages(pages: readonly { id: string; strokes: number | 
   }
   return out;
 }
+
+// ---- viewport bitmaps (#52)
+
+/** A rectangle in CSS px of a page's box (x, y from its top-left). */
+export interface Band {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * The part of a page (`width` × `height` CSS px) its bitmap covers, given the part of the page
+ * box the viewport shows (`view`, in the page box's CSS px; it may reach past the page or miss
+ * it). Null when the whole page fits in `maxPixels` at `dpr` device px per CSS px: the bitmap is
+ * the whole page, as before #52. Otherwise the viewport plus up to half a viewport on each side,
+ * shrunk until it fits at full `dpr` (down to the viewport alone), centred on the viewport and
+ * slid into the page, in whole CSS px. A page off screen gets the part of it nearest the
+ * viewport. If even the viewport alone doesn't fit, the band is the viewport and the caller
+ * draws it at a lower resolution (pixelRatio).
+ */
+export function bitmapBand(width: number, height: number, view: Band, dpr: number, maxPixels: number): Band | null {
+  const d2 = dpr * dpr;
+  if (width * height * d2 <= maxPixels) return null;
+  const vw = Math.min(width, Math.ceil(view.width)), vh = Math.min(height, Math.ceil(view.height));
+  let bw = vw, bh = vh;
+  for (let t = 1; t >= 0; t -= 0.125) {
+    bw = Math.min(width, Math.ceil(vw + t * view.width));
+    bh = Math.min(height, Math.ceil(vh + t * view.height));
+    if (bw * bh * d2 <= maxPixels) break;
+  }
+  const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+  const x = clamp(Math.round(view.x + view.width / 2 - bw / 2), 0, width - bw);
+  const y = clamp(Math.round(view.y + view.height / 2 - bh / 2), 0, height - bh);
+  return { x, y, width: bw, height: bh };
+}
+
+/**
+ * Whether a page bitmap covering `band` should be redrawn over another part of the page as the
+ * viewport shows `view` of it (page `width` × `height` CSS px): 'now' when part of what's visible
+ * isn't covered; 'soon' (once scrolling has settled) when less than half of `band`'s margin is
+ * left beyond the visible part on a side where the page goes on; else 'ok'. A page not in view
+ * is 'ok' whatever its band covers.
+ */
+export function bandNeed(band: Band, view: Band, width: number, height: number): 'ok' | 'soon' | 'now' {
+  // The visible part of the page.
+  const x0 = Math.max(0, view.x), y0 = Math.max(0, view.y);
+  const x1 = Math.min(width, view.x + view.width), y1 = Math.min(height, view.y + view.height);
+  if (x1 <= x0 || y1 <= y0) return 'ok';
+  if (x0 < band.x || y0 < band.y || x1 > band.x + band.width || y1 > band.y + band.height) return 'now';
+  // The room left beyond it on each side the band could move to, over the band's margin there.
+  const mx = (band.width - Math.min(width, view.width)) / 2, my = (band.height - Math.min(height, view.height)) / 2;
+  const room = (left: number, margin: number) => (margin > 0 ? left / margin : Infinity);
+  const least = Math.min(
+    band.x > 0 ? room(x0 - band.x, mx) : Infinity,
+    band.x + band.width < width ? room(band.x + band.width - x1, mx) : Infinity,
+    band.y > 0 ? room(y0 - band.y, my) : Infinity,
+    band.y + band.height < height ? room(band.y + band.height - y1, my) : Infinity);
+  return least < 0.5 ? 'soon' : 'ok';
+}
