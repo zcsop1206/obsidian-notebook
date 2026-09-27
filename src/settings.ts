@@ -1,16 +1,22 @@
-// Plugin settings: the paper size and template of new ink notes.
+// Plugin settings: the paper size and template of new ink notes, and the ink toolbar's tools and
+// favourite presets (#10).
 import { PluginSettingTab, Setting, type App, type Plugin } from 'obsidian';
 import type { Paper } from './format/page';
 import { BUILT_IN_TEMPLATES, isTemplateName } from './format/template';
+import { DEFAULT_PRESETS, DEFAULT_TOOL_STATE, parsePresets, parseToolState, type PenPreset, type ToolState } from './ink/pen';
 
 export interface NotebookSettings {
   /** Paper size of new ink notes. */
   paper: Paper;
   /** Template name (e.g. `lined-college`) of new ink notes; see BUILT_IN_TEMPLATES. */
   template: string;
+  /** The tool in use and each tool's settings, restored when an ink view opens (#10). */
+  tools: ToolState;
+  /** The favourite presets: MAX_PRESETS slots at most, null for an empty one (#10). */
+  presets: (PenPreset | null)[];
 }
 
-export const DEFAULT_SETTINGS: NotebookSettings = { paper: 'letter', template: 'blank' };
+export const DEFAULT_SETTINGS: NotebookSettings = { paper: 'letter', template: 'blank', tools: DEFAULT_TOOL_STATE, presets: [...DEFAULT_PRESETS] };
 
 /** Settings from saved data, ignoring unknown or invalid values (with a warning for a template). */
 export function parseSettings(data: unknown): NotebookSettings {
@@ -18,7 +24,12 @@ export function parseSettings(data: unknown): NotebookSettings {
   let template = DEFAULT_SETTINGS.template;
   if (typeof d.template === 'string' && isTemplateName(d.template)) template = d.template;
   else if (d.template !== undefined) console.warn('[notebook]', `Unknown template ${JSON.stringify(d.template)} in settings; using ${template}`);
-  return { paper: d.paper === 'a4' || d.paper === 'letter' ? d.paper : DEFAULT_SETTINGS.paper, template };
+  return {
+    paper: d.paper === 'a4' || d.paper === 'letter' ? d.paper : DEFAULT_SETTINGS.paper,
+    template,
+    tools: parseToolState(d.tools),
+    presets: parsePresets(d.presets),
+  };
 }
 
 interface SettingsHost extends Plugin {
