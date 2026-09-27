@@ -1777,6 +1777,8 @@ try:
           return text;
         }""")
         check('stats overlay: shows the zoom and the last finger gesture frame times', 'zoom 100%' in r and 'last finger gesture' in r and 'over 32 ms' in r, r)
+        # This view hasn't erased yet (section 19 checks the line after a partial erase).
+        check('stats overlay: has a line for the last erase', 'last erase: none yet' in r, r)
         # ======== end of 15. Zoom and finger navigation (#9) ========
 
         # ======== 16. Page management (#17) ========
@@ -2288,8 +2290,6 @@ try:
                   r['right'] == [bf[3], bf[4], bf[5], bf[6]], r)
             check(f'edges ({off}): the eraser dragged into the gap below and back up removes the lines on both sides, not the one 70 px away',
                   r['bottom'] == [bf[3], bf[6]] and not r['erasing'], r)
-        # ======== end of 18. Gestures across page edges (#35) ========
-
         # The partial eraser (#15, the default) keeps erasing across edges too: the lines it crossed
         # are cut (replaced by remnants), the line at the edge and the far ones are untouched.
         for off in ('scroller', 'outside'):
@@ -2437,6 +2437,9 @@ try:
               L['split'] > 10 and r['after'] == r['before'] - L['split'] - L['removed'] + L['remnants'] and r['unique']
               and r['index'] == r['after'] and r['undone'] == r['before'], r)
         check('partial perf: median erase frame under 8 ms (Chromium)', L['frameMs'] < 8, L['frameMs'])
+        r = ev("() => { view.toggleStats(); const t = view.contentEl.querySelector('.nb-ink-stats').textContent; view.toggleStats(); return t; }")
+        check('partial: the stats overlay shows the partial erase with its cuts and remnants',
+              f"last erase: partial, removed {L['removed']}, cuts {L['split']}, remnants {L['remnants']}; erase frame" in r, r)
         # ======== end of 19. The partial eraser (#15) ========
 
         # --- unload removes the patch

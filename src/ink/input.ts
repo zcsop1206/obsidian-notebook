@@ -301,6 +301,13 @@ export function penStatsLines(stats: PenStats, pen?: Readonly<PenSettings>): str
   return lines;
 }
 
+/** The last erase gesture as text lines, for the ink view's stats overlay. */
+export function eraseStatsLines(e: EraseStats | null): string[] {
+  if (!e) return ['last erase: none yet'];
+  return [`last erase: ${e.mode}, removed ${e.removed}, cuts ${e.split}, remnants ${e.remnants}; ` +
+    `erase frame ${fmt(e.frameMs, 2)} ms median (max ${fmt(e.frameMaxMs, 2)}, ${e.frames} frames)`];
+}
+
 // ---- stylus touches
 
 /** Elements a Pencil tap must still reach. */
