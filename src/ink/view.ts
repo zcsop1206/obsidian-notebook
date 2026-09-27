@@ -11,13 +11,14 @@ import { parseTemplate, templateName } from '../format/template';
 import type { Stroke } from '../format/page';
 import { listenForUndoTaps } from './gestures';
 import { History } from './history';
-import { blockFingerTouch, blockStylusTouch, newPenStats, PenInput, penStatsLines, type NewStroke, type PageTarget, type PenStats, type StrokeStyle } from './input';
+import { blockFingerTouch, blockStylusTouch, newPenStats, PenInput, penStatsLines, type EraseTally, type NewStroke, type PageTarget, type PenStats, type StrokeStyle } from './input';
 import { COLOR_PRESETS, DEFAULT_PEN, nextColor, nextSize, SIZE_PRESETS, SIZE_STEP, withPen, type PenSettings } from './pen';
 import {
   DEFAULT_HIGHLIGHTER, HIGHLIGHTER_COLORS, HIGHLIGHTER_SIZES, nextHighlighterColor, nextHighlighterSize, withHighlighter,
   type HighlighterSettings, type ToolKind,
 } from './pen';
-import { DEFAULT_ERASER, ERASER_SIZES, nextEraserSize, withEraser, type EraserSettings } from './pen';
+import { DEFAULT_ERASER, ERASER_SIZES, nextEraserSize, withEraser, type EraserMode, type EraserSettings } from './pen';
+import { splitStroke } from './split';
 import { layoutPages, MARGIN, mostVisiblePage, pageAtY, pagesInBand, type Layout } from './layout';
 import { anchorAt, clampZoom, navStatsLines, Navigator, newNavStats, scrollToKeep, zoomStep, type NavStats } from './navigate';
 import { currentTheme, PageBitmap, releaseScratch, strokeColor, TemplateImages, warmOutlines, type Theme } from './renderer';
@@ -196,7 +197,7 @@ export class InkView extends FileView {
       statsChanged: () => this.renderStats(),
       strokeStyle: () => this.strokeStyle(),
       eraser: () => this.eraser,
-      erase: (target, path, radius, start) => this.eraseAlong(target, path, radius, start),
+      erase: (target, path, radius, start, mode, tally) => this.eraseAlong(target, path, radius, start, mode, tally),
     }, (type, fn, options) => this.registerDomEvent(this.pagesEl, type, fn, options), this.stats.pen);
     // A Pencil drag anywhere in the view, on a page or not, never scrolls it (blockStylusTouch);
     // finger drags over the pages move it through the navigator, never natively, and never
@@ -761,7 +762,7 @@ export class InkView extends FileView {
 
   // ---- the eraser (#7)
 
-  /** Changes the eraser's size (snapped to one of ERASER_SIZES). */
+  /** Changes the eraser's size (snapped to one of ERASER_SIZES) or mode; an unknown mode throws. */
   setEraser(change: Partial<EraserSettings>) {
     this.eraser = withEraser(this.eraser, change);
     this.renderStrip();
@@ -771,26 +772,109 @@ export class InkView extends FileView {
     this.setEraser({ size: nextEraserSize(this.eraser.size) });
   }
 
-  /** The eraser moved along `path` on a page: erases the strokes it touched, one undo step per drag. */
-  private eraseAlong(target: PageTarget, path: readonly { x: number; y: number }[], radius: number, start: boolean): number {
+  /**
+   * The eraser moved along `path` on a page: erases the strokes it touched (whole, or in partial
+   * mode only the parts under it), one undo step per drag.
+   */
+  private eraseAlong(target: PageTarget, path: readonly { x: number; y: number }[], radius: number, start: boolean, mode: EraserMode, tally: EraseTally) {
     const pv = target.key as PageView;
     const index = this.pages.indexOf(pv);
     const page = this.store && index >= 0 ? this.store.page(pv.slot) : null;
-    if (!page) return 0;
+    if (!page) return;
     if (!pv.spatial) pv.spatial = new SpatialIndex(page.size, page.strokes);
-    if (start) this.lastErase = null; // a new drag: its first removal is a new undo step
+    if (start) this.lastErase = this.lastSplit = null; // a new drag: its first change is a new undo step
     const ids = pv.spatial.hitPath(path, radius, this.eraseHits);
-    const n = ids.length ? this.eraseStrokes(index, ids, !start).length : 0;
+    if (ids.length) {
+      if (mode === 'stroke') tally.removed += this.eraseStrokes(index, ids, !start).length;
+      else this.splitStrokes(index, ids, path, radius, !start, tally);
+    }
     ids.length = 0;
-    return n;
   }
+
+  /**
+   * The partial eraser (#15): cuts the part of each of these strokes within `radius` of `path`
+   * out of it (see split.ts), replacing the stroke by its remnants at its index, as one undoable
+   * edit; keeps the page's eraser index in step and redraws the page once. With `join`, the
+   * edit joins the previous one of the same drag (as eraseStrokes does), so a drag is one undo
+   * step. Undo puts the originals back and takes the remnants out, latest first; redo cuts
+   * again with the same remnants (same ids). Saved by the autosave.
+   */
+  private splitStrokes(pageIndex: number, ids: readonly string[], path: readonly { x: number; y: number }[], radius: number, join: boolean, tally: EraseTally) {
+    const pv = this.pages[pageIndex];
+    const store = this.store;
+    const page = store && pv ? store.page(pv.slot) : null;
+    if (!store || !pv || !page) return;
+    const pageId = pv.slot.id;
+    const byId = new Map(page.strokes.map(s => [s.id, s] as const));
+    const taken = new Set(byId.keys());
+    const cuts: { index: number; stroke: Stroke; remnants: Stroke[] }[] = [];
+    for (const id of ids) {
+      const stroke = byId.get(id);
+      const remnants = stroke && splitStroke(stroke, path, radius, taken);
+      if (!remnants) continue;
+      const replaced = store.replaceStroke(pageId, id, remnants);
+      if (!replaced) continue;
+      if (pv.spatial) {
+        pv.spatial.remove(id);
+        for (const r of remnants) pv.spatial.add(r);
+      }
+      cuts.push({ ...replaced, remnants });
+      if (remnants.length) {
+        tally.split++;
+        tally.remnants += remnants.length;
+      } else tally.removed++;
+    }
+    if (!cuts.length) return;
+    this.redrawPage(pageId);
+    const last = this.lastSplit, depth = this.history.labels.length;
+    if (join && last && last.store === store && last.pageId === pageId && last.depth === depth && !this.history.canRedo) {
+      last.cuts.push(...cuts);
+      return;
+    }
+    const all = cuts;
+    const spatial = () => this.pages.find(p => p.slot.id === pageId)?.spatial;
+    this.history.push({
+      label: 'Erase',
+      undo: () => {
+        if (this.store !== store) return;
+        const index = spatial();
+        for (let i = all.length - 1; i >= 0; i--) {
+          const c = all[i];
+          store.removeStrokes(pageId, c.remnants.map(r => r.id));
+          store.insertStrokes(pageId, [{ index: c.index, stroke: c.stroke }]);
+          if (index) {
+            for (const r of c.remnants) index.remove(r.id);
+            index.add(c.stroke);
+          }
+        }
+        this.redrawPage(pageId);
+      },
+      redo: () => {
+        if (this.store !== store) return;
+        const index = spatial();
+        for (const c of all) {
+          store.replaceStroke(pageId, c.stroke.id, c.remnants);
+          if (index) {
+            index.remove(c.stroke.id);
+            for (const r of c.remnants) index.add(r);
+          }
+        }
+        this.redrawPage(pageId);
+      },
+    });
+    this.lastSplit = { store, pageId, cuts: all, depth: this.history.labels.length };
+  }
+
+  /** The latest partial erase edit, which the next frames of the same eraser drag join. */
+  private lastSplit: { store: NoteStore; pageId: string; cuts: { index: number; stroke: Stroke; remnants: Stroke[] }[]; depth: number } | null = null;
 
   /** Reused for the ids each eraser frame hits. */
   private eraseHits: string[] = [];
 
   /**
    * PROVISIONAL (#10): the Eraser button, third in the tool group, and the eraser's two sizes
-   * (before the "provisional" label), shown while the eraser is in use.
+   * and its two modes, Partial and Whole strokes (before the "provisional" label), shown while
+   * the eraser is in use.
    */
   private buildEraserStrip(button: (parent: HTMLElement, cls: string, text: string, label: string, fn: () => void) => HTMLElement) {
     const strip = this.strip;
@@ -801,6 +885,10 @@ export class InkView extends FileView {
     ERASER_SIZES.forEach((size, i) => {
       button(sizes, 'nb-ink-eraser-size', i ? 'Large' : 'Small', `Eraser size ${size} px`, () => this.setEraser({ size })).dataset.eraserSize = String(size);
     });
+    const modes: [EraserMode, string, string][] = [['partial', 'Partial', 'Erase only the part under the eraser'], ['stroke', 'Whole strokes', 'Erase whole strokes']];
+    for (const [mode, text, label] of modes) {
+      button(sizes, 'nb-ink-eraser-mode', text, label, () => this.setEraser({ mode })).dataset.eraserMode = mode;
+    }
   }
 
   private renderEraserStrip() {
@@ -808,8 +896,8 @@ export class InkView extends FileView {
     if (!sizes) return;
     if (this.pen.tool === 'eraser') sizes.show();
     else sizes.hide();
-    sizes.querySelectorAll<HTMLElement>('.nb-ink-eraser-size').forEach(el => {
-      const active = Number(el.dataset.eraserSize) === this.eraser.size;
+    sizes.querySelectorAll<HTMLElement>('.nb-ink-eraser-size, .nb-ink-eraser-mode').forEach(el => {
+      const active = el.dataset.eraserMode ? el.dataset.eraserMode === this.eraser.mode : Number(el.dataset.eraserSize) === this.eraser.size;
       el.toggleClass('is-active', active);
       el.setAttribute('aria-pressed', String(active));
     });

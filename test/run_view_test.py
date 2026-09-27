@@ -1149,6 +1149,7 @@ try:
           };
           T.col = x => Array.from({ length: 201 }, (_, j) => [x, 200 + j, 0.3]);  // a vertical line, 1 px per sample
           T.ids = () => view.store.slots[0].page.strokes.map(s => s.id);
+          view.setEraser({ mode: 'stroke' });  // this section tests the stroke eraser; the partial one (#15) is section 19
         }""")
         r = ev("""async () => {
           for (const x of [150, 250, 350, 450, 550]) await T.pen(0, T.col(x), { predict: 0 });
@@ -2269,7 +2270,7 @@ try:
               await vline(350, 990, 1010);  // under the part of the drag in the gap, 70 px away
               const before = T.ids(0);
               view.setTool('eraser');
-              if ({'true' if mode else 'false'}) view.setEraser({{ mode: '{mode}' }});
+              view.setEraser({{ mode: '{mode}' }});
               await T.edge(0, [...T.line(600, 300, 818, 300, 60), ...T.line(818, 300, 818, 600, 60).slice(1), ...T.line(818, 600, 600, 600, 60).slice(1)], '{off}');
               const right = T.ids(0), rightSamples = view.input.lastErase && view.input.lastErase.samples;
               await T.edge(0, [...T.line(200, 1000, 200, 1080, 20), ...T.line(200, 1080, 550, 1080, 60).slice(1), ...T.line(550, 1080, 550, 1000, 20).slice(1)], '{off}');
@@ -2279,7 +2280,7 @@ try:
               return {{ before, right, bottom, erasing, rightSamples, bottomSamples, strokes: view.store.slots[0].page.strokes.map(s => [s.id, s.points.length, Math.round(s.points[0].x)]) }};
             }}""")
         for off in ('scroller', 'outside'):
-            r = edge_erase('', off)
+            r = edge_erase('stroke', off)
             bf = r['before']
             check(f'edges ({off}): the eraser follows every sample off the page (181 right, 101 bottom)',
                   r['rightSamples'] == 181 and r['bottomSamples'] == 101, r)
@@ -2288,6 +2289,155 @@ try:
             check(f'edges ({off}): the eraser dragged into the gap below and back up removes the lines on both sides, not the one 70 px away',
                   r['bottom'] == [bf[3], bf[6]] and not r['erasing'], r)
         # ======== end of 18. Gestures across page edges (#35) ========
+
+        # The partial eraser (#15, the default) keeps erasing across edges too: the lines it crossed
+        # are cut (replaced by remnants), the line at the edge and the far ones are untouched.
+        for off in ('scroller', 'outside'):
+            r = edge_erase('partial', off)
+            bf, right, bottom = r['before'], set(r['right']), set(r['bottom'])
+            check(f'edges ({off}, partial): the eraser follows every sample off the page', r['rightSamples'] == 181 and r['bottomSamples'] == 101, r)
+            check(f'edges ({off}, partial): off the right edge and back cuts the lines on both sides of the exit and at the edge; the rest stay',
+                  not right & set(bf[0:3]) and set(bf[3:7]) <= right and len(right) >= 4 + 2, r)
+            check(f'edges ({off}, partial): into the gap below and back cuts the lines on both sides, not the one 70 px away',
+                  not bottom & {bf[4], bf[5]} and {bf[3], bf[6]} <= bottom and not r['erasing'], r)
+        # ======== end of 18. Gestures across page edges (#35) ========
+
+        # ======== 19. The partial eraser (#15) ========
+        # A "word" of four strokes (three pen lines and a highlighter stroke) erased across the middle.
+        r = ev("""async () => {
+          await p.createInkNote('Partial', '', 'letter', 'blank');
+          await T.sleep(150);
+          view.setTool('pen');
+          T.pids = () => view.store.slots[0].page.strokes.map(s => s.id);
+          for (const x of [200, 230, 260]) await T.pen(0, Array.from({ length: 101 }, (_, j) => [x, 250 + j, 0.3]), { predict: 0 });
+          view.commit({ key: view.pages[0] }, { tool: 'highlighter', color: '#ffd400', size: 12,
+            points: Array.from({ length: 101 }, (_, j) => ({ x: 320, y: 250 + j, p: 0.5, t: 2 * j })) });
+          const strip = view.contentEl.querySelector('.nb-ink-strip');
+          const active = () => strip.querySelector('.nb-ink-eraser-mode.is-active')?.dataset.eraserMode;
+          const modes = { fresh: view.eraser.mode };
+          commands['eraser-stroke'].checkCallback(false);
+          modes.stroke = [view.pen.tool, view.eraser.mode, active()];
+          strip.querySelector('[data-eraser-mode="partial"]').click();
+          modes.clicked = [view.eraser.mode, active(), strip.querySelector('[data-eraser-mode="partial"]').getAttribute('aria-pressed')];
+          view.setTool('pen');
+          commands['eraser-partial'].checkCallback(false);
+          modes.partial = [view.pen.tool, view.eraser.mode, active()];
+          modes.shown = strip.querySelector('.nb-ink-eraser-sizes').style.display !== 'none';
+          const before = view.store.slots[0].page.strokes.map(s => ({ id: s.id, n: s.points.length }));
+          const n = view.history.labels.length;
+          await T.pen(0, Array.from({ length: 301 }, (_, j) => [150 + j, 300, 0.3]), { predict: 0 });
+          const after = view.store.slots[0].page.strokes.map(s => ({ id: s.id, tool: s.tool, n: s.points.length, y0: s.points[0].y, y1: s.points[s.points.length - 1].y, t0: s.points[0].t }));
+          const band = [200, 230, 260].map(x => T.darkIn(0, x - 4, 294, x + 4, 306));
+          const kept = [200, 230, 260].map(x => [T.darkIn(0, x - 4, 255, x + 4, 285), T.darkIn(0, x - 4, 315, x + 4, 345)]);
+          return { modes, before, after, band, kept, last: view.input.lastErase, steps: view.history.labels.length - n, label: view.history.labels.slice(-1)[0],
+            yellow: T.near(0, [255, 239, 153], 14), index: view.pages[0].spatial.size };
+        }""")
+        print('partial eraser: setup and word:', {k: r[k] for k in ('modes', 'band', 'kept', 'last', 'steps')})
+        check('partial: the default eraser mode is partial', r['modes']['fresh'] == 'partial', r['modes'])
+        check('partial: "Use the stroke eraser" selects the eraser in stroke mode; the strip shows it',
+              r['modes']['stroke'] == ['eraser', 'stroke', 'stroke'], r['modes'])
+        check('partial: the strip\'s Partial button switches the mode', r['modes']['clicked'] == ['partial', 'partial', 'true'], r['modes'])
+        check('partial: "Use the partial eraser" selects the eraser in partial mode, the strip shown',
+              r['modes']['partial'] == ['eraser', 'partial', 'partial'] and r['modes']['shown'], r['modes'])
+        old_ids = {x['id'] for x in r['before']}
+        after = r['after']
+        check('partial: each of the four strokes is cut in two: eight remnants with new ids, in drawing order, top then bottom',
+              len(after) == 8 and not old_ids & {a['id'] for a in after} and [a['tool'] for a in after] == ['pen'] * 6 + ['highlighter'] * 2
+              and all(a['y1'] < 300 for a in after[0::2]) and all(a['y0'] > 300 for a in after[1::2]), after)
+        check('partial: the remnants end at the eraser\'s edge (reach 7.25 for the pen, 12 for the highlighter) and start at t = 0',
+              all(abs(a['y1'] - (300 - 7.25)) < 0.2 for a in after[0:6:2]) and all(abs(a['y0'] - (300 + 7.25)) < 0.2 for a in after[1:6:2])
+              and abs(after[6]['y1'] - 288) < 0.2 and all(a['t0'] == 0 for a in after), after)
+        check('partial: the cut is gone from the bitmap, the untouched parts are drawn; the highlighter parts too',
+              r['band'] == [0, 0, 0] and all(a > 30 and b > 30 for a, b in r['kept']) and r['yellow'] > 500, r)
+        # As the eraser moves over a line frame by frame, each frame cuts a little more, so a stroke
+        # (then its remnants) is cut several times; the stats count each cut.
+        check('partial: the drag is one "Erase" undo step; the stats count the cuts, none removed whole; the index follows',
+              r['steps'] == 1 and r['label'] == 'Erase' and r['last']['mode'] == 'partial' and r['last']['split'] >= 4
+              and r['last']['remnants'] - r['last']['split'] == 4 and r['last']['removed'] == 0 and r['index'] == 8, r)
+        partial_after = after
+
+        # Saved and reopened: the remnants are on disk, with the same points.
+        r = ev("""async () => {
+          await view.save();
+          const path = view.store.slots[0].path;
+          const disk = ink.readPage(fs.get(path)).strokes.map(s => ({ id: s.id, n: s.points.length }));
+          await app.workspace.activeLeaf.detach();
+          await T.sleep(30);
+          await app.workspace.getLeaf('tab').openFile(app.vault.getFile('Partial.md'));
+          await T.sleep(150);
+          const reopened = view.store.page(view.store.slots[0]).strokes.map(s => ({ id: s.id, n: s.points.length }));
+          return { disk, reopened, kept: [200, 230, 260].map(x => [T.darkIn(0, x - 4, 255, x + 4, 285), T.darkIn(0, x - 4, 315, x + 4, 345)]),
+            band: [200, 230, 260].map(x => T.darkIn(0, x - 4, 294, x + 4, 306)) };
+        }""")
+        want = [{'id': a['id'], 'n': a['n']} for a in partial_after]
+        check('partial: the remnants are saved and come back when the note is reopened, drawn',
+              r['disk'] == want and r['reopened'] == want and r['band'] == [0, 0, 0] and all(a > 30 and b > 30 for a, b in r['kept']), r)
+
+        # Undo restores the originals (after the reopen, the history is new: cut again first).
+        r = ev("""async () => {
+          view.setTool('eraser');
+          view.setEraser({ mode: 'partial' });
+          const before = view.store.slots[0].page.strokes.map(s => ({ id: s.id, n: s.points.length }));
+          await T.pen(0, Array.from({ length: 301 }, (_, j) => [150 + j, 330, 0.3]), { predict: 0 });  // cuts the lower remnants
+          const cut = view.store.slots[0].page.strokes.map(s => ({ id: s.id, n: s.points.length }));
+          const undid = view.undo();
+          const undone = view.store.slots[0].page.strokes.map(s => ({ id: s.id, n: s.points.length }));
+          const inkUndone = [200, 230, 260].map(x => T.darkIn(0, x - 4, 324, x + 4, 336));
+          const index = view.pages[0].spatial.size;
+          view.redo();
+          const redone = view.store.slots[0].page.strokes.map(s => ({ id: s.id, n: s.points.length }));
+          const inkRedone = [200, 230, 260].map(x => T.darkIn(0, x - 4, 324, x + 4, 336));
+          await view.save();
+          const disk = ink.readPage(fs.get(view.store.slots[0].path)).strokes.map(s => ({ id: s.id, n: s.points.length }));
+          return { before, cut, undid, undone, redone, inkUndone, inkRedone, disk, index, index2: view.pages[0].spatial.size, split: view.input.lastErase.split };
+        }""")
+        check('partial: a second cut splits the lower remnants again (4 more strokes)', len(r['cut']) == 12 and r['split'] >= 4, r)
+        check('partial: undo puts the originals back in place (model, bitmap, index)',
+              r['undid'] and r['undone'] == r['before'] and all(n > 10 for n in r['inkUndone']) and r['index'] == 8, r)
+        check('partial: redo cuts them again with the same remnants (model, bitmap, index, file)',
+              r['redone'] == r['cut'] and r['inkRedone'] == [0, 0, 0] and r['index2'] == 12 and r['disk'] == r['cut'], r)
+
+        # The stroke mode still removes whole strokes.
+        r = ev("""async () => {
+          commands['eraser-stroke'].checkCallback(false);
+          const before = T.pids();
+          await T.pen(0, Array.from({ length: 141 }, (_, j) => [150 + j, 270, 0.3]), { predict: 0 });  // the upper pen remnants
+          const after = T.pids();
+          return { before, after, last: view.input.lastErase, band: [200, 230, 260].map(x => T.darkIn(0, x - 4, 250, x + 4, 290)) };
+        }""")
+        check('partial: stroke mode removes the three upper pen remnants whole, no new strokes',
+              len(r['after']) == len(r['before']) - 3 and set(r['after']) <= set(r['before']) and r['last']['removed'] == 3 and r['last']['split'] == 0
+              and r['band'] == [0, 0, 0], r)
+        page.locator('#leaf').screenshot(path=os.path.join(OUT, 'partial_eraser.png'))
+
+        # A 300-stroke page: a partial erase sweep across it, measured.
+        r = ev("""async () => {
+          const files = ink.largeNote('Dense', 'ThreeHundred', 1, 300);
+          dirs.add('Dense'); dirs.add('Dense/ThreeHundred');
+          for (const [k, v] of Object.entries(files)) fs.set(k, v);
+          await app.workspace.getLeaf(false).openFile(app.vault.getFile('Dense/ThreeHundred.md'));
+          await T.sleep(300);
+          const before = view.store.slots[0].page.strokes.length;
+          view.setTool('eraser');
+          view.setEraser({ mode: 'partial', size: 14 });
+          const sweep = Array.from({ length: 800 }, (_, j) => [80 + j * 0.8, 150 + j * 0.9 + 30 * Math.sin(j / 40), 0.3]);
+          await T.pen(0, sweep, { per: 8, predict: 0 });
+          const last = view.input.lastErase, strokes = view.store.slots[0].page.strokes;
+          const ids = new Set(strokes.map(s => s.id)), index = view.pages[0].spatial.size, count = strokes.length;
+          view.setTool('pen');
+          const steps = view.history.labels.length;
+          view.undo();
+          const undone = view.store.slots[0].page.strokes.length;
+          return { before, last, after: count, unique: ids.size === count, index, undone, steps };
+        }""")
+        L = r['last']
+        print(f"partial eraser on a page with {r['before']} strokes: {L['frames']} frames, frame (hit test + split + redraw) median {L['frameMs']:.2f} ms "
+              f"(max {L['frameMaxMs']:.2f}); split {L['split']}, remnants {L['remnants']}, removed whole {L['removed']}; strokes {r['before']} -> {r['after']}")
+        check('partial perf: the sweep cuts strokes on the 300-stroke page; ids unique, the index in step; one undo restores them all',
+              L['split'] > 10 and r['after'] == r['before'] - L['split'] - L['removed'] + L['remnants'] and r['unique']
+              and r['index'] == r['after'] and r['undone'] == r['before'], r)
+        check('partial perf: median erase frame under 8 ms (Chromium)', L['frameMs'] < 8, L['frameMs'])
+        # ======== end of 19. The partial eraser (#15) ========
 
         # --- unload removes the patch
         r = ev("""async () => {
