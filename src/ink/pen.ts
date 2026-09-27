@@ -145,3 +145,32 @@ export function nextHighlighterColor(color: string): string {
 export function nextHighlighterSize(size: number): number {
   return HIGHLIGHTER_SIZES.find(s => s > size) ?? HIGHLIGHTER_SIZES[0];
 }
+
+// ---- the eraser (#7)
+
+/** The stroke eraser's settings. Held next to the pen by the ink view. */
+export interface EraserSettings {
+  /** Hit radius in page px: one of ERASER_SIZES. */
+  size: number;
+}
+
+/** The two eraser sizes: hit radius in page px. */
+export const ERASER_SIZES: readonly number[] = Object.freeze([6, 14]);
+
+export const DEFAULT_ERASER: Readonly<EraserSettings> = Object.freeze({ size: 6 });
+
+/** The settings with `change` applied. A size goes to the nearest preset; a non-number throws. */
+export function withEraser(eraser: Readonly<EraserSettings>, change: Partial<EraserSettings>): EraserSettings {
+  const next = { ...eraser };
+  if (change.size !== undefined) {
+    const n = change.size;
+    if (typeof n !== 'number' || !Number.isFinite(n)) throw new Error(`Invalid eraser size ${JSON.stringify(n)} (expected ${ERASER_SIZES.join(' or ')})`);
+    next.size = ERASER_SIZES.reduce((best, s) => (Math.abs(s - n) < Math.abs(best - n) ? s : best));
+  }
+  return next;
+}
+
+/** The eraser size after `size`, wrapping round. */
+export function nextEraserSize(size: number): number {
+  return ERASER_SIZES.find(s => s > size) ?? ERASER_SIZES[0];
+}
