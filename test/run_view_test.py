@@ -2737,7 +2737,7 @@ try:
               r['groups'] == ['nb-ink-tools', 'nb-ink-presets', 'nb-ink-page-actions'] and not r['strip'], r)
         check('toolbar: 15 buttons, each a 40 px target; all but the five presets have an icon',
               r['buttons'] == 15 and r['icons'] == 10 and all(w >= 40 and h >= 40 for w, h in r['size']), r)
-        check('toolbar: the lasso is a tool (#11); the ruler is a placeholder, disabled with its issue', r['lasso'] == [False, 'Lasso'] and r['ruler'] == [True, 'Ruler: coming in #20'], r)
+        check('toolbar: the lasso is a tool (#11); the ruler is a toggle (#20)', r['lasso'] == [False, 'Lasso'] and r['ruler'] == [False, 'Ruler'], r)
         check('toolbar: every tool is one tap from every other', r['taps'] == [True] * 6, r['taps'])
         check('toolbar: "Open as markdown" stays the header action', r['header'] == ['Open as markdown'], r['header'])
 
@@ -4230,6 +4230,285 @@ try:
         check('images: the page menu offers Insert image, Insert image as page and Paste image; the file input (image/*) inserts the chosen file',
               r['items'] == [True, True, True] and r['accept'] == 'image/*' and r['n'] == r['n0'] + 1 and r['gone'], r)
         # ======== end of 25. Images on pages (#12) ========
+
+        # ======== 26. The ruler (#20) ========
+        r = ev("""async () => {
+          await p.createInkNote('Ruler', '', 'letter', 'blank');
+          await T.sleep(150);
+          view.setTool('pen');
+          T.rl = () => view.rulerLayer;
+          // Pressure rising along the stroke (T.penAt sends 0.5 throughout).
+          const penAt = T.penAt;
+          T.rpen = (pts, opts) => {
+            const P = window.PointerEvent;
+            let j = 0;
+            window.PointerEvent = class extends P { constructor(type, init) { super(type, { ...init, pressure: type === 'pointerup' ? 0 : 0.15 + 0.7 * Math.min(1, j++ / pts.length) }); } };
+            return penAt(pts, opts).finally(() => { window.PointerEvent = P; });
+          };
+          /** Scrolls page 0's centre to the middle of the view. */
+          T.middle = () => {
+            const sc = T.sc(), c = T.screenPoint([0, 408, 528]), m = T.centre();
+            sc.scrollTop += c[1] - m[1];
+            sc.scrollLeft += c[0] - m[0];
+          };
+          /** Moves fingers from `from` ([[x, y], ...]) to `to` in n steps, a frame after each (section 15's; section 22 reused the name). */
+          T.fdrag = async (from, to, n) => {
+            const at = (i, s) => [from[i][0] + (to[i][0] - from[i][0]) * s / n, from[i][1] + (to[i][1] - from[i][1]) * s / n];
+            from.forEach(([x, y], i) => T.finger('pointerdown', 101 + i, x, y));
+            for (let s = 1; s <= n; s++) {
+              from.forEach((_, i) => T.finger('pointermove', 101 + i, ...at(i, s)));
+              await T.frame();
+            }
+            to.forEach(([x, y], i) => T.finger('pointerup', 101 + i, x, y));
+          };
+          T.rs = () => view.rulerState;
+          /** Client point of the ruler's centre line `along` page px from its centre (plus `off` page px along the normal). */
+          T.onRuler = (along, off = 0) => {
+            const s = T.rs(), a = s.angle * Math.PI / 180, d = [Math.cos(a), -Math.sin(a)], n = [Math.sin(a), Math.cos(a)];
+            return T.screenPoint([s.page, s.cx + d[0] * along + n[0] * off, s.cy + d[1] * along + n[1] * off]);
+          };
+          /** The largest angle (degrees) between the line at `angle` and the direction from the first point to each point 100+ px away. */
+          T.angErr = (pts, angle) => {
+            let worst = 0;
+            for (const q of pts) {
+              const dx = q.x - pts[0].x, dy = q.y - pts[0].y;
+              if (Math.hypot(dx, dy) < 100) continue;
+              let d = Math.abs(((Math.atan2(-dy, dx) * 180 / Math.PI - angle) % 180 + 360) % 180);
+              worst = Math.max(worst, Math.min(d, 180 - d));
+            }
+            return worst;
+          };
+          T.lastStroke = i => { const s = view.store.page(view.store.slots[i]).strokes; return s[s.length - 1]; };
+          const btn = T.tb('.nb-ink-ruler');
+          const out = { label: btn.getAttribute('aria-label'), disabled: btn.disabled, tool0: view.pen.tool };
+          btn.click();
+          await T.sleep(50);
+          out.onByButton = [view.rulerOn, btn.getAttribute('aria-pressed'), !!T.pages()[0].querySelector('.nb-ink-ruler-layer'), view.pen.tool];
+          const layer = T.pages()[0].querySelector('.nb-ink-ruler-layer');
+          out.drawn = T.rl().draws > 0;
+          const c = layer.querySelector('canvas'), d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+          let n = 0;
+          for (let k = 3; k < d.length; k += 4) if (d[k] > 0) n++;
+          out.canvasInk = n;
+          out.label0 = layer.querySelector('.nb-ink-ruler-angle').textContent;
+          btn.click();
+          out.offByButton = [view.rulerOn, btn.getAttribute('aria-pressed'), !!T.pages()[0].querySelector('.nb-ink-ruler-layer')];
+          const shown = commands['toggle-ruler'].checkCallback(true);
+          commands['toggle-ruler'].checkCallback(false);
+          out.onByCommand = [shown, view.rulerOn, !!T.pages()[0].querySelector('.nb-ink-ruler-layer'), btn.getAttribute('aria-pressed')];
+          commands['toggle-ruler'].checkCallback(false);
+          out.offByCommand = view.rulerOn;
+          commands['toggle-ruler'].checkCallback(false);
+          out.state = T.rs();
+          return out;
+        }""")
+        print('ruler: toggle:', r)
+        check('ruler: the toolbar button is enabled ("Ruler") and toggles the ruler over the current page; the pen stays the tool',
+              r['label'] == 'Ruler' and not r['disabled'] and r['onByButton'] == [True, 'true', True, 'pen'] and r['offByButton'] == [False, 'false', False], r)
+        check('ruler: the "Toggle ruler" command turns it on and off', r['onByCommand'] == [True, True, True, 'true'] and r['offByCommand'] is False, r)
+        check('ruler: drawn (bar, edges, ticks) with its angle label, at 0°', r['drawn'] and r['canvasInk'] > 20000 and r['label0'] == '0°'
+              and r['state']['on'] and r['state']['page'] == 0 and r['state']['angle'] == 0, r)
+
+        r = ev("""async () => {
+          const sc = T.sc(), s0 = T.rs(), top0 = sc.scrollTop, left0 = sc.scrollLeft, g0 = view.stats.nav.gestures;
+          const k = T.pages()[0].getBoundingClientRect().width / 816;
+          // One finger on the bar, 150 px right of the centre, dragged 40 px right and 30 px down (CSS).
+          const a = T.onRuler(150), hit = document.elementFromPoint(...a).className;
+          await T.fdrag([a], [[a[0] + 40, a[1] + 30]], 8);
+          const s1 = T.rs();
+          const moved = [s1.cx - s0.cx, s1.cy - s0.cy].map(v => Math.round(v * k * 10) / 10);
+          const panned = [sc.scrollTop - top0, sc.scrollLeft - left0, view.stats.nav.gestures - g0];
+          // Two fingers on the bar either side of the centre, turned 29° counter-clockwise: snaps to 30.
+          const turn = async (deg, from = 0) => {
+            const s = T.rs(), c = T.screenPoint([0, s.cx, s.cy]);
+            const at = (d, sign) => { const r = (from + d) * Math.PI / 180; return [c[0] + sign * 150 * k * Math.cos(r), c[1] - sign * 150 * k * Math.sin(r)]; };
+            await T.fdrag([at(0, -1), at(0, 1)], [at(deg, -1), at(deg, 1)], 10);
+            return T.rs();
+          };
+          const s2 = await turn(29);
+          const centreKept = Math.hypot(s2.cx - s1.cx, s2.cy - s1.cy);
+          const s3 = await turn(-8, 30);  // 22°: not near a multiple of 15
+          const s4 = await turn(-21, 22); // 1° snaps to 0°
+          const panned2 = [sc.scrollTop - top0, sc.scrollLeft - left0, view.stats.nav.gestures - g0];
+          // One finger on the ruler and one beside it (off the bar) also turn it.
+          const s = T.rs(), c = T.screenPoint([0, s.cx, s.cy]);
+          const p1 = [c[0] - 150 * k, c[1]], p2 = [c[0] + 150 * k, c[1] + 120 * k];
+          const hit2 = document.elementFromPoint(...p2).className;
+          const r2 = 45 * Math.PI / 180, rot = ([x, y]) => [c[0] + (x - c[0]) * Math.cos(r2) + (y - c[1]) * Math.sin(r2), c[1] - (x - c[0]) * Math.sin(r2) + (y - c[1]) * Math.cos(r2)];
+          const b0 = Math.atan2(-(p2[1] - p1[1]), p2[0] - p1[0]) * 180 / Math.PI;
+          await T.fdrag([p1, p2], [rot(p1), rot(p2)], 10);
+          const s5 = T.rs();
+          const panned3 = [sc.scrollTop - top0, sc.scrollLeft - left0, view.stats.nav.gestures - g0];
+          view.setRulerAngle(0);
+          // A finger off the ruler pans as usual.
+          const off = T.onRuler(0, 250);
+          const hitOff = document.elementFromPoint(...off).className;
+          await T.fdrag([off], [[off[0], off[1] - 150]], 8);
+          await T.settle();
+          const pannedOff = sc.scrollTop - top0;
+          return { hit, moved, panned, s2: s2.angle, centreKept, s3: s3.angle, s4: s4.angle, panned2, hit2, s5: s5.angle, b0, panned3, hitOff, pannedOff,
+            label: T.rl().label.textContent };
+        }""")
+        print('ruler: fingers:', r)
+        check('ruler: one finger on the bar moves it with the finger (40, 30 CSS px)', 'nb-ink-ruler-bar' in r['hit'] and r['moved'] == [40, 30], r)
+        check('ruler: two fingers turn it; 29° snaps to 30°, 22° stays, 1° snaps to 0°; turning about its centre keeps it there',
+              r['s2'] == 30 and abs(r['s3'] - 22) < 0.05 and r['s4'] == 0 and r['centreKept'] < 0.01, r)
+        check('ruler: one finger on it and one beside it turn it too (45°)', 'nb-ink-ruler-bar' not in r['hit2'] and r['s5'] == 45, r)
+        check('ruler: fingers on the ruler never pan the view', r['panned'] == [0, 0, 0] and r['panned2'] == [0, 0, 0] and r['panned3'] == [0, 0, 0], r)
+        check('ruler: a finger off the ruler pans', 'nb-ink-ruler-bar' not in r['hitOff'] and r['pannedOff'] > 100, r)
+
+        r = ev("""async () => {
+          T.sc().scrollTop = 0;
+          await T.sleep(50);
+          const label = T.rl().label;
+          label.click();
+          const input = T.pages()[0].querySelector('.nb-ink-ruler-input');
+          const opened = !!input && document.activeElement === input;
+          input.value = '30';
+          input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+          const typed = T.rs().angle, closed = !T.pages()[0].querySelector('.nb-ink-ruler-input'), text = label.textContent;
+          // A bad value changes nothing.
+          label.click();
+          const i2 = T.pages()[0].querySelector('.nb-ink-ruler-input');
+          i2.value = '400';
+          i2.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+          const bad = T.rs().angle;
+          // From the pen's picker too.
+          const pk = T.picker();
+          const pin = pk.querySelector('.nb-ink-ruler-angle-input');
+          const shown = pin ? pin.value : null;
+          pin.value = '12.5';
+          pin.dispatchEvent(new Event('change', { bubbles: true }));
+          const fromPicker = T.rs().angle;
+          pk.querySelector('.nb-ink-ruler-unit[data-unit="in"]').click();
+          const unit = view.rulerUnit;
+          pk.querySelector('.nb-ink-ruler-unit[data-unit="cm"]').click();
+          view.toolbar.closePicker();
+          view.setRulerAngle(30);
+          return { opened, typed, closed, text, bad, shown, fromPicker, unit, after: view.rulerUnit };
+        }""")
+        check('ruler: tapping the angle opens an input; typing 30 sets 30°', r['opened'] and r['typed'] == 30 and r['closed'] and r['text'] == '30°', r)
+        check('ruler: an angle over 360 is ignored', r['bad'] == 30, r)
+        check('ruler: the pen picker shows the angle and sets it, and switches cm / in', r['shown'] == '30' and r['fromPicker'] == 12.5 and r['unit'] == 'in' and r['after'] == 'cm', r)
+
+        r = ev("""async () => {
+          const out = {};
+          for (const z of [0.5, 1, 4]) {
+            view.setZoom(z);
+            await T.sleep(120);
+            // Page 0's centre in the middle of the view (as far as it scrolls), the ruler's centre on it.
+            T.middle();
+            await T.sleep(50);
+            view.setRulerCentre(408, 528);
+            view.setRulerAngle(30);
+            await T.frame();
+            const k = T.pages()[0].getBoundingClientRect().width / 816;
+            // From 8 CSS px outside the edge, 100 page px back along it (60 at 400%, to stay in view), to as far forward, 6 CSS px inside, with a wobble.
+            const half = z === 4 ? 60 : 100;
+            const e = 36 + 8 / k, pts = [];
+            for (let j = 0; j <= 40; j++) {
+              const u = j / 40;
+              pts.push(T.onRuler(half * (2 * u - 1), 36 + (8 - 14 * u + 3 * Math.sin(j)) / k));
+            }
+            let label = null;
+            const res = await T.rpen(pts, { id: 70, between: j => { if (j === 30) { const l = T.rl().length; label = l.style.display !== 'none' ? l.textContent : null; } } });
+            const st = T.lastStroke(res.i);
+            const d = st.points.map(q => Math.abs((q.x - T.rs().cx) * Math.sin(Math.PI / 6) + (q.y - T.rs().cy) * Math.cos(Math.PI / 6) - 36));
+            out[z] = { page: res.i, ruled: view.input.lastRuled, n: st.points.length, err: T.angErr(st.points, 30), off: Math.max(...d),
+              ps: new Set(st.points.map(q => q.p)).size, label, after: T.rl().length.style.display };
+          }
+          // A stroke starting 40 CSS px from the edge is an ordinary stroke.
+          view.resetZoom();
+          await T.sleep(120);
+          T.middle();
+          await T.sleep(50);
+          view.setRulerCentre(408, 528);
+          await T.frame();
+          const k = T.pages()[0].getBoundingClientRect().width / 816, pts = [];
+          for (let j = 0; j <= 40; j++) pts.push(T.onRuler(-100 + 5 * j, 36 + (40 + 10 * Math.sin(j / 4)) / k));
+          const res = await T.penAt(pts, { id: 71 });
+          const st = T.lastStroke(res.i);
+          out.far = { ruled: view.input.lastRuled, landed: T.landed(res.i, res.expected), err: T.angErr(st.points, 30) };
+          return out;
+        }""")
+        for z in ('0.5', '1', '4'):
+            print(f'ruler: zoom {z}:', r[z])
+        print('ruler: 40 px away:', r['far'])
+        check('ruler: a pen stroke starting near the edge is stored on it at 30° ± 0.1° at 50%, 100% and 400%',
+              all(r[z]['ruled'] and r[z]['page'] == 0 and r[z]['n'] > 20 and r[z]['err'] <= 0.1 and r[z]['off'] <= 0.1 for z in ('0.5', '1', '4')), r)
+        check('ruler: the ruled stroke keeps its pressure', all(r[z]['ps'] > 5 for z in ('0.5', '1', '4')), r)
+        check('ruler: its length is shown while drawing (cm) and hidden after', all((r[z]['label'] or '').endswith(' cm') and r[z]['after'] == 'none' for z in ('0.5', '1', '4')), r)
+        check('ruler: a stroke starting 40 px from the edge is untouched', not r['far']['ruled'] and r['far']['landed'] >= 0 and r['far']['landed'] <= 0.06 and r['far']['err'] > 1, r)
+
+        r = ev("""async () => {
+          view.setRulerAngle(0);
+          T.middle();
+          await T.sleep(50);
+          view.setRulerCentre(408, 528);
+          await T.frame();
+          const L = 10 / 2.54 * 96, pts = [];
+          for (let j = 0; j <= 50; j++) pts.push(T.onRuler(-L / 2 + L * j / 50, 36 + 0.4 * Math.sin(j)));
+          pts.push(pts[50]);  // one more move, so the label after the last real one is seen
+          let label = null;
+          const res = await T.penAt(pts, { id: 72, between: j => { if (j === 51) label = T.rl().length.textContent; } });
+          const st = T.lastStroke(res.i), a = st.points[0], b = st.points[st.points.length - 1];
+          const mm = Math.hypot(b.x - a.x, b.y - a.y) / 96 * 25.4;
+          view.setRulerUnit('in');
+          T.rl().showLength({ x: 100, y: 100 }, L);
+          const inch = T.rl().length.textContent;
+          T.rl().showLength(null);
+          view.setRulerUnit('cm');
+          return { mm, label, inch };
+        }""")
+        print('ruler: 10 cm line:', r)
+        check('ruler: a 10 cm ruled line is stored 10 cm ± 0.5 mm long, labelled 10.0 cm while drawn', abs(r['mm'] - 100) <= 0.5 and r['label'] in ('9.9 cm', '10.0 cm'), r)
+        check('ruler: in inches the label reads 3.94 in', r['inch'] == '3.94 in', r)
+
+        r = ev("""async () => {
+          const s0 = T.rs(), sc = T.sc();
+          const place = () => { const b = T.rl().bar.getBoundingClientRect(), s = T.rs(), c = T.screenPoint([s.page, s.cx, s.cy]);
+            return Math.hypot((b.left + b.right) / 2 - c[0], (b.top + b.bottom) / 2 - c[1]); };
+          const before = place();
+          sc.scrollTop += 120;
+          await T.sleep(80);
+          const scrolled = [T.rs(), place()];
+          view.setZoom(2);
+          await T.sleep(150);
+          const zoomed = [T.rs(), place()];
+          view.resetZoom();
+          await T.sleep(150);
+          // Toggling off and on keeps it where it was (same page).
+          view.toggleRuler(); view.toggleRuler();
+          return { s0, before, scrolled, zoomed, again: T.rs() };
+        }""")
+        same = lambda a, b: all(abs(a[k] - b[k]) < 1e-9 for k in ('cx', 'cy', 'angle', 'page'))
+        check('ruler: it keeps its page position across a scroll and a zoom, and is drawn there',
+              same(r['scrolled'][0], r['s0']) and same(r['zoomed'][0], r['s0']) and r['before'] < 1 and r['scrolled'][1] < 1 and r['zoomed'][1] < 1, r)
+        check('ruler: turned off and on, it comes back where it was', same(r['again'], r['s0']), r)
+
+        ev("async () => { view.setRulerAngle(30); await T.frame(); }")
+        page.locator('#leaf').screenshot(path=os.path.join(OUT, 'ruler_light.png'))
+        ev("async () => { document.body.classList.add('theme-dark'); app.workspace.trigger('css-change'); await T.sleep(150); }")
+        page.locator('#leaf').screenshot(path=os.path.join(OUT, 'ruler_dark.png'))
+        ev("async () => { document.body.classList.remove('theme-dark'); app.workspace.trigger('css-change'); await T.sleep(50); }")
+
+        r = ev("""async () => {
+          await view.save();
+          const path = view.store.slots[0].path, text = fs.get(path), pg = ink.readPage(text), model = view.store.page(view.store.slots[0]);
+          const same = ink.writePage(model) === text;
+          const md = fs.get('Ruler.md');
+          await app.workspace.activeLeaf.detach();
+          await T.sleep(50);
+          const leaf = app.workspace.getLeaf('tab');
+          await leaf.openFile(app.vault.getFile('Ruler.md'));
+          await T.sleep(150);
+          return { strokes: pg.strokes.length, same, mentions: /ruler/i.test(text) || /ruler/i.test(md.replace(/Ruler/g, '')), reopened: [view.rulerOn, !!view.rulerState, !!T.pages()[0].querySelector('.nb-ink-ruler-layer')],
+            tools: pg.strokes.map(s => s.tool) };
+        }""")
+        check('ruler: not saved: the page file is exactly its strokes (ordinary pen strokes), with no trace of the ruler',
+              r['strokes'] == 5 and r['same'] and not r['mentions'] and all(t == 'pen' for t in r['tools']), r)
+        check('ruler: reopening the note shows no ruler', r['reopened'] == [False, False, False], r)
+        # ======== end of 26. The ruler (#20) ========
 
         # --- unload removes the patch
         r = ev("""async () => {
