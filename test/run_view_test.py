@@ -8,7 +8,8 @@
 # eraser, and zoom and finger navigation (#9: pans with momentum, pinches, zoom commands and
 # Ctrl+wheel, strokes at 50-400%, the pen during finger gestures, touch rules, frame times on
 # the 20-page note, bitmap memory at 400%), renaming or moving notes and page folders (#26), and PDF import (#14:
-# pages, the copied PDF, the embedded JPEG, sharp renders at 200%, writing on PDF pages), and images on pages (#12).
+# pages, the copied PDF, the embedded JPEG, sharp renders at 200%, writing on PDF pages), and images on pages (#12),
+# and the pen at zoom (#52: viewport bitmaps, the live stroke against the committed one, seams, pointercancel).
 # Run by `npm test`; screenshots land in test/out/.
 # Exits non-zero if any check fails.
 import os, subprocess, sys, time
@@ -5172,6 +5173,381 @@ try:
                   all(w >= 36 and h >= 36 for w, h in f['sizes']) and 160 <= f['panelW'] <= 180 and f['margin'] == f"{f['panelW']}px" and f['pageLeft'] >= 0, f)
         ev("async () => { for (let i = 0; i < 5; i++) view.undo(); view.togglePagesPanel(false); if (view.rulerOn) commands['toggle-ruler'].checkCallback(false); await T.sleep(50); }")
         # ======== end of 29. The Pencil on every control (#53) and the Pages panel's buttons (#55) ========
+
+        # ======== 30. The pen at zoom and across a pointercancel (#52) ========
+        # Viewport bitmaps: past iOS's 16M-pixel canvas limit (a Letter page from about 200% at
+        # device pixel ratio 2) a page's bitmap and the pen's overlays cover a band around the
+        # viewport at full device resolution instead of the whole page at a lowered one. The
+        # comparisons are made on screenshots (device pixels, what the owner sees): the committed
+        # ink against an ideal rendering of the same outline at the screen's resolution, the live
+        # stroke against the committed one, and the live stroke along its centre line. Then a
+        # pointercancel mid-stroke followed by a pointerdown of the pen near where it left off.
+        import base64 as b64mod
+
+        def shot(clip):
+            """A screenshot of `clip` (client CSS px) as a base64 PNG, in device pixels."""
+            return b64mod.b64encode(page.screenshot(clip=clip)).decode()
+
+        def save_shot(name, data):
+            with open(os.path.join(OUT, name), 'wb') as f:
+                f.write(b64mod.b64decode(data))
+
+        ev("""async () => {
+          T.sc = () => view.contentEl.querySelector('.nb-ink-scroll');
+          T.frame = () => new Promise(r => requestAnimationFrame(r));
+          /** Puts page point (x, y) of page i at the middle of the view at zoom z, and lets the bitmaps settle. */
+          T.z52at = async (z, i, x, y, wait = 500) => {
+            if (view.zoom !== z) view.setZoom(z);
+            const sc = T.sc(), el = T.pages()[i], k = el.offsetWidth / view.store.slots[i].size.width;
+            sc.scrollLeft = Math.round(el.offsetLeft + x * k - sc.clientWidth / 2);
+            sc.scrollTop = Math.round(el.offsetTop + y * k - sc.clientHeight / 2);
+            await T.sleep(wait);
+          };
+          /** Client point of page point (x, y) of page i, in the Pencil's 0.5 CSS px steps. */
+          T.z52client = (i, x, y) => {
+            const r = T.pages()[i].getBoundingClientRect(), k = r.width / view.store.slots[i].size.width;
+            return [Math.round((r.left + x * k) * 2) / 2, Math.round((r.top + y * k) * 2) / 2];
+          };
+          /** Pen events through client points (4 coalesced samples per move, a frame after each); `up` false leaves it in progress. */
+          T.z52pen = async (pts, { id = 91, type = 'pen', up = true } = {}) => {
+            const el = document.elementFromPoint(pts[0][0], pts[0][1]);
+            const init = ([x, y], b = 1) => ({ pointerId: id, pointerType: type, pressure: 0.2, clientX: x, clientY: y, bubbles: true, cancelable: true, button: 0, buttons: b });
+            el.dispatchEvent(new PointerEvent('pointerdown', init(pts[0])));
+            for (let j = 1; j < pts.length; j += 4) {
+              const group = pts.slice(j, j + 4);
+              el.dispatchEvent(new PointerEvent('pointermove', { ...init(group[group.length - 1]), coalescedEvents: group.map(q => new PointerEvent('pointermove', init(q))) }));
+              await T.frame();
+            }
+            if (up) el.dispatchEvent(new PointerEvent('pointerup', init(pts[pts.length - 1], 0)));
+            await T.frame();
+          };
+          /** Lifts the pen of T.z52pen (id 91) at the last of T.z52pts. */
+          T.z52up = async () => {
+            const q = T.z52pts[T.z52pts.length - 1];
+            T.pages()[1].dispatchEvent(new PointerEvent('pointerup', { pointerId: 91, pointerType: 'pen', clientX: q[0], clientY: q[1], bubbles: true, cancelable: true, button: 0, buttons: 0 }));
+            await T.frame();
+            await T.frame();
+          };
+          /** Decodes a base64 PNG into ImageData. */
+          T.z52img = async b64 => {
+            const img = new Image();
+            img.src = 'data:image/png;base64,' + b64;
+            await img.decode();
+            const c = document.createElement('canvas');
+            c.width = img.naturalWidth; c.height = img.naturalHeight;
+            const g = c.getContext('2d');
+            g.drawImage(img, 0, 0);
+            return g.getImageData(0, 0, c.width, c.height);
+          };
+          /**
+           * Compares a screenshot of `clip` with the outline `d` (page px of page i) filled in the
+           * default ink on white at the screen's resolution: `err` is the summed grey difference
+           * over the ideal's ink (0: identical); `soft` the partially covered pixels per inked
+           * column (about 2 for a crisp stroke, one per edge; more when an upscaled bitmap blurs it).
+           */
+          T.z52ideal = async (b64, clip, i, d) => {
+            const a = await T.z52img(b64), W = a.width, H = a.height, R = W / clip.width;
+            const r = T.pages()[i].getBoundingClientRect(), k = r.width / view.store.slots[i].size.width;
+            const c = document.createElement('canvas');
+            c.width = W; c.height = H;
+            const g = c.getContext('2d');
+            g.fillStyle = '#fff'; g.fillRect(0, 0, W, H);
+            g.setTransform(R * k, 0, 0, R * k, R * (r.left - clip.x), R * (r.top - clip.y));
+            g.fillStyle = '#1f1f1f';
+            g.fill(new Path2D(d));
+            const b = g.getImageData(0, 0, W, H);
+            let diff = 0, ink = 0, partial = 0, cols = 0;
+            for (let x = 0; x < W; x++) {
+              let any = false;
+              for (let y = 0; y < H; y++) {
+                const q = (y * W + x) * 4, v = a.data[q], w = b.data[q];
+                diff += Math.abs(v - w); ink += 255 - w;
+                if (v > 40 && v < 215) partial++;
+                if (v < 128) any = true;
+              }
+              if (any) cols++;
+            }
+            return { err: diff / Math.max(1, ink), soft: partial / Math.max(1, cols), px: [W, H] };
+          };
+          /** Pixels that differ clearly (over 64 grey levels) between two screenshots of the same clip; `ink` counts the second's ink. */
+          T.z52diff = async (b64a, b64b) => {
+            const a = await T.z52img(b64a), b = await T.z52img(b64b), W = a.width, H = a.height;
+            let diff = 0, ink = 0, worst = 0;
+            const cell = new Map();
+            for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+              const q = (y * W + x) * 4;
+              if (b.data[q] < 128) ink++;
+              if (Math.abs(a.data[q] - b.data[q]) > 64) {
+                diff++;
+                const key = `${x >> 5},${y >> 5}`, n = (cell.get(key) || 0) + 1;
+                cell.set(key, n);
+                worst = Math.max(worst, n);
+              }
+            }
+            return { diff, ink, frac: diff / Math.max(1, ink), worstCell: worst };
+          };
+          /** The screen rect (client CSS px, whole px) of page box [x0, y0, x1, y1] (page px) of page i, clipped to the view. */
+          T.z52clip = (i, [x0, y0, x1, y1]) => {
+            const r = T.pages()[i].getBoundingClientRect(), k = r.width / view.store.slots[i].size.width, v = T.sc().getBoundingClientRect();
+            const a = Math.max(v.left, Math.floor(r.left + x0 * k)), b = Math.max(v.top, Math.floor(r.top + y0 * k));
+            const c = Math.min(v.left + T.sc().clientWidth, Math.ceil(r.left + x1 * k)), d = Math.min(v.top + T.sc().clientHeight, Math.ceil(r.top + y1 * k));
+            return { x: a, y: b, width: c - a, height: d - b };
+          };
+          /** The page bitmaps: page, device size, device px per CSS px, whether a band. */
+          T.z52maps = () => view.pages.map((pv, i) => pv.bitmap && { i, w: pv.bitmap.canvas.width, h: pv.bitmap.canvas.height,
+            ratio: pv.bitmap.canvas.width / pv.bitmap.canvas.getBoundingClientRect().width, band: pv.bitmap.canvas.classList.contains('nb-ink-band') }).filter(Boolean);
+          /** Whether page i's bitmap covers the part of it the view shows. */
+          T.z52covers = i => {
+            const c = view.pages[i].bitmap?.canvas, sc = T.sc(), vr = sc.getBoundingClientRect(), pr = T.pages()[i].getBoundingClientRect();
+            const vis = [Math.max(vr.left, pr.left), Math.max(vr.top, pr.top), Math.min(vr.left + sc.clientWidth, pr.right), Math.min(vr.top + sc.clientHeight, pr.bottom)];
+            if (vis[3] <= vis[1] || vis[2] <= vis[0]) return true; // not visible
+            const cr = c && c.getBoundingClientRect();
+            return !!cr && cr.left <= vis[0] + 0.01 && cr.top <= vis[1] + 0.01 && cr.right >= vis[2] - 0.01 && cr.bottom >= vis[3] - 0.01;
+          };
+          await p.createInkNote('Zoom52', '', 'letter', 'blank');
+          await T.sleep(150);
+          view.addPage();
+          await T.sleep(150);
+        }""")
+
+        # (1) viewport bitmaps: whole pages at 100%, bands at full device resolution at 400%
+        r = ev("""async () => {
+          await T.z52at(1, 0, 408, 300);
+          const at1 = T.z52maps(), px1 = T.z52maps().reduce((n, m) => n + m.w * m.h, 0);
+          await T.z52at(4, 0, 300, 300);
+          const c = view.pages[0].bitmap.canvas;
+          return { at1, px1, at4: T.z52maps(), px4: T.z52maps().reduce((n, m) => n + m.w * m.h, 0), stat: view.stats.bitmapPixels, covers: T.z52covers(0), dpr: devicePixelRatio,
+                   ratio4: c.width / c.getBoundingClientRect().width, whole4: [T.pages()[0].offsetWidth, T.pages()[0].offsetHeight] };
+        }""")
+        print(f"viewport bitmaps: at 100% {r['at1']}; at 400% (page {r['whole4'][0]}x{r['whole4'][1]} CSS px) {r['at4']}, "
+              f"{r['px4'] / 1e6:.1f}M device px ({r['px4'] * 4 / 1e6:.0f} MB) in bitmaps")
+        check('viewport bitmaps: at 100% every page bitmap is the whole page (no band)', r['at1'] and all(not m['band'] for m in r['at1']), r['at1'])
+        check('viewport bitmaps: at 400% the visible page has a band bitmap at full device resolution (device px per CSS px = 2) covering the visible part',
+              r['ratio4'] == r['dpr'] == 2 and r['covers'] and any(m['band'] and m['i'] == 0 for m in r['at4']), r)
+        check('viewport bitmaps: each within 16M pixels, and less in all than two whole capped pages (32M)',
+              all(m['w'] * m['h'] <= 16_000_000 for m in r['at4']) and r['px4'] < 32_000_000, r)
+
+        # (2) the committed ink at 400% against an ideal rendering at the screen's resolution, and the same at 100%
+        r = ev("""async () => {
+          await T.z52at(1, 0, 408, 300);
+          const pts = [];
+          for (let j = 0; j <= 400; j++) pts.push(T.z52client(0, 250 + 0.35 * j, 300 - 30 * Math.sin(Math.PI * j / 400) + 0.3 * Math.sin(j * 1.7)));
+          const n = view.store.page(view.store.slots[0]).strokes.length;
+          await T.z52pen(pts);
+          const s = view.store.page(view.store.slots[0]).strokes;
+          T.z52stroke = s[s.length - 1];
+          return { added: s.length - n };
+        }""")
+        smooth = {}
+        for z in (1, 4):
+            ev(f"async () => {{ await T.z52at({z}, 0, 320, 285); }}")
+            clip = ev("() => T.z52clip(0, [300, 262, 340, 305])")
+            sb = shot(clip)
+            smooth[z] = ev("async ([b, clip]) => T.z52ideal(b, clip, 0, ink.strokePath(T.z52stroke))", [sb, clip])
+            save_shot(f'zoom52_committed_{z * 100}.png', sb)
+        print(f"committed ink against an ideal rendering at the screen's resolution (grey error over the ink; partial pixels per column): "
+              f"100% {smooth[1]['err']:.3f} / {smooth[1]['soft']:.2f}, 400% {smooth[4]['err']:.3f} / {smooth[4]['soft']:.2f}")
+        check('zoom 400%: the committed ink is drawn at the screen resolution (grey error against the ideal under 0.05, as at 100%)',
+              smooth[4]['err'] < 0.05 and smooth[1]['err'] < 0.05, smooth)
+        check('zoom 400%: its edges are as crisp as at 100% (partial pixels per column within 0.5 of it)',
+              smooth[4]['soft'] < smooth[1]['soft'] + 0.5, smooth)
+
+        # (3) live against committed while writing at 100% and at 400%: screenshots mid-stroke and after the lift
+        lvc = {}
+        for z, y0 in ((1, 305), (4, 345)):
+            ev(f"async () => {{ await T.z52at({z}, 1, 290, {y0 - 5}); }}")
+            ev(f"""() => {{
+              T.z52pts = [];
+              // handwriting-like loops, 180 samples in the Pencil's 0.5 CSS px steps
+              for (let j = 0; j < 180; j++) {{ const a = j / 14; T.z52pts.push(T.z52client(1, 262 + j * 0.28 - 7 * Math.sin(a), {y0} - 9 * (1 - Math.cos(a)))); }}
+            }}""")
+            ev("async () => { await T.z52pen(T.z52pts, { up: false }); await T.frame(); }")
+            clip = ev(f"() => T.z52clip(1, [250, {y0 - 25}, 320, {y0 + 8}])")
+            sa = shot(clip)
+            ev("() => T.z52up()")
+            sb = shot(clip)
+            lvc[z] = ev("async ([a, b]) => T.z52diff(a, b)", [sa, sb])
+            save_shot(f'zoom52_live_{z * 100}.png', sa)
+            save_shot(f'zoom52_committed_loops_{z * 100}.png', sb)
+        print(f"live against committed (pixels changing by over 64 grey levels at the lift, over the committed ink): "
+              f"100% {lvc[1]['diff']} of {lvc[1]['ink']} ({100 * lvc[1]['frac']:.2f}%), 400% {lvc[4]['diff']} of {lvc[4]['ink']} ({100 * lvc[4]['frac']:.2f}%)")
+        check('live vs committed: lifting the pen changes under 1% of the ink pixels at 100% and at 400% (the live stroke is drawn from the refit points)',
+              lvc[1]['frac'] < 0.01 and lvc[4]['frac'] < 0.01, lvc)
+
+        # (4) seams between the frozen head and the live tail at 400%: a long stroke (several frozen
+        # pieces), mid-stroke, scanned along its centre line on the overlays, and against the committed stroke
+        ev("async () => { await T.z52at(4, 1, 330, 500); }")
+        ev("""() => {
+          T.z52pts = [];
+          for (let j = 0; j < 900; j++) { const a = j / 16; T.z52pts.push(T.z52client(1, 250 + j * 0.17 - 8 * Math.sin(a), 510 - 10 * (1 - Math.cos(a)))); }
+        }""")
+        r = ev("""async () => {
+          await T.z52pen(T.z52pts, { up: false });
+          await T.frame();
+          const inp = view.input, live = inp.live;
+          // the overlays' alpha (head over tail) at each drawn point, where the ink is solid
+          const pts = inp.livePoints || live.trace.points;
+          const read = c => c.getContext('2d').getImageData(0, 0, c.width, c.height);
+          const head = read(inp.head), tail = read(inp.tail), hr = inp.head.getBoundingClientRect(), W = inp.head.width;
+          const pr = T.pages()[1].getBoundingClientRect(), k = pr.width / view.store.slots[1].size.width, R = W / hr.width;
+          let min = 255, gaps = 0, n = 0;
+          for (const q of pts) {
+            const x = Math.round((pr.left + q.x * k - hr.left) * R), y = Math.round((pr.top + q.y * k - hr.top) * R);
+            if (x < 0 || y < 0 || x >= W || y >= inp.head.height) continue;
+            const o = (y * W + x) * 4 + 3, a = 255 - (255 - head.data[o]) * (255 - tail.data[o]) / 255;
+            n++; min = Math.min(min, a); if (a < 250) gaps++;
+          }
+          return { pieces: live.pieces, points: live.trace.points.length, n, min, gaps, ratio: R };
+        }""")
+        clip = ev("() => T.z52clip(1, [235, 490, 420, 525])")
+        sa = shot(clip)
+        ev("() => T.z52up()")
+        sb = shot(clip)
+        seam = ev("async ([a, b]) => T.z52diff(a, b)", [sa, sb])
+        save_shot('zoom52_seam_live.png', sa)
+        save_shot('zoom52_seam_committed.png', sb)
+        print(f"long stroke at 400%: {r['points']} points, {r['pieces']} frozen pieces; overlays at {r['ratio']:.2f} device px per CSS px; "
+              f"centre line alpha min {r['min']:.0f} over {r['n']} points ({r['gaps']} under 250); "
+              f"live vs committed {seam['diff']} of {seam['ink']} px ({100 * seam['frac']:.2f}%), worst 32 px cell {seam['worstCell']}")
+        check('seam: at 400% the live overlays are at full device resolution and the centre line is solid ink across the frozen pieces (no gap)',
+              r['pieces'] >= 3 and r['ratio'] == 2 and r['n'] > 500 and r['gaps'] == 0, r)
+        # Each frozen piece restarts perfect-freehand's outline, so its edges may differ from the
+        # committed outline's by a device pixel (thin slivers, about 1% of the ink; 1.6% before #52,
+        # when the live stroke was also unrefitted); a gap or a doubled band would be a cluster.
+        check('seam: ... and the long live stroke matches the committed one (under 2% of ink pixels differ, no cluster over 128 px)',
+              seam['frac'] < 0.02 and seam['worstCell'] <= 128, seam)
+        r = ev("""async () => {
+          view.setTool('highlighter');
+          T.z52pts = T.z52pts.map(([x, y]) => [x, y + 120]);
+          await T.z52pen(T.z52pts, { up: false });
+          await T.frame();
+          const inp = view.input, live = inp.live, c = inp.tail, d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+          const cr = c.getBoundingClientRect(), R = c.width / cr.width;
+          let min = 255, max = 0, n = 0;
+          const odd = [];
+          for (const [j, [x0, y0]] of T.z52pts.entries()) {
+            if (j < 3 || j > T.z52pts.length - 4) continue; // the flat ends: half covered at their very edge
+            const x = Math.round((x0 - cr.left) * R), y = Math.round((y0 - cr.top) * R);
+            if (x < 0 || y < 0 || x >= c.width || y >= c.height) continue;
+            const a = d[(y * c.width + x) * 4 + 3];
+            if (a !== 102 && odd.length < 10) odd.push([j, a]);
+            min = Math.min(min, a); max = Math.max(max, a); n++;
+          }
+          const pieces = live.pieces;
+          await T.z52up();
+          view.setTool('pen');
+          return { min, max, n, pieces, ratio: R, odd };
+        }""")
+        print('long highlighter stroke at 400%, tail overlay alpha along the centre:', r)
+        check('seam: a long highlighter stroke at 400% is composited once: the same alpha (102) along its centre, across the frozen pieces',
+              r['pieces'] >= 3 and r['min'] == r['max'] == 102 and r['n'] > 500, r)
+
+        # (5) a pointercancel mid-stroke: the pen coming back near where it left within 300 ms continues the stroke
+        r = ev("""async () => {
+          await T.z52at(1, 0, 408, 600);
+          const strokes = () => view.store.page(view.store.slots[0]).strokes;
+          const fire = (el, type, id, [x, y], b = 1) => { const e = new PointerEvent(type, { pointerId: id, pointerType: 'pen', pressure: 0.2, clientX: x, clientY: y, bubbles: true, cancelable: true, button: 0, buttons: b }); el.dispatchEvent(e); return e; };
+          const line = (y, x0, x1) => Array.from({ length: 40 }, (_, j) => T.z52client(0, x0 + (x1 - x0) * j / 39, y));
+          const out = {}, st = view.stats.pen, c0 = st.cancels || 0, j0 = st.joined || 0, n0 = strokes().length;
+          // (a) cancel, then the pen down 6 px from the last sample 100 ms later, outside the view (the body)
+          let a = line(600, 200, 400), b = line(600, 402, 600);
+          await T.z52pen(a, { id: 31, up: false });
+          fire(T.pages()[0], 'pointercancel', 31, a[a.length - 1], 0);
+          const suspended = view.input.suspended, drawing = view.input.drawing, liveThen = T.liveInk();
+          await T.sleep(100);
+          const down = fire(document.body, 'pointerdown', 32, [a[a.length - 1][0] + 6, a[a.length - 1][1]]);
+          for (const q of b) { fire(document.body, 'pointermove', 32, q); await T.frame(); }
+          fire(document.body, 'pointerup', 32, b[b.length - 1], 0);
+          await T.frame();
+          const s = strokes();
+          out.joined = { added: s.length - n0, suspended, drawing, liveThen: liveThen > 500, taken: down.defaultPrevented,
+            xs: [s[s.length - 1].points[0].x, Math.max(...s[s.length - 1].points.map(q => q.x))], points: s[s.length - 1].points.length,
+            cancels: (st.cancels || 0) - c0, continued: (st.joined || 0) - j0, labels: view.history.labels.slice(-1), live: T.liveInk() };
+          // (b) cancel, then nothing for 400 ms: the stroke ends as it was; a later pen down is a new stroke
+          const n1 = strokes().length, cancelled = st.cancelled;
+          a = line(650, 200, 400);
+          await T.z52pen(a, { id: 33, up: false });
+          fire(T.pages()[0], 'pointercancel', 33, a[a.length - 1], 0);
+          await T.sleep(400);
+          const afterGrace = { added: strokes().length - n1, cancelled: st.cancelled - cancelled, suspended: view.input.suspended, live: T.liveInk() };
+          await T.z52pen(line(650, 402, 600), { id: 34 });
+          out.expired = { ...afterGrace, total: strokes().length - n1 };
+          // (c) cancel, then a pen down 60 px away within the grace: the first ends, the second is a new stroke
+          const n2 = strokes().length;
+          a = line(700, 200, 400);
+          await T.z52pen(a, { id: 35, up: false });
+          fire(T.pages()[0], 'pointercancel', 35, a[a.length - 1], 0);
+          await T.sleep(50);
+          await T.z52pen(line(700, 400 + 60 / (T.pages()[0].offsetWidth / 816), 600), { id: 36 });
+          out.far = { added: strokes().length - n2 };
+          // (d) the eraser: cancel and come back continues the same erase (one undo step)
+          const n3 = strokes().length, depth = view.history.labels.length;
+          view.setTool('eraser');
+          view.setEraser({ mode: 'stroke' });
+          const e1 = [[250, 590], [250, 610]].map(([x, y]) => T.z52client(0, x, y)), e2 = T.z52client(0, 250, 710);
+          fire(T.pages()[0], 'pointerdown', 37, e1[0]);
+          await T.frame();
+          fire(T.pages()[0], 'pointermove', 37, e1[1]);
+          await T.frame();
+          fire(T.pages()[0], 'pointercancel', 37, e1[1], 0);
+          await T.sleep(80);
+          fire(T.pages()[0], 'pointerdown', 38, [e1[1][0], e1[1][1] + 10]);
+          for (let j = 1; j <= 8; j++) { fire(T.pages()[0], 'pointermove', 38, [e2[0], e1[1][1] + 10 + (e2[1] - e1[1][1] - 10) * j / 8]); await T.frame(); }
+          fire(T.pages()[0], 'pointerup', 38, e2, 0);
+          await T.frame();
+          out.eraser = { removed: n3 - strokes().length, steps: view.history.labels.length - depth, label: view.history.labels.slice(-1) };
+          view.setTool('pen');
+          view.toggleStats();
+          out.text = view.contentEl.querySelector('.nb-ink-stats').textContent;
+          view.toggleStats();
+          return out;
+        }""")
+        print('pointercancel:', {k: v for k, v in r.items() if k != 'text'})
+        j = r['joined']
+        check('cancel: a pointercancel keeps the stroke open (still drawn) for the grace period',
+              j['suspended'] and j['drawing'] and j['liveThen'], j)
+        check('cancel: a pen down within 300 ms and 24 px of the last sample continues it: one stroke, one undo step, all points',
+              j['added'] == 1 and j['taken'] and j['xs'][0] < 201 and j['xs'][1] > 599 and j['points'] >= 80 and j['labels'] == ['Add stroke'] and j['live'] == 0, j)
+        check('cancel: counted in the pen stats (1 pointercancel, 1 continued)', j['cancels'] == 1 and j['continued'] == 1, j)
+        check('cancel: with no pen down within 300 ms the stroke ends as it was (kept, counted as cancelled); the next is a new stroke',
+              r['expired']['added'] == 1 and r['expired']['cancelled'] == 1 and not r['expired']['suspended'] and r['expired']['live'] == 0 and r['expired']['total'] == 2, r['expired'])
+        check('cancel: a pen down farther than 24 px within the grace ends the stroke and starts a new one', r['far']['added'] == 2, r['far'])
+        check('cancel: an erase continues across a pointercancel too (one undo step)', r['eraser']['removed'] >= 2 and r['eraser']['steps'] == 1, r['eraser'])
+        check('cancel: the stats overlay shows the pointercancels and those continued', 'pointercancels 4, continued 2' in r['text'], r['text'])
+
+        # (6) panning at 400%: the band follows the view; ink outside the first band is drawn when scrolled to
+        r = ev("""async () => {
+          await T.z52at(4, 0, 300, 300);
+          const rebands = view.stats.rebands || 0;
+          const sc = T.sc(), cx = sc.getBoundingClientRect().left + sc.clientWidth / 2, cy = sc.getBoundingClientRect().top + sc.clientHeight / 2;
+          const finger = (type, x, y) => sc.dispatchEvent(new PointerEvent(type, { pointerId: 141, pointerType: 'touch', isPrimary: true, clientX: x, clientY: y,
+            bubbles: true, cancelable: true, button: type === 'pointermove' ? -1 : 0, buttons: type === 'pointerup' ? 0 : 1 }));
+          let y = cy;
+          finger('pointerdown', cx, y);
+          const frames = [];
+          let last = performance.now();
+          for (let s = 0; s < 60; s++) { y -= 20; finger('pointermove', cx, y); await T.frame(); const now = performance.now(); frames.push(now - last); last = now; }
+          finger('pointerup', cx, y);
+          const t0 = performance.now();
+          while (view.nav.active && performance.now() - t0 < 6000) await T.sleep(50);
+          await T.sleep(400);
+          frames.sort((a, b) => a - b);
+          return { moved: sc.scrollTop, rebands: (view.stats.rebands || 0) - rebands, covers: T.z52covers(0) && T.z52covers(1),
+                   median: frames[frames.length >> 1], max: frames[frames.length - 1], over32: frames.filter(f => f > 32).length };
+        }""")
+        print(f"pan at 400% (1,200 px over 60 frames): {r['rebands']} bands redrawn; frames median {r['median']:.1f} ms, max {r['max']:.1f} ms, over 32 ms {r['over32']}")
+        check('pan at 400%: the band bitmap follows the view (redrawn over frames) and covers what is visible after the pan',
+              r['rebands'] >= 1 and r['covers'], r)
+        clip = ev("""async () => {
+          // the loops written at 100% on page 1, viewed at 400% after coming from far away
+          await T.z52at(4, 1, 700, 1000);
+          await T.z52at(4, 1, 290, 300, 800);
+          return T.z52clip(1, [250, 280, 320, 310]);
+        }""")
+        n = ev("async (b) => { const a = await T.z52img(b); let n = 0; for (let k = 0; k < a.data.length; k += 4) if (a.data[k] < 128) n++; return n; }", shot(clip))
+        check('pan at 400%: ink scrolled into view is drawn in the band', n > 2000, n)
+        ev("() => view.setZoom(1)")
+        # ======== end of 30. The pen at zoom and across a pointercancel (#52) ========
 
         # --- unload removes the patch
         r = ev("""async () => {
