@@ -382,12 +382,13 @@
 
 /*
  * The Pages panel (#17): a narrow column of thumbnails on the left, below the toolbar. The pages
- * area narrows beside it (margin), so no page is hidden under it, in portrait too. Fingers
- * scroll it natively (touch-action: pan-y) until a long press picks a thumbnail up; then the
- * panel prevents touchmoves and a drag reorders.
+ * area narrows beside it (margin), so no page is hidden under it, in portrait too. Fingers and
+ * the Pencil scroll it natively (touch-action: pan-y) until a long press picks a thumbnail up;
+ * then the panel prevents touchmoves and a drag reorders. Its width (#55) is the 128 px
+ * thumbnail box plus room for a desktop scrollbar and some air.
  */
 .nb-ink-view {
-  --nb-pages-width: 148px;
+  --nb-pages-width: 172px;
 }
 
 .nb-pages-panel {
@@ -483,23 +484,57 @@
   font-weight: 600;
 }
 
-/* Insert after, Duplicate, Delete: only on the current page's thumbnail. */
+/*
+ * Insert after, Duplicate, Delete, Move up, Move down (#55): 36 px icon buttons, only on the
+ * current page's thumbnail, three to a row within the thumbnail's width, so they never overflow
+ * the panel whatever the font or Obsidian's button padding (sizes here are px, not em).
+ */
 .nb-pages-actions {
   display: none;
-  gap: 3px;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 4px;
+  width: 120px;
+  max-width: 100%;
+  margin-top: 2px;
 }
 
 .nb-pages-thumb.is-current .nb-pages-actions {
   display: flex;
 }
 
-.nb-pages-action {
-  height: 26px;
-  min-width: 26px;
+.nb-ink-view .nb-pages-actions button.nb-pages-action {
+  flex: none;
+  box-sizing: border-box;
+  width: 36px;
+  min-width: 36px;
+  height: 36px;
+  min-height: 36px;
   margin: 0;
-  padding: 0 6px;
-  font-size: var(--font-ui-smaller, 11px);
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s, 6px);
+  background: var(--interactive-normal, transparent);
   box-shadow: none;
+  color: var(--icon-color, var(--text-muted, #666));
+  cursor: pointer;
+}
+
+.nb-ink-view .nb-pages-actions button.nb-pages-action:hover {
+  background: var(--background-modifier-hover, rgba(0, 0, 0, 0.06));
+}
+
+.nb-ink-view .nb-pages-actions button.nb-pages-action:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.nb-ink-view .nb-pages-actions button.nb-pages-action svg {
+  width: 18px;
+  height: 18px;
 }
 
 .nb-pages-drop {

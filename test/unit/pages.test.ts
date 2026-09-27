@@ -170,3 +170,21 @@ test('pages: deleting a page with unsaved strokes, then undoing, writes the stro
   assert.equal(readPage(files.files.get(`dir/lec/${ids[1]}.svg`)!).strokes.length, 7);
   assert.deepEqual(saved(files), ids);
 });
+
+test('pages: the panel\'s one-step moves (#55) are movePage(id, i - 1) and movePage(id, i + 1); each undoes by moving back', async () => {
+  const { files, store, ids } = await openNote(3);
+  files.written.length = 0;
+  // Move up: the last page one place up.
+  assert.equal(store.movePage(ids[2], 1), 2);
+  assert.deepEqual(store.index.pages, [ids[0], ids[2], ids[1]]);
+  // Move down: the first page one place down.
+  assert.equal(store.movePage(ids[0], 1), 0);
+  assert.deepEqual(store.index.pages, [ids[2], ids[0], ids[1]]);
+  // Undo (the view moves the page back to where movePage said it was).
+  store.movePage(ids[0], 0);
+  store.movePage(ids[2], 2);
+  assert.deepEqual(store.index.pages, ids);
+  await store.flush();
+  assert.deepEqual(saved(files), ids);
+  assert.deepEqual(files.written, ['dir/lec.md'], 'only the index is written');
+});

@@ -1,9 +1,10 @@
 // The Pages panel (#17): a narrow column of page thumbnails beside the pages of the ink view.
 // A tap on a thumbnail scrolls to its page; the current page's thumbnail is highlighted and has
-// small buttons to insert a page after it, duplicate it or delete it; a long press (or, with a
-// mouse, a drag) picks a thumbnail up and dragging it reorders the pages. Fingers and the Pencil
-// scroll the panel natively until a thumbnail is picked up (#53: the view's stylus blocker is on
-// the pages scroller only, so the panel sees the Pencil as a finger).
+// icon buttons (#55: 36 px, in rows of three under the thumbnail, never wider than the panel) to
+// insert a page after it, duplicate it, delete it, or move it up or down one place; a long press
+// (or, with a mouse, a drag) picks a thumbnail up and dragging it reorders the pages. Fingers
+// and the Pencil scroll the panel natively until a thumbnail is picked up (#53: the view's
+// stylus blocker is on the pages scroller only, so the panel sees the Pencil as a finger).
 //
 // Thumbnails must not slow the editor: they are drawn only while the panel is open, only when
 // in view (IntersectionObserver), at most THUMBS_PER_FRAME per frame, copied from the page's
@@ -12,6 +13,7 @@
 // last changed. The panel knows nothing of the store: the view hands it a PagesHost.
 import type { Page, Size } from '../format/page';
 import type { Template } from '../format/template';
+import { setIcon } from 'obsidian';
 import { PageBitmap, warmOutlines, type Theme } from './renderer';
 
 /** Thumbnail width in CSS px. */
@@ -26,6 +28,31 @@ const THUMB_BUDGET = 6;
 export const LIFT_MS = 350;
 /** Movement that makes a press a scroll (or, with a mouse, a drag), in CSS px. */
 const SLOP = 8;
+
+/** A per-page action under the current page's thumbnail (#55). */
+export interface PageAction {
+  /** Class suffix: `nb-pages-<id>`. */
+  id: 'insert' | 'duplicate' | 'delete' | 'up' | 'down';
+  /** Obsidian icon name. */
+  icon: string;
+  label: string;
+}
+
+/** The actions, in the order shown: the everyday ones first, then the one-step moves. */
+export const PAGE_ACTIONS: readonly PageAction[] = [
+  { id: 'insert', icon: 'plus', label: 'Insert page after' },
+  { id: 'duplicate', icon: 'copy', label: 'Duplicate page' },
+  { id: 'delete', icon: 'trash', label: 'Delete page' },
+  { id: 'up', icon: 'arrow-up', label: 'Move page up' },
+  { id: 'down', icon: 'arrow-down', label: 'Move page down' },
+];
+
+/** Whether an action applies to page `index` of `count` (the first can't move up, the last down). */
+export function actionEnabled(id: PageAction['id'], index: number, count: number): boolean {
+  if (id === 'up') return index > 0;
+  if (id === 'down') return index < count - 1;
+  return true;
+}
 
 /** A page as the panel sees it. */
 export interface PanelPage {
@@ -185,9 +212,13 @@ export class PagesPanel {
   setCurrent(index: number, reveal = true) {
     if (!this.open || index === this.currentIndex) return;
     this.currentIndex = index;
+    const n = this.thumbs.length;
     this.thumbs.forEach((t, i) => {
       t.el.toggleClass('is-current', i === index);
       t.el.setAttribute('aria-current', i === index ? 'page' : 'false');
+      if (i === index) t.el.querySelectorAll<HTMLButtonElement>('.nb-pages-action').forEach(b => {
+        b.disabled = !actionEnabled(b.dataset.action as PageAction['id'], i, n);
+      });
     });
     const t = this.thumbs[index];
     if (reveal && t && !this.press) {
@@ -230,20 +261,33 @@ export class PagesPanel {
     const num = el.createDiv({ cls: 'nb-pages-num' });
     const actions = el.createDiv({ cls: 'nb-pages-actions' });
     const t: Thumb = { id, el, frame, num, bitmap: null, stale: true, visible: false, timer: 0, pending: null };
-    const action = (cls: string, text: string, label: string, fn: (i: number) => void) => {
-      const b = actions.createEl('button', { cls: `nb-pages-action ${cls}`, text, attr: { 'aria-label': label, type: 'button' } });
+    for (const a of PAGE_ACTIONS) {
+      const b = actions.createEl('button', { cls: `nb-ink-control nb-pages-action nb-pages-${a.id}`,
+        attr: { type: 'button', 'aria-label': a.label, title: a.label, 'data-action': a.id } });
+      setIcon(b, a.icon);
       b.addEventListener('click', e => {
         e.stopPropagation();
         const i = this.thumbs.indexOf(t);
-        if (i >= 0) fn(i);
+        if (i >= 0) this.act(a.id, i);
       });
-    };
-    action('nb-pages-insert', '+', 'Insert page after', i => this.host.insertAfter(i));
-    action('nb-pages-duplicate', 'Copy', 'Duplicate page', i => this.host.duplicate(i));
-    action('nb-pages-delete', 'Delete', 'Delete page', i => this.host.remove(i));
+    }
     this.byEl.set(el, t);
     this.observer?.observe(el);
     return t;
+  }
+
+  /** Runs a per-page action on page `i`; a move keeps the page current so its buttons follow it. */
+  private act(id: PageAction['id'], i: number) {
+    const h = this.host;
+    if (!actionEnabled(id, i, this.thumbs.length)) return;
+    if (id === 'insert') h.insertAfter(i);
+    else if (id === 'duplicate') h.duplicate(i);
+    else if (id === 'delete') h.remove(i);
+    else {
+      const to = id === 'up' ? i - 1 : i + 1;
+      h.move(i, to);
+      h.go(to);
+    }
   }
 
   private size(t: Thumb, size: Size) {
