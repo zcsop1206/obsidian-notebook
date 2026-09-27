@@ -9,7 +9,7 @@ from playwright.sync_api import sync_playwright
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, 'out')
 os.makedirs(OUT, exist_ok=True)
-port = 8765
+port = int(os.environ.get('NB_TEST_PORT_BASE', 8765))  # NB_TEST_PORT_BASE lets parallel checkouts run the tests at once
 srv = subprocess.Popen([sys.executable, '-m', 'http.server', str(port)], cwd=os.path.dirname(HERE), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 time.sleep(1)
 
