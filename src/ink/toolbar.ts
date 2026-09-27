@@ -1,6 +1,6 @@
 // The ink toolbar (#10): one row of icon buttons at the top of the ink view, wrapping onto a
-// second row when narrow. Left: the tools (pen, highlighter, eraser, lasso #11; ruler #20
-// as a disabled placeholder). Middle: the favourite presets. Right: undo, redo, add page, page
+// second row when narrow. Left: the tools (pen, highlighter, eraser, lasso #11) and the ruler
+// toggle (#20: shows or hides the ruler; not a tool, the pen stays in use). Middle: the favourite presets. Right: undo, redo, add page, page
 // settings and the Pages panel toggle. Tapping the tool already in use opens its picker (a
 // popover under the button, see picker.ts); so every tool, preset and picker option is at most
 // two taps away. The toolbar knows nothing of the store: the view hands it a ToolbarHost.
@@ -41,6 +41,9 @@ export interface ToolbarHost extends PickerHost {
   paperLabel(): string | null;
   pagesOpen(): boolean;
   togglePages(): void;
+  /** The ruler (#20): whether it's shown, and showing or hiding it. */
+  rulerOn?(): boolean;
+  toggleRuler?(): void;
 }
 
 type Tool = { tool: ToolKind; icon: string; label: string };
@@ -72,7 +75,8 @@ export class Toolbar {
       b.dataset.tool = t.tool;
       b.setAttribute('aria-haspopup', 'dialog');
     }
-    this.button(tools, 'nb-ink-ruler', 'ruler', 'Ruler: coming in #20', () => {}).disabled = true;
+    const ruler = this.button(tools, 'nb-ink-ruler', 'ruler', 'Ruler', () => host.toggleRuler?.());
+    ruler.setAttribute('aria-pressed', 'false');
 
     const presets = group('nb-ink-presets');
     for (let i = 0; i < MAX_PRESETS; i++) {
@@ -129,6 +133,7 @@ export class Toolbar {
     set('.nb-ink-add-page', h.hasNote());
     set('.nb-ink-page-settings', h.hasNote());
     this.mark(this.el.querySelector<HTMLElement>('.nb-ink-pages-toggle')!, h.pagesOpen());
+    this.mark(this.el.querySelector<HTMLElement>('.nb-ink-ruler')!, !!h.rulerOn?.());
     // A command or a preset switched tools: the other tool's picker no longer applies.
     const open = this.picker.openFor;
     if (open && open !== 'page' && open !== pen.tool) this.picker.close();

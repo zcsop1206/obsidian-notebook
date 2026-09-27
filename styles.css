@@ -619,3 +619,84 @@
 .nb-image-file-input {
   display: none;
 }
+
+/* ---- The ruler (#20): a layer over one page; the bar takes fingers, the Pencil draws through it. */
+.nb-ink-ruler-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.nb-ink-page .nb-ink-ruler-layer canvas.nb-ink-ruler-canvas {
+  pointer-events: none;
+}
+
+.nb-ink-ruler-bar {
+  position: absolute;
+  pointer-events: auto;
+  touch-action: none;
+  background: transparent;
+}
+
+.nb-ink-ruler-angle,
+.nb-ink-ruler-input,
+.nb-ink-ruler-length {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  pointer-events: auto;
+  touch-action: none;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+
+.nb-ink-ruler-angle {
+  min-width: 44px;
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 1px solid rgba(30, 90, 200, 0.6);
+  background: rgba(255, 255, 255, 0.92);
+  color: #1b3f86;
+  box-shadow: none;
+}
+
+.nb-ink-ruler-input {
+  width: 72px;
+  padding: 4px 6px;
+  border: 1px solid rgba(30, 90, 200, 0.9);
+  background: #ffffff;
+  color: #111111;
+}
+
+.nb-ink-ruler-length {
+  transform: translate(12px, -140%);
+  pointer-events: none;
+  padding: 3px 6px;
+  background: rgba(30, 40, 60, 0.85);
+  color: #ffffff;
+}
+
+.theme-dark .nb-ink-ruler-angle {
+  border-color: rgba(150, 190, 255, 0.6);
+  background: rgba(30, 34, 42, 0.92);
+  color: #cfe0ff;
+}
+
+.theme-dark .nb-ink-ruler-input {
+  border-color: rgba(150, 190, 255, 0.9);
+  background: #1e1e1e;
+  color: #eeeeee;
+}
+
+.theme-dark .nb-ink-ruler-length {
+  background: rgba(220, 228, 245, 0.9);
+  color: #111111;
+}
+
+.nb-ink-ruler-angle-input {
+  width: 72px;
+}
