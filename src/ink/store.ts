@@ -762,4 +762,20 @@ export class NoteStore {
     });
     return out;
   }
+
+  /**
+   * Replaces a stroke by `replacements` (the partial eraser's remnants, #15, possibly none) at
+   * its index, so drawing order is kept, and marks the page changed. Returns the removed stroke
+   * with its index (to undo with removeStrokes and insertStrokes), or null if it isn't there.
+   */
+  replaceStroke(pageId: string, id: string, replacements: Stroke[]): { index: number; stroke: Stroke } | null {
+    const slot = this.slots.find(s => s.id === pageId);
+    const page = slot && this.page(slot);
+    const index = page ? page.strokes.findIndex(s => s.id === id) : -1;
+    if (!slot || !page || index < 0) return null;
+    const stroke = page.strokes[index];
+    page.strokes.splice(index, 1, ...replacements);
+    this.changed(slot);
+    return { index, stroke };
+  }
 }

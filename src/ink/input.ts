@@ -46,12 +46,13 @@
 // Erasing (#7): with the eraser selected, a pen or mouse drag draws nothing. Its samples are
 // filtered as above and collected by the handlers; once per animation frame the host is given
 // the path since the last frame (from the last sample already tested), hit-tests it and
-// removes what it touches, redrawing a page at most once. A circle of the hit radius follows
+// removes what it touches (whole strokes, or in partial mode, #15, the parts under the
+// eraser), redrawing a page at most once. A circle of the hit radius follows
 // the pointer on the tail overlay and is cleared on release. Touches never erase.
 import { strokePath } from '../format/outline';
 import { roundP, roundXY, type HighlighterStroke, type PenStroke, type Point, type Size } from '../format/page';
 import { fmt, median, yn } from '../debug/util';
-import type { EraserSettings, PenSettings } from './pen';
+import type { EraserMode, EraserSettings, PenSettings } from './pen';
 import { HIGHLIGHT_ALPHA, pixelRatio } from './renderer';
 
 /** Samples closer than this (page px) to the previous one are dropped. */
@@ -96,11 +97,21 @@ export interface PenHost {
   eraser(): Readonly<EraserSettings>;
   /**
    * The eraser moved along `path` (page px; one point for a tap) on a page since the last call:
-   * remove the strokes within `radius` of it. Called at most once per animation frame; `start`
+   * erase what is within `radius` of it, in `mode` (whole strokes, or only the parts under the
+   * eraser), and add what was done to `tally`. Called at most once per animation frame; `start`
    * is true for the first call of a gesture. `path` is reused afterwards, so don't keep it.
-   * Returns how many strokes were removed.
    */
-  erase(target: PageTarget, path: readonly Point[], radius: number, start: boolean): number;
+  erase(target: PageTarget, path: readonly Point[], radius: number, start: boolean, mode: EraserMode, tally: EraseTally): void;
+}
+
+/** What an erase gesture did. */
+export interface EraseTally {
+  /** Strokes removed whole (in partial mode, strokes all under the eraser). */
+  removed: number;
+  /** Strokes cut (partial mode): each is replaced by its remnants. */
+  split: number;
+  /** Strokes left by the cuts. */
+  remnants: number;
 }
 
 // ---- sampling (pure; tested with fake events)
@@ -367,6 +378,8 @@ interface Erasing {
   map: PageMap;
   /** Hit radius, page px. */
   radius: number;
+  mode: EraserMode;
+  tally: EraseTally;
   /** Samples not yet tested, after the last one tested (points[0], once `sent`). */
   trace: Trace;
   sent: boolean;
@@ -375,7 +388,6 @@ interface Erasing {
   events: number;
   handler: number[];
   frames: number[];
-  removed: number;
 }
 
 /** One erase gesture's input measurements. */
@@ -392,8 +404,12 @@ export interface EraseStats {
   frames: number;
   frameMs: number;
   frameMaxMs: number;
-  /** Strokes removed. */
+  mode: EraserMode;
+  /** Strokes removed whole. */
   removed: number;
+  /** Strokes cut, and the strokes left by the cuts (partial mode). */
+  split: number;
+  remnants: number;
 }
 
 type Listen = <K extends keyof HTMLElementEventMap>(type: K, fn: (e: HTMLElementEventMap[K]) => void, options?: AddEventListenerOptions) => void;
@@ -705,7 +721,8 @@ export class PenInput {
   private eraseDown(e: PointerEvent, target: PageTarget, rect: DOMRect) {
     const er: Erasing = this.erasing = {
       pointerId: e.pointerId, pointerType: e.pointerType, target, map: pageMap(rect, target.size, e.timeStamp),
-      radius: this.host.eraser().size, trace: newTrace(), sent: false, cursor: null, events: 0, handler: [], frames: [], removed: 0,
+      radius: this.host.eraser().size, mode: this.host.eraser().mode, tally: { removed: 0, split: 0, remnants: 0 },
+      trace: newTrace(), sent: false, cursor: null, events: 0, handler: [], frames: [],
     };
     addSamples(er.trace, [e], er.map);
     this.schedule();
@@ -740,7 +757,8 @@ export class PenInput {
       frames: er.frames.length,
       frameMs: median(er.frames),
       frameMaxMs: er.frames.length ? Math.max(...er.frames) : NaN,
-      removed: er.removed,
+      mode: er.mode,
+      ...er.tally,
     };
     this.host.statsChanged();
   }
@@ -749,7 +767,7 @@ export class PenInput {
   private eraseStep(er: Erasing) {
     const pts = er.trace.points;
     if (pts.length > 1 || (pts.length === 1 && !er.sent)) {
-      er.removed += this.host.erase(er.target, pts, er.radius, !er.sent);
+      this.host.erase(er.target, pts, er.radius, !er.sent, er.mode, er.tally);
       er.sent = true;
       pts.splice(0, pts.length - 1);
     }

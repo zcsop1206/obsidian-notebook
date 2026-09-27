@@ -59,6 +59,9 @@ export default class NotebookPlugin extends Plugin {
     // The eraser (#7), also until #10's toolbar.
     this.addInkCommand('tool-eraser', 'Use the eraser', view => view.setTool('eraser'));
     this.addInkCommand('eraser-next-size', 'Next eraser size', view => view.nextEraserSize());
+    // The partial eraser (#15): erase only the part under the eraser, or whole strokes.
+    this.addInkCommand('eraser-partial', 'Use the partial eraser', view => { view.setTool('eraser'); view.setEraser({ mode: 'partial' }); });
+    this.addInkCommand('eraser-stroke', 'Use the stroke eraser', view => { view.setTool('eraser'); view.setEraser({ mode: 'stroke' }); });
     // Zoom (#9) in 25% steps, for desktop and the tests; on the iPad, pinch.
     this.addInkCommand('zoom-in', 'Zoom in', view => view.zoomIn());
     this.addInkCommand('zoom-out', 'Zoom out', view => view.zoomOut());

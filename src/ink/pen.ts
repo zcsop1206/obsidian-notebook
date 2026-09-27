@@ -148,24 +148,36 @@ export function nextHighlighterSize(size: number): number {
 
 // ---- the eraser (#7)
 
-/** The stroke eraser's settings. Held next to the pen by the ink view. */
+/**
+ * How the eraser erases: `partial` (#15, the default, as Notability's) cuts out only the part of
+ * a stroke under it and keeps the rest; `stroke` (#7) removes every stroke it touches whole.
+ */
+export type EraserMode = 'partial' | 'stroke';
+export const ERASER_MODES: readonly EraserMode[] = ['partial', 'stroke'];
+
+/** The eraser's settings. Held next to the pen by the ink view. */
 export interface EraserSettings {
   /** Hit radius in page px: one of ERASER_SIZES. */
   size: number;
+  mode: EraserMode;
 }
 
 /** The two eraser sizes: hit radius in page px. */
 export const ERASER_SIZES: readonly number[] = Object.freeze([6, 14]);
 
-export const DEFAULT_ERASER: Readonly<EraserSettings> = Object.freeze({ size: 6 });
+export const DEFAULT_ERASER: Readonly<EraserSettings> = Object.freeze({ size: 6, mode: 'partial' });
 
-/** The settings with `change` applied. A size goes to the nearest preset; a non-number throws. */
+/** The settings with `change` applied. A size goes to the nearest preset; a non-number or an unknown mode throws. */
 export function withEraser(eraser: Readonly<EraserSettings>, change: Partial<EraserSettings>): EraserSettings {
   const next = { ...eraser };
   if (change.size !== undefined) {
     const n = change.size;
     if (typeof n !== 'number' || !Number.isFinite(n)) throw new Error(`Invalid eraser size ${JSON.stringify(n)} (expected ${ERASER_SIZES.join(' or ')})`);
     next.size = ERASER_SIZES.reduce((best, s) => (Math.abs(s - n) < Math.abs(best - n) ? s : best));
+  }
+  if (change.mode !== undefined) {
+    if (!ERASER_MODES.includes(change.mode)) throw new Error(`Invalid eraser mode ${JSON.stringify(change.mode)} (expected ${ERASER_MODES.join(' or ')})`);
+    next.mode = change.mode;
   }
   return next;
 }
