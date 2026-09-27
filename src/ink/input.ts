@@ -62,10 +62,17 @@
 // never lasso. Like every gesture, these follow their pointer on the window until it lifts.
 // A lasso that never moves more than LASSO_TAP_SLOP CSS px from where it went down is a tap:
 // it's given to the host's lassoTap, if it has one (#12: a tap on an image selects it).
+//
+// The ruler (#20): when the host shows a ruler (rulerEdge), a pen or highlighter stroke whose
+// pointerdown lands within EDGE_REACH CSS px of one of its edges is ruled: the edge is put on the
+// stroke's PageMap, and toPoint projects every sample (and the predicted tail) onto it before
+// rounding, so the live stroke and the stored one are the same straight line, with pressure and
+// times as sampled. While it's drawn the host is given its length once per frame (rulerMeasure).
 import { strokePath } from '../format/outline';
 import { roundP, roundXY, type HighlighterStroke, type PenStroke, type Point, type Size } from '../format/page';
 import { fmt, median, yn } from '../debug/util';
 import type { EraserMode, EraserSettings, PenSettings } from './pen';
+import { EDGE_REACH, projectOnto, type Edge } from './ruler';
 import { HIGHLIGHT_ALPHA, pixelRatio } from './renderer';
 
 /** A lasso gesture staying within this many CSS px of its start is a tap (#12). */
@@ -133,6 +140,13 @@ export interface PenHost {
   endSelectionDrag(cancelled: boolean): void;
   /** A tap with the lasso (no loop) at `point` (page px) on `target` (#12: selects an image there). */
   lassoTap?(target: PageTarget, point: Point): void;
+  /**
+   * The ruler (#20): the ruler edge within `reach` page px of `point` (page px, unrounded) on
+   * `target`, which a stroke starting there is drawn along, or null. Absent: no ruler.
+   */
+  rulerEdge?(target: PageTarget, point: { x: number; y: number }, reach: number): Edge | null;
+  /** A ruled stroke is drawn from `from` to `to` (page px); null when it ended. Once per frame. */
+  rulerMeasure?(target: PageTarget, from: Point | null, to: Point | null): void;
 }
 
 /** What a pointer going down grabs with the lasso: the selection's box, its corner handle, or nothing. */
@@ -173,6 +187,8 @@ export interface PageMap {
   sy: number;
   /** timeStamp of the first sample. */
   t0: number;
+  /** A ruled stroke's edge (#20): samples are projected onto it. */
+  edge?: Edge | null;
 }
 
 /** A stroke's real samples. */
@@ -193,9 +209,11 @@ export function pageMap(rect: DOMRect, size: Size, t0: number): PageMap {
 /** A sample in page px, rounded as the file stores it. The mouse has pressure 0.5. */
 export function toPoint(s: Sample, m: PageMap): Point {
   const p = s.pointerType === 'mouse' ? 0.5 : Math.min(1, Math.max(0, s.pressure || 0));
+  let x = (s.clientX - m.left) * m.sx, y = (s.clientY - m.top) * m.sy;
+  if (m.edge) ({ x, y } = projectOnto({ x, y }, m.edge));
   return {
-    x: roundXY((s.clientX - m.left) * m.sx),
-    y: roundXY((s.clientY - m.top) * m.sy),
+    x: roundXY(x),
+    y: roundXY(y),
     p: roundP(p),
     t: Math.max(0, Math.round(s.timeStamp - m.t0)),
   };
@@ -563,8 +581,10 @@ export class PenInput {
     this.head.style.visibility = style.tool === 'highlighter' ? 'hidden' : '';
     this.stats.coalesced = typeof e.getCoalescedEvents === 'function';
     this.stats.predicted = typeof e.getPredictedEvents === 'function';
+    const map = pageMap(rect, target.size, e.timeStamp);
+    map.edge = this.rulerEdge(target, map, e);
     const live: Live = this.live = {
-      pointerId: e.pointerId, pointerType: e.pointerType, target, map: pageMap(rect, target.size, e.timeStamp), pen,
+      pointerId: e.pointerId, pointerType: e.pointerType, target, map, pen,
       style, color: this.host.drawColor(style.color), trace: newTrace(), predicted: [], frozen: 0, pieces: 0,
       events: 0, handler: [], frames: [], maxPredicted: 0, tailBox: null, head: false,
     };
@@ -611,6 +631,7 @@ export class PenInput {
     cancelAnimationFrame(this.frame);
     this.frame = 0;
     const cancelled = e.type === 'pointercancel';
+    if (live.map.edge) this.host.rulerMeasure?.(live.target, null, null);
     this.record(live, cancelled);
     // A cancelled stroke (the system took the pointer) is kept, like a finished one.
     const { points } = live.trace;
@@ -656,6 +677,7 @@ export class PenInput {
       this.livePath = this.fill(ctx, live, tail);
     }
     live.tailBox = box(tail, live.style.size);
+    if (live.map.edge && pts.length) this.host.rulerMeasure?.(live.target, pts[0], pts[pts.length - 1]);
     live.frames.push(performance.now() - t0);
   }
 
@@ -769,7 +791,7 @@ export class PenInput {
     const live = this.live;
     if (!live) return;
     const rect = live.target.el.getBoundingClientRect();
-    live.map = pageMap(rect, live.target.size, live.map.t0);
+    live.map = { ...pageMap(rect, live.target.size, live.map.t0), edge: live.map.edge };
   }
 
   private clear() {
@@ -784,6 +806,7 @@ export class PenInput {
   /** Abandons a stroke in progress (the page it was on went away). */
   cancel() {
     this.untrack();
+    if (this.live?.map.edge) this.host.rulerMeasure?.(this.live.target, null, null);
     this.live = null;
     this.erasing = null;
     const la = this.lassoing;
@@ -875,6 +898,19 @@ export class PenInput {
       er.cursor = [p.x - m, p.y - m, p.x + m, p.y + m];
     }
     er.frames.push(performance.now() - t0);
+  }
+
+  // ---- the ruler (#20)
+
+  /** Whether the last pen or highlighter stroke started was ruled (for tests). */
+  lastRuled = false;
+
+  /** The edge a stroke going down with `e` is drawn along: within EDGE_REACH CSS px of the pointer, or null. */
+  private rulerEdge(target: PageTarget, map: PageMap, e: PointerEvent): Edge | null {
+    const at = { x: (e.clientX - map.left) * map.sx, y: (e.clientY - map.top) * map.sy };
+    const edge = this.host.rulerEdge?.(target, at, EDGE_REACH * map.sx) ?? null;
+    this.lastRuled = !!edge;
+    return edge;
   }
 
   // ---- the lasso (#11)
