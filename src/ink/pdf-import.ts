@@ -42,8 +42,9 @@ export async function importPdf(app: App, folder: string, name: string, pdfName:
     const pageFolder = normalizePath(dir + base);
     if (!(vault.getAbstractFileByPath(pageFolder) instanceof TFolder)) await vault.createFolder(pageFolder);
     const pdfFile = cleanName(stripPdf(pdfName)) + '.pdf';
-    const source = `${base}/${pdfFile}`;
-    await vault.createBinary(normalizePath(dir + source), bytes.slice(0));
+    // The source is relative to the page files' folder: the PDF sits beside the pages.
+    const source = pdfFile;
+    await vault.createBinary(normalizePath(`${pageFolder}/${pdfFile}`), bytes.slice(0));
     // Pages added later are blank at the note's paper size.
     const note = newNote(base, paper, 'blank');
     const total = doc.numPages;

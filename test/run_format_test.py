@@ -157,7 +157,7 @@ try:
           const image = c.toDataURL('image/jpeg', 0.85);
           const points = Array.from({ length: 40 }, (_, i) => ({ x: 100 + i * 10, y: 600, p: 0.5, t: i * 8 }));
           return ink.writePage({ id: 'p-0f0f0f', size: { width: 793.7, height: 1122.5 },
-            template: { kind: 'pdf', source: 'pdfnote/lecture.pdf', page: 1, image },
+            template: { kind: 'pdf', source: 'lecture.pdf', page: 1, image },
             strokes: [{ id: '0000beef', tool: 'pen', nib: 'uniform', color: '#000000', size: 6, points }] });
         }""")
         page.close()

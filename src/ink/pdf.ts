@@ -62,9 +62,9 @@ export async function renderPdfPage(page: PdfPageProxy, scale: number, maxPixels
   return canvas;
 }
 
-/** Joins a note's folder ('' for the root) and a pdf template's source. */
-export const pdfPath = (noteFolder: string, source: string) =>
-  normalizePath(noteFolder && noteFolder !== '/' ? `${noteFolder}/${source}` : source);
+/** Joins a page folder ('' for the root) and a pdf template's source. */
+export const pdfPath = (pageFolder: string, source: string) =>
+  normalizePath(pageFolder && pageFolder !== '/' ? `${pageFolder}/${source}` : source);
 
 const freeCanvas = (c: HTMLCanvasElement) => { c.width = c.height = 0; };
 
@@ -140,18 +140,11 @@ export class PdfPages {
   }
 
   /**
-   * The PDF's vault path: `source` from the note's folder, or, if nothing is there, the part of
-   * `source` after its first folder inside the note's page folder. `source` names the page folder
-   * as it was at import; renaming or moving the note (#26) moves the page folder, PDF included,
-   * without rewriting the pages' sources.
+   * The PDF's vault path: `source` from the note's page folder, where the page files are. A
+   * rename or move of the note (#26) moves the folder with the PDF in it, so this still holds.
    */
   resolve(note: PdfNote, source: string): string {
-    const dir = note.path.includes('/') ? note.path.slice(0, note.path.lastIndexOf('/')) : '';
-    const direct = pdfPath(dir, source);
-    const slash = source.indexOf('/');
-    if (this.vault.getFileByPath(direct) || slash < 0) return direct;
-    const moved = normalizePath(`${note.pages}/${source.slice(slash + 1)}`);
-    return this.vault.getFileByPath(moved) ? moved : direct;
+    return pdfPath(note.pages, source);
   }
 
   private async idle() {

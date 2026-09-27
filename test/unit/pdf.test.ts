@@ -10,10 +10,10 @@ import {
 
 // A 1×1 JPEG-ish payload: only its form matters to the format.
 const IMAGE = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJ+/8=';
-const PDF: PdfTemplate = { kind: 'pdf', source: 'lecture/lecture.pdf', page: 3, image: IMAGE };
+const PDF: PdfTemplate = { kind: 'pdf', source: 'lecture.pdf', page: 3, image: IMAGE };
 
 test('pdf template: parses in canonical key order; a missing image is empty', () => {
-  const got = parseTemplate({ image: IMAGE, page: 3, source: 'lecture/lecture.pdf', kind: 'pdf', extra: 1 });
+  const got = parseTemplate({ image: IMAGE, page: 3, source: 'lecture.pdf', kind: 'pdf', extra: 1 });
   assert.equal(JSON.stringify(got), JSON.stringify(PDF));
   assert.deepEqual(parseTemplate({ kind: 'pdf', source: 'a b/Q&A (1).pdf', page: 1 }), { kind: 'pdf', source: 'a b/Q&A (1).pdf', page: 1, image: '' });
   assert.deepEqual(parseTemplate({ ...PDF, image: 'data:image/png;base64,iVBORw0KGgo=' }).kind, 'pdf');
@@ -60,7 +60,7 @@ test('pdf template: points to CSS px at 96/72, to 0.1 px', () => {
   assert.equal(pointsToPx(792), 1056);
   assert.equal(pointsToPx(595.28), 793.7);
   assert.equal(pointsToPx(841.89), 1122.5);
-  assert.deepEqual(metadataTemplate(PDF), { kind: 'pdf', source: 'lecture/lecture.pdf', page: 3 });
+  assert.deepEqual(metadataTemplate(PDF), { kind: 'pdf', source: 'lecture.pdf', page: 3 });
   assert.deepEqual(metadataTemplate({ kind: 'grid', spacing: '5mm' }), { kind: 'grid', spacing: '5mm' });
 });
 
@@ -70,7 +70,7 @@ test('pdf page: the image is stored once, in the template layer, and read back f
   const svg = writePage(page);
   assert.equal(svg.split(IMAGE).length, 2, 'the image occurs exactly once');
   const meta = /<metadata><!\[CDATA\[([\s\S]*?)\]\]><\/metadata>/.exec(svg)![1];
-  assert.ok(meta.includes('"template":{"kind":"pdf","source":"lecture/lecture.pdf","page":3}'), meta.slice(0, 200));
+  assert.ok(meta.includes('"template":{"kind":"pdf","source":"lecture.pdf","page":3}'), meta.slice(0, 200));
   assert.ok(!meta.includes('base64'));
   assert.match(svg, /<g id="template">\n<image x="0" y="0" width="1122.5" height="793.7" preserveAspectRatio="none" href="data:image\/jpeg;base64,[^"]+"\/>\n<\/g>/);
   assert.match(svg, /viewBox="0 0 1122.5 793.7"/);
@@ -98,7 +98,7 @@ test('pdf page: a page whose image is missing or mangled still reads, with no im
 test('pdf page: bad pdf fields in the metadata are rejected', () => {
   const svg = writePage(newPage('p-0a1b2c', { width: 816, height: 1056 }, PDF));
   assert.throws(() => readPage(svg.replace('"page":3', '"page":0')), /pdf page 0/);
-  assert.throws(() => readPage(svg.replace('"source":"lecture/lecture.pdf"', '"source":"../x.pdf"')), /pdf source/);
+  assert.throws(() => readPage(svg.replace('"source":"lecture.pdf"', '"source":"../x.pdf"')), /pdf source/);
 });
 
 test('pdf page: default ink does not flip in dark mode; other pages keep the dark-mode style', () => {
