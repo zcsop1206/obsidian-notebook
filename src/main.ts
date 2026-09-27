@@ -13,7 +13,9 @@ import { importPdf, PdfNameModal, PdfSourceModal, type PdfChoice } from './ink/p
 import { PdfPages, type PdfNote } from './ink/pdf';
 import { setSharpPdfRenderer } from './ink/renderer';
 import type { PdfTemplate } from './format/template';
-import type { Paper } from './format/page';
+import type { NotePaper } from './format/page';
+import { addPdfTemplate, PdfTemplateModal } from './ink/pdf-template';
+import { setTemplateRegistry, TemplateRegistry } from './ink/templates';
 import { DEFAULT_SETTINGS, NotebookSettingTab, parseSettings, type NotebookSettings } from './settings';
 
 /**
@@ -28,6 +30,8 @@ export default class NotebookPlugin extends Plugin {
   settings: NotebookSettings = { ...DEFAULT_SETTINGS };
   /** Strokes copied with the lasso (#11), in memory, so they paste into any open note. */
   inkClipboard: InkClipboard | null = null;
+  /** PDF templates in the templates folder (#21). */
+  templates!: TemplateRegistry;
 
   async onload() {
     this.settings = parseSettings(await this.loadData());
@@ -102,6 +106,15 @@ export default class NotebookPlugin extends Plugin {
       setSharpPdfRenderer(null);
       pdfPages.destroy();
     });
+
+    // Sized templates and page embeds (#27), PDF templates (#21).
+    const templates = this.templates = new TemplateRegistry(this.app, () => this.settings.templatesFolder);
+    templates.watch(this);
+    setTemplateRegistry(templates);
+    this.register(() => setTemplateRegistry(null));
+    this.app.workspace.onLayoutReady(() => void templates.load());
+    this.addInkCommand('copy-page-embed', 'Copy embed for this page', view => void view.copyPageEmbed());
+    this.addCommand({ id: 'add-pdf-template', name: 'Add PDF template', callback: () => this.addPdfTemplate() });
 
     this.recorder = new Recorder(this);
     this.registerView(VIEW_TYPE_DEBUG, leaf => new DebugView(leaf, this));
@@ -189,6 +202,8 @@ export default class NotebookPlugin extends Plugin {
   /** Asks for a name, paper and template, then creates the note in the active file's folder and opens it. */
   newInkNote() {
     const { paper, template } = this.settings;
+    // The dialog lists the PDF templates loaded so far (the registry loads on layout ready and
+    // after each change to the templates folder).
     new NewNoteModal(this.app, { paper, template }, c => void this.createInkNote(c.name, undefined, c.paper, c.template)).open();
   }
 
@@ -196,7 +211,7 @@ export default class NotebookPlugin extends Plugin {
    * Creates an ink note with one page and opens it in a new tab; returns its path. The paper
    * and template (a template name) default to the settings.
    */
-  async createInkNote(name: string, folder = targetFolder(this.app), paper: Paper = this.settings.paper,
+  async createInkNote(name: string, folder = targetFolder(this.app), paper: NotePaper = this.settings.paper,
     template: string = this.settings.template): Promise<string | null> {
     try {
       const path = await createInkNote(this.app, folder, name, paper, template);
@@ -233,6 +248,28 @@ export default class NotebookPlugin extends Plugin {
       notice.hide();
       console.warn(LOG_PREFIX, 'import PDF', e); // shown in a notice; often just a file pdf.js can't read
       new Notice(`Couldn't import the PDF: ${(e as Error).message}`);
+      return null;
+    }
+  }
+
+  /** Asks for a PDF (vault or device), a page and a name, then saves that page as a PDF template (#21). */
+  addPdfTemplate() {
+    new PdfSourceModal(this.app, choice => {
+      new PdfTemplateModal(this.app, choice.basename, (name, page) => void this.addPdfTemplateAs(choice, name, page)).open();
+    }, 'PDF for the template').open();
+  }
+
+  /** Saves page `page` of a chosen PDF as the template `name` in the templates folder; returns `pdf:<name>`. */
+  async addPdfTemplateAs(choice: PdfChoice, name: string, page = 1): Promise<string | null> {
+    try {
+      const id = await addPdfTemplate(this.app, this.settings.templatesFolder, name, choice.bytes, page);
+      this.templates.invalidate();
+      await this.templates.load();
+      new Notice(`Added the PDF template "${id.slice(4)}"`);
+      return id;
+    } catch (e) {
+      console.warn(LOG_PREFIX, 'add PDF template', e);
+      new Notice(`Couldn't add the PDF template: ${(e as Error).message}`);
       return null;
     }
   }

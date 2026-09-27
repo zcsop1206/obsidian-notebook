@@ -4,10 +4,10 @@
 // bitmaps in PageBitmap; this file ties them to Obsidian and the DOM.
 import { FileView, Notice, TAbstractFile, TFile, TFolder, type App, type WorkspaceLeaf } from 'obsidian';
 import { newStrokeId } from '../format/ids';
-import { isInkNote } from '../format/note';
+import { isInkNote, markdownEmbed } from '../format/note';
 import type { Page } from '../format/page';
 import type { Template } from '../format/template';
-import { parseTemplate, templateName } from '../format/template';
+import { parseTemplate, sameTemplate, templateName } from '../format/template';
 import type { Stroke } from '../format/page';
 import { listenForUndoTaps } from './gestures';
 import { History } from './history';
@@ -32,6 +32,8 @@ import { centreOn, encodeClip, isIdentity, lassoSelect, moveBy, resizeBy, resize
 import { hitSelection, SelectionMenu, SelectionOverlay } from './selection';
 import type { Point } from '../format/page';
 import type { SelectionHit } from './input';
+import { templateRegistry } from './templates';
+import type { Size } from '../format/page';
 
 /** How long the view waits after a resize before redrawing bitmaps at the new size. */
 const RESIZE_DELAY = 150;
@@ -340,7 +342,8 @@ export class InkView extends FileView {
       notice: message => new Notice(message),
       saved: () => this.stats.saves++,
       pageEdited: slot => this.store === store && this.pagesPanel?.changed(slot.id),
-    });
+    }, templateRegistry()?.storeOptions());
+    void templateRegistry()?.load(); // PDF templates (#21), for `pdf:` names and the chooser
     try {
       await store.load(text);
     } catch (e) {
@@ -935,11 +938,14 @@ export class InkView extends FileView {
 
   // ---- adding pages
 
-  /** Appends a page with the given template, or the note's default, and scrolls to it. */
-  addPage(template?: Template) {
+  /**
+   * Appends a page with the given template, or the note's default, and scrolls to it. `size`
+   * overrides the page size (a sized template or a custom size, #27).
+   */
+  addPage(template?: Template, size?: Size) {
     const store = this.store;
     if (!store) return;
-    const pv = this.makePage(store.addPage(template));
+    const pv = this.makePage(store.addPage(template, size));
     this.pages.push(pv);
     this.relayout();
     const box = this.layout?.pages[this.pages.length - 1];
@@ -962,11 +968,29 @@ export class InkView extends FileView {
   chooseTemplate(scope: 'add' | 'page' | 'all') {
     if (!this.store) return;
     const placeholder = scope === 'add' ? 'Template of the new page' : scope === 'page' ? 'Template of this page' : 'Template of all pages';
-    new TemplateChooser(this.app, placeholder, template => {
-      if (scope === 'add') this.addPage(template);
+    new TemplateChooser(this.app, placeholder, (template, size) => {
+      if (scope === 'add') this.addPage(template, size);
       else if (scope === 'page') this.setPageTemplate(this.currentPageIndex(), template);
       else this.setAllTemplates(template);
-    }).open();
+    }, templateRegistry()?.entries ?? [], scope === 'add').open();
+  }
+
+  /**
+   * Puts a standard markdown embed of the current page (#27), `![](<vault path, encoded>)`,
+   * on the clipboard, for pasting into any note; shows it in a notice if the clipboard fails.
+   * Returns the text.
+   */
+  async copyPageEmbed(): Promise<string | null> {
+    const pv = this.pages[this.currentPageIndex()];
+    if (!this.store || !pv) return null;
+    const text = markdownEmbed(pv.slot.path);
+    try {
+      await navigator.clipboard.writeText(text);
+      new Notice('Copied the embed for this page');
+    } catch (e) {
+      new Notice(`Couldn't use the clipboard; the embed is: ${text}`, 0);
+    }
+    return text;
   }
 
   /**
@@ -1129,7 +1153,7 @@ export class InkView extends FileView {
 
   private recordPageTemplate(pageId: string, before: Template, after: Template) {
     const store = this.store;
-    if (!store || templateName(before) === templateName(parseTemplate(after))) return;
+    if (!store || sameTemplate(before, after)) return;
     const set = (template: Template) => () => {
       if (this.store !== store) return;
       store.setPageTemplate(pageId, template);

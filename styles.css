@@ -580,3 +580,9 @@
   color: var(--text-muted);
   font-size: var(--font-ui-smaller, 12px);
 }
+
+/* Custom page size dialog (#27) */
+.nb-size-error {
+  color: var(--text-error);
+  min-height: 1.5em;
+}

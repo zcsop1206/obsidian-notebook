@@ -9,7 +9,7 @@ import { newNote, pagePath, writeNote } from '../format/note';
 import { newPage, writePage, type Paper } from '../format/page';
 import { pointsToPx } from '../format/template';
 import { cleanName, uniqueName } from './names';
-import { openPdf, renderPdfPage } from './pdf';
+import { openPdf, renderPdfPage, type PdfPageProxy } from './pdf';
 
 /** Resolution of the embedded page images, and their JPEG quality. */
 export const IMPORT_DPI = 150;
@@ -23,8 +23,25 @@ export interface PdfChoice {
   bytes: ArrayBuffer;
 }
 
+/**
+ * A PDF page's size in CSS px and its image as the page file embeds it: a JPEG at IMPORT_DPI,
+ * or '' if it doesn't render (logged). Shared by the import and PDF templates (#21).
+ */
+export async function pdfPageImage(pg: PdfPageProxy): Promise<{ size: { width: number; height: number }; image: string }> {
+  const one = pg.getViewport({ scale: 1 });
+  let image = '';
+  try {
+    const canvas = await renderPdfPage(pg, IMPORT_DPI / 72, MAX_IMAGE_PIXELS);
+    image = canvas.toDataURL('image/jpeg', JPEG_QUALITY);
+    canvas.width = canvas.height = 0;
+  } catch (e) {
+    console.warn('[notebook] PDF page did not render', e);
+  }
+  return { size: { width: pointsToPx(one.width), height: pointsToPx(one.height) }, image };
+}
+
 /** A PDF's name without its extension. */
-const stripPdf = (name: string) => name.replace(/\.pdf$/i, '');
+export const stripPdf = (name: string) => name.replace(/\.pdf$/i, '');
 
 /**
  * Creates the note from a PDF's bytes and returns its path. `progress(done, total)` is called
@@ -50,17 +67,8 @@ export async function importPdf(app: App, folder: string, name: string, pdfName:
     const total = doc.numPages;
     for (let n = 1; n <= total; n++) {
       const pg = await doc.getPage(n);
-      const one = pg.getViewport({ scale: 1 });
-      let image = '';
-      try {
-        const canvas = await renderPdfPage(pg, IMPORT_DPI / 72, MAX_IMAGE_PIXELS);
-        image = canvas.toDataURL('image/jpeg', JPEG_QUALITY);
-        canvas.width = canvas.height = 0;
-      } catch (e) {
-        console.warn('[notebook] PDF import: page', n, 'did not render', e);
-      }
+      const { size, image } = await pdfPageImage(pg);
       pg.cleanup?.();
-      const size = { width: pointsToPx(one.width), height: pointsToPx(one.height) };
       const page = newPage(newPageId(note.pages), size, { kind: 'pdf', source, page: n, image });
       await vault.create(normalizePath(dir + pagePath(base, page.id)), writePage(page));
       note.pages.push(page.id);
@@ -83,9 +91,9 @@ type SourceItem = TFile | typeof DEVICE;
  * iPad's Files app), the others are the vault's PDFs.
  */
 export class PdfSourceModal extends FuzzySuggestModal<SourceItem> {
-  constructor(app: App, private onChoose: (choice: PdfChoice) => void) {
+  constructor(app: App, private onChoose: (choice: PdfChoice) => void, placeholder = 'PDF to import') {
     super(app);
-    this.setPlaceholder('PDF to import');
+    this.setPlaceholder(placeholder);
   }
 
   getItems(): SourceItem[] {
