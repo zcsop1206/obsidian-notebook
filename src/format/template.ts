@@ -189,14 +189,18 @@ export function renderTemplate(template: Template, size: Size): string[] {
       return [linePath(d)];
     }
     case 'dots': {
-      // Each dot is a zero-length subpath with a round cap, 2 px wide: a dot of radius 1 px.
-      // Rows start one spacing in and stop at least half a spacing from the right and bottom.
+      // Each dot is a small circle of two arcs, radius 0.5 px, stroked 1 px wide: a dot of
+      // radius about 1 px. (Not zero-length round-capped segments: WebKit has a history of
+      // not drawing those.) Each circle starts and ends at its left point, so relative moves
+      // step from dot to dot. Rows start one spacing in and stop at least half a spacing from
+      // the right and bottom.
       const s = GRID_SPACING[template.spacing];
       const xs = steps(s, size.width - s / 2), ys = steps(s, size.height - s / 2);
       if (!xs.length || !ys.length) return [];
-      const row = 'h0' + `m${num(s)} 0h0`.repeat(xs.length - 1);
-      const d = ys.map(y => `M${num(xs[0])} ${num(y)}${row}`).join('');
-      return [`<path class="t" fill="none" stroke-width="2" stroke-linecap="round" d="${d}"/>`];
+      const dot = 'a0.5 0.5 0 1 0 1 0a0.5 0.5 0 1 0 -1 0';
+      const row = dot + `m${num(s)} 0${dot}`.repeat(xs.length - 1);
+      const d = ys.map(y => `M${num(xs[0] - 0.5)} ${num(y)}${row}`).join('');
+      return [`<path class="t" fill="none" stroke-width="1" d="${d}"/>`];
     }
   }
   return unknownKind((template as { kind: string }).kind);
