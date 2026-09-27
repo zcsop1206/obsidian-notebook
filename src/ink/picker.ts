@@ -33,6 +33,8 @@ export interface PickerHost {
   /** Images (#12): pick one for the current page, or (asPage) a page of its own; paste one from the clipboard. */
   insertImage?(asPage: boolean): void;
   pasteImage?(): void;
+  /** Export the note as a PDF (#18). */
+  exportPdf?(): void;
 }
 
 /** Preview canvas size in CSS px. */
@@ -224,6 +226,7 @@ export class Picker {
       item('nb-ink-menu-insert-image-page', 'Insert image as page…', () => h.insertImage!(true));
     }
     if (h.pasteImage) item('nb-ink-menu-paste-image', 'Paste image', () => h.pasteImage!());
+    if (h.exportPdf) item('nb-ink-menu-export-pdf', 'Export as PDF…', () => h.exportPdf!());
     const paper = h.paperLabel();
     this.el.createDiv({ cls: 'nb-ink-control nb-ink-paper', text: `Paper size: ${paper ?? 'unknown'}` });
   }
