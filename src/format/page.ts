@@ -273,6 +273,46 @@ interface Encoded {
 }
 const encoded = new WeakMap<object, Encoded>();
 
+/** Whether a stroke's points are encoded (cached) for the next writePage (#37). */
+function hasEncoded(s: Stroke): Encoded | undefined {
+  const points = s.points, e = encoded.get(s);
+  if (!e || !Array.isArray(points)) return undefined;
+  const n = points.length;
+  return e.points === points && e.n === n && e.first === points[0] && e.last === points[n - 1] ? e : undefined;
+}
+
+function encodedPoints(s: Stroke, id: string): Encoded {
+  let e = hasEncoded(s);
+  if (e) return e;
+  const points = s.points;
+  if (!Array.isArray(points) || points.length === 0) fail(`stroke ${id} has no points`);
+  for (const pt of points) {
+    if (!isNum(pt.x) || !isNum(pt.y) || !isNum(pt.p) || !isNum(pt.t)) fail(`stroke ${id} has a non-numeric point`);
+  }
+  const flat = encodePoints(points);
+  const decoded = decodePoints(flat);
+  const canonical = decoded.every((q, i) => q.x === points[i].x && q.y === points[i].y && q.p === points[i].p && q.t === points[i].t);
+  e = { points, n: points.length, first: points[0], last: points[points.length - 1], json: JSON.stringify(flat), canonical, decoded };
+  encoded.set(s, e);
+  return e;
+}
+
+/**
+ * Encodes a stroke's points ahead of the next writePage, so a save after opening a dense page
+ * doesn't encode them all at once (the view does this while it computes outlines, #37).
+ * Returns whether it was already done. Doesn't change what writePage writes; a stroke that
+ * doesn't validate is left for writePage to report.
+ */
+export function prepareSave(s: Stroke): boolean {
+  if (hasEncoded(s)) return true;
+  try {
+    encodedPoints(s, s.id);
+  } catch {
+    // writePage throws for it
+  }
+  return false;
+}
+
 /**
  * A stroke's encoded points and outline `d`, memoised per stroke object so a save only encodes
  * and outlines new or changed strokes (#37). Validates the points on a miss. The cache is
@@ -280,20 +320,7 @@ const encoded = new WeakMap<object, Encoded>();
  * strokePathCached (tool, nib, size too), so the bytes are those of an uncached write.
  */
 function encodedStroke(s: Stroke, head: StrokeHead): { json: string; d: string } {
-  const points = s.points;
-  let e = Array.isArray(points) ? encoded.get(s) : undefined;
-  const n = Array.isArray(points) ? points.length : 0;
-  if (!e || e.points !== points || e.n !== n || e.first !== points[0] || e.last !== points[n - 1]) {
-    if (!Array.isArray(points) || n === 0) fail(`stroke ${head.id} has no points`);
-    for (const pt of points) {
-      if (!isNum(pt.x) || !isNum(pt.y) || !isNum(pt.p) || !isNum(pt.t)) fail(`stroke ${head.id} has a non-numeric point`);
-    }
-    const flat = encodePoints(points);
-    const decoded = decodePoints(flat);
-    const canonical = decoded.every((q, i) => q.x === points[i].x && q.y === points[i].y && q.p === points[i].p && q.t === points[i].t);
-    e = { points, n, first: points[0], last: points[n - 1], json: JSON.stringify(flat), canonical, decoded };
-    encoded.set(s, e);
-  }
+  const e = encodedPoints(s, head.id);
   const input: OutlineInput = head.tool === 'pen'
     ? { tool: 'pen', nib: head.nib, size: head.size, points: e.decoded }
     : { tool: 'highlighter', size: head.size, points: e.decoded };
@@ -330,14 +357,19 @@ export function writePage(page: Page): string {
   });
 
   const json = (v: unknown) => JSON.stringify(v);
-  const strokeJson = strokes.map(s =>
-    `{"id":${json(s.id)},"tool":${json(s.tool)},` + (s.tool === 'pen' ? `"nib":${json(s.nib)},` : '') +
-    `"color":${json(s.color)},"size":${json(s.size)},` + (s.on ? `"on":${json(s.on)},` : '') + `"points":${s.pointsJson}}`);
+  // `]]>` could only occur inside a JSON string, where `>` may be escaped instead. Only the
+  // template and images can hold free text; a stroke's strings are ids, enums and colours.
+  const cdata = (s: string) => s.replace(/]]>/g, ']]\\u003e');
   const imageJson = images.map(im => json({ id: im.id, x: im.x, y: im.y, width: im.width, height: im.height }));
-  const meta =
+  // The metadata as pieces: a dense page's points are megabytes, kept cached per stroke and
+  // copied once, into the file (#37).
+  const meta: string[] = [cdata(
     `{"format":${json(FORMAT)},"id":${json(page.id)},"size":${json(size)},"template":${json(metadataTemplate(template))},` +
-    (images.length ? `"images":[\n${imageJson.join(',\n')}\n],` : '') + `"strokes":[` +
-    (strokeJson.length ? '\n' + strokeJson.join(',\n') + '\n' : '') + ']}';
+    (images.length ? `"images":[\n${imageJson.join(',\n')}\n],` : '') + `"strokes":[` + (strokes.length ? '\n' : ''))];
+  strokes.forEach((s, i) => meta.push(
+    (i ? ',\n' : '') + `{"id":${json(s.id)},"tool":${json(s.tool)},` + (s.tool === 'pen' ? `"nib":${json(s.nib)},` : '') +
+    `"color":${json(s.color)},"size":${json(s.size)},` + (s.on ? `"on":${json(s.on)},` : '') + '"points":', s.pointsJson, '}'));
+  meta.push((strokes.length ? '\n' : '') + ']}');
 
   const w = fmt1(size.width), h = fmt1(size.height);
   const image = (im: PageImage) =>
@@ -347,8 +379,7 @@ export function writePage(page: Page): string {
   const out: string[] = [
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">\n`,
     fixedPaper(template) ? PDF_STYLE : STYLE, '\n',
-    // `]]>` could only occur inside a JSON string, where `>` may be escaped instead.
-    `<metadata><![CDATA[${meta.replace(/]]>/g, ']]\\u003e')}]]></metadata>\n`,
+    '<metadata><![CDATA[', ...meta, ']]></metadata>\n',
   ];
   // A layer of items, each on its own line; an item is one or more pieces.
   const layer = (id: string, attrs: string, items: readonly (string | readonly string[])[]) => {

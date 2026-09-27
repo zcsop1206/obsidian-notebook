@@ -7,6 +7,7 @@ import { strokePath, strokePathCached } from '../../src/format/outline';
 import { readPage, writePage, type Page, type Stroke } from '../../src/format/page';
 import { moveBy, transformStroke, withIds } from '../../src/ink/lasso';
 import { splitStroke } from '../../src/ink/split';
+import { fingerprint, fingerprintLater } from '../../src/ink/store';
 import { seeded } from '../seeded';
 import { randomPage, randomPoints } from './helpers';
 
@@ -104,4 +105,10 @@ test('a save of a 1,000-stroke page after one new stroke takes under 16 ms', () 
   assert.ok(cold.length > 0);
   assert.ok(times[2] < 16, `save took ${times[2].toFixed(1)} ms`);
   assert.equal(warm, writePage(fresh(page)));
+});
+
+test('fingerprintLater gives fingerprint over several tasks for a long text', async () => {
+  const long = 'Q12.3 45.6 '.repeat(200000) + 'end';
+  assert.equal(await fingerprintLater(long), fingerprint(long));
+  assert.equal(await fingerprintLater('abc'), fingerprint('abc'));
 });

@@ -68,6 +68,8 @@ export interface InkStats {
   openMs: number;
   /** File writes completed by this view. */
   saves: number;
+  /** Time the last page save spent building the file (writePage), in ms (#37). */
+  saveMs?: number;
   /** Pen input measurements (input.ts). */
   pen: PenStats;
   /** Finger navigation: zoom and the last gesture's frame times (navigate.ts). */
@@ -367,7 +369,7 @@ export class InkView extends FileView {
       pageChanged: slot => this.store === store && this.pageChanged(slot),
       indexChanged: () => this.store === store && this.indexChanged(),
       notice: message => new Notice(message),
-      saved: () => this.stats.saves++,
+      saved: () => { this.stats.saves++; this.stats.saveMs = store.writeMs; },
       pageEdited: slot => this.store === store && this.pagesPanel?.changed(slot.id),
     }, templateRegistry()?.storeOptions());
     void templateRegistry()?.load(); // PDF templates (#21), for `pdf:` names and the chooser
