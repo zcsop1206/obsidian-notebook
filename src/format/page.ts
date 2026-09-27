@@ -1,6 +1,11 @@
 // The page file: one SVG per page, holding the page's raw data as JSON in <metadata>
 // (format notebook-ink/1) and the drawing generated from it. writePage is a pure function of
 // the page model; readPage reads only the metadata and ignores the drawing.
+//
+// Off-page coordinates (#35): a stroke belongs to the page it started on and may run off its
+// edges and back. Its points are stored as they were sampled, not clamped to the page, so x
+// and y can be negative or beyond the page's width and height; the outline near the edge keeps
+// its true shape, and the drawing is clipped by the page (the SVG's viewBox, the view's canvases).
 import { isPageId, isStrokeId } from './ids';
 import { fmt1, strokePath } from './outline';
 import { parseTemplate, renderTemplate, type Size, type Template } from './template';
