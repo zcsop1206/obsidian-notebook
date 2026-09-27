@@ -33,6 +33,8 @@ import { hitSelection, SelectionMenu, SelectionOverlay } from './selection';
 import type { Point } from '../format/page';
 import type { SelectionHit } from './input';
 import { templateRegistry } from './templates';
+import { halfLength, nearestEdge, normAngle, type Edge, type LengthUnit, type RulerState } from './ruler';
+import { RulerOverlay } from './ruler-overlay';
 import type { Size } from '../format/page';
 import { newImageId } from '../format/ids';
 import { Modal } from 'obsidian';
@@ -244,6 +246,8 @@ export class InkView extends FileView {
       dragSelection: (kind, from, to, x, y) => this.dragSelection(kind, from, to, x, y),
       endSelectionDrag: cancelled => this.endSelectionDrag(cancelled),
       lassoTap: (target, point) => this.selectImageAt(target, point),
+      rulerEdge: (target, point, reach) => this.rulerEdge(target, point, reach),
+      rulerMeasure: (target, from, to) => this.rulerMeasure(target, from, to),
     }, (type, fn, options) => this.registerDomEvent(this.pagesEl, type, fn, options), this.stats.pen);
     // A Pencil drag anywhere in the view, on a page or not, never scrolls it (blockStylusTouch);
     // finger drags over the pages move it through the navigator, never natively, and never
@@ -264,6 +268,12 @@ export class InkView extends FileView {
     this.registerDomEvent(this.containerEl, 'keydown', e => this.historyKey(e));
     // The lasso's selection (#11): its overlay, its menu, and Escape to drop it.
     this.selOverlay = new SelectionOverlay();
+    this.rulerOverlay = new RulerOverlay({
+      ruler: () => this.ruler,
+      setRuler: r => this.setRuler(r),
+      unit: () => this.rulerUnit,
+      dark: () => this.theme.dark,
+    });
     this.selMenu = new SelectionMenu(root, {
       recolor: color => this.recolorSelection(color),
       remove: () => this.deleteSelection(),
@@ -324,6 +334,7 @@ export class InkView extends FileView {
     this.input.destroy();
     this.selOverlay?.destroy();
     this.selMenu?.destroy();
+    this.rulerOverlay?.destroy();
     this.templates.clear();
     this.pagesPanel?.destroy();
     this.toolbar?.destroy();
@@ -408,6 +419,7 @@ export class InkView extends FileView {
     this.history.clear();
     this.input.cancel();
     this.clearSelection();
+    this.forgetRuler(); // #20
     this.nav.reset();
     this.preview(1, 0, 0);
     this.dropEmptyGhostPages(store); // #28
@@ -570,6 +582,7 @@ export class InkView extends FileView {
     this.updateStats();
     this.pump();
     if (this.sel && !this.selDrag) this.showSelection();
+    this.placeRuler(); // #20
     if (this.pagesPanel?.isOpen) this.pagesPanel.setCurrent(this.currentPageIndex());
   }
 
@@ -669,6 +682,7 @@ export class InkView extends FileView {
     this.theme = theme;
     for (const pv of this.pages) if (pv.bitmap) this.renderPage(pv);
     if (this.ghost?.bitmap) this.renderGhost(); // #28
+    this.placeRuler(true); // #20
   }
 
   // ---- writing
@@ -1492,6 +1506,12 @@ export class InkView extends FileView {
       insertImage: asPage => this.insertImage(asPage),
       pasteImage: () => void this.pasteImage(),
       exportPdf: () => void this.exportPdf(),
+      rulerOn: () => this.rulerOn,
+      toggleRuler: () => this.toggleRuler(),
+      rulerAngle: () => this.ruler?.angle ?? null,
+      setRulerAngle: a => this.setRulerAngle(a),
+      rulerUnit: () => this.rulerUnit,
+      setRulerUnit: u => this.setRulerUnit(u),
     });
   }
 
@@ -2310,6 +2330,141 @@ export class InkView extends FileView {
         if (this.store === store) apply();
       },
     });
+  }
+
+  // ---- the ruler (#20)
+  // A toggle, not a tool: the pen or highlighter stays in use. The ruler is shown over one page
+  // (page px: centre and angle; ruler.ts is the geometry, ruler-overlay.ts the layer and the
+  // fingers), placed over the current page when turned on, and stays on that page, where it is,
+  // through scrolls and zooms. It's kept while the note is open (turning it off and on again
+  // puts it back where it was if its page is the current one) and never saved. A pen or
+  // highlighter stroke starting near one of its edges is drawn along it (input.ts), with its
+  // length shown in cm or inches (rulerUnit, set in the pen and highlighter pickers).
+
+  private rulerOverlay: RulerOverlay | null = null;
+  /** Whether the ruler is shown. */
+  rulerOn = false;
+  private ruler: RulerState | null = null;
+  private rulerPage: PageView | null = null;
+  /** The unit of the length label and the ticks. */
+  rulerUnit: LengthUnit = 'cm';
+
+  /** The ruler for tests and commands: on, its page index, centre (page px) and angle. */
+  get rulerState(): { on: boolean; page: number; cx: number; cy: number; angle: number } | null {
+    const r = this.ruler;
+    if (!r) return null;
+    return { on: this.rulerOn, page: this.rulerPage ? this.pages.indexOf(this.rulerPage) : -1, cx: r.cx, cy: r.cy, angle: r.angle };
+  }
+
+  /** The ruler's layer, for tests. */
+  get rulerLayer(): RulerOverlay | null {
+    return this.rulerOverlay;
+  }
+
+  /** Shows or hides the ruler (toggles without an argument). */
+  toggleRuler(on = !this.rulerOn) {
+    this.rulerOn = on;
+    if (on) {
+      // Back on: over the current page, where it was if that's its page.
+      const cur = this.pages[Math.max(0, this.currentPageIndex())];
+      if (this.rulerPage !== cur) this.rulerPage = null;
+    }
+    this.placeRuler(true);
+    this.toolbar?.render();
+  }
+
+  /** Sets the ruler's angle (degrees, counter-clockwise), turning it on if needed. */
+  setRulerAngle(angle: number) {
+    if (!Number.isFinite(angle)) return;
+    if (!this.rulerOn) this.toggleRuler(true);
+    if (!this.ruler) return;
+    this.setRuler({ ...this.ruler, angle: normAngle(angle) });
+    this.toolbar?.render();
+  }
+
+  /** Moves the ruler's centre (page px of its page), for tests and commands. */
+  setRulerCentre(cx: number, cy: number) {
+    if (this.ruler) this.setRuler({ ...this.ruler, cx, cy });
+  }
+
+  setRulerUnit(unit: LengthUnit) {
+    this.rulerUnit = unit;
+    this.placeRuler(true);
+    this.toolbar?.render();
+  }
+
+  /** Opens the angle input on the ruler's label. */
+  editRulerAngle() {
+    if (!this.rulerOn) this.toggleRuler(true);
+    this.rulerOverlay?.openInput();
+  }
+
+  private setRuler(r: RulerState) {
+    const pv = this.rulerPage, page = pv && this.store?.page(pv.slot);
+    if (!page) return;
+    // The centre stays on the page, so the ruler can't be lost off it.
+    this.ruler = { cx: Math.min(page.size.width, Math.max(0, r.cx)), cy: Math.min(page.size.height, Math.max(0, r.cy)), angle: normAngle(r.angle) };
+    this.rulerOverlay?.render();
+  }
+
+  /** Puts the ruler's layer over its page (choosing the current page if it has none), or hides it. */
+  private placeRuler(force = false) {
+    const overlay = this.rulerOverlay;
+    if (!overlay) return;
+    if (!this.rulerOn || !this.store || !this.layout) {
+      overlay.hide();
+      return;
+    }
+    let pv = this.rulerPage;
+    if (!pv || !this.pages.includes(pv) || !this.store.page(pv.slot)) {
+      pv = this.pages[Math.max(0, this.currentPageIndex())] ?? null;
+      const page = pv && this.store.page(pv.slot);
+      if (!pv || !page) {
+        overlay.hide();
+        return;
+      }
+      this.rulerPage = pv;
+      this.ruler = { ...this.visibleCentre(pv, page.size), angle: this.ruler?.angle ?? 0 };
+      force = true;
+    }
+    overlay.place(pv.el, this.store.page(pv.slot)!.size, force);
+  }
+
+  /** The middle of the part of a page in view, page px. */
+  private visibleCentre(pv: PageView, size: Size): { cx: number; cy: number } {
+    const r = pv.el.getBoundingClientRect(), v = this.scroller.getBoundingClientRect();
+    const x0 = Math.max(r.left, v.left), x1 = Math.min(r.right, v.right), y0 = Math.max(r.top, v.top), y1 = Math.min(r.bottom, v.bottom);
+    const k = size.width / Math.max(1, r.width);
+    const cx = x1 > x0 ? ((x0 + x1) / 2 - r.left) * k : size.width / 2, cy = y1 > y0 ? ((y0 + y1) / 2 - r.top) * k : size.height / 2;
+    return { cx: Math.min(size.width, Math.max(0, cx)), cy: Math.min(size.height, Math.max(0, cy)) };
+  }
+
+  /** The note closed: the ruler goes (it's never saved). */
+  private forgetRuler() {
+    this.rulerOn = false;
+    this.ruler = null;
+    this.rulerPage = null;
+    this.rulerOverlay?.hide();
+  }
+
+  private rulerEdge(target: PageTarget, point: { x: number; y: number }, reach: number): Edge | null {
+    if (!this.rulerOn || !this.ruler || target.key !== this.rulerPage || !this.rulerOverlay?.shown) return null;
+    const t = this.pen.tool;
+    if (t !== 'pen' && t !== 'highlighter') return null;
+    // Only where the ruler is (its ends are beyond the page anyway).
+    const L = halfLength(target.size), d = Math.abs((point.x - this.ruler.cx) * Math.cos(this.ruler.angle * Math.PI / 180) - (point.y - this.ruler.cy) * Math.sin(this.ruler.angle * Math.PI / 180));
+    if (d > L) return null;
+    return nearestEdge(this.ruler, point, reach);
+  }
+
+  private rulerMeasure(target: PageTarget, from: Point | null, to: Point | null) {
+    const overlay = this.rulerOverlay;
+    if (!overlay) return;
+    if (!from || !to || target.key !== this.rulerPage) {
+      overlay.showLength(null);
+      return;
+    }
+    overlay.showLength(to, Math.hypot(to.x - from.x, to.y - from.y));
   }
 }
 

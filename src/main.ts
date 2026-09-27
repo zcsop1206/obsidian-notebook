@@ -83,6 +83,8 @@ export default class NotebookPlugin extends Plugin {
     this.addInkCommand('open-tool-picker', 'Open the picker of the tool in use', view => view.openPicker());
     // The lasso (#11): select, move, resize, recolour; paste what was copied into this note.
     this.addInkCommand('tool-lasso', 'Use the lasso', view => view.setTool('lasso'));
+    this.addInkCommand('toggle-ruler', 'Toggle ruler', view => view.toggleRuler()); // #20
+    this.addInkCommand('ruler-angle', 'Type the ruler angle', view => view.editRulerAngle());
     this.addCommand({
       id: 'paste-strokes',
       name: 'Paste strokes',

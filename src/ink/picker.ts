@@ -35,6 +35,12 @@ export interface PickerHost {
   pasteImage?(): void;
   /** Export the note as a PDF (#18). */
   exportPdf?(): void;
+  /** The ruler (#20), shown in the pen and highlighter pickers while it's on: angle and unit. */
+  rulerOn?(): boolean;
+  rulerAngle?(): number | null;
+  setRulerAngle?(angle: number): void;
+  rulerUnit?(): 'cm' | 'in';
+  setRulerUnit?(unit: 'cm' | 'in'): void;
 }
 
 /** Preview canvas size in CSS px. */
@@ -140,6 +146,9 @@ export class Picker {
       custom.parentElement?.toggleClass('is-active', isCustom);
     }
     this.el.querySelector('.nb-ink-size-value')?.setText(`${size} px`);
+    mark('.nb-ink-ruler-unit', el => el.dataset.unit === h.rulerUnit?.());
+    const angle = this.el.querySelector<HTMLInputElement>('.nb-ink-ruler-angle-input'), a = h.rulerAngle?.();
+    if (angle && a != null && angle.ownerDocument.activeElement !== angle) angle.value = String(Math.round(a * 10) / 10);
     this.drawPreview(kind, color, size, pen.nib);
   }
 
@@ -173,6 +182,8 @@ export class Picker {
       this.option(sizes, kind === 'pen' ? 'nb-ink-size' : 'nb-ink-hl-size', String(s), `${kind === 'pen' ? 'Size' : 'Highlighter size'} ${s} px`, () => set({ size: s })).dataset.size = String(s);
     }
 
+    if (h.rulerOn?.()) this.buildRuler();
+
     this.canvas = el.createEl('canvas', { cls: 'nb-ink-control nb-ink-preview', attr: { 'aria-label': 'Preview' } });
     this.canvas.style.width = `${PREVIEW_W}px`;
     this.canvas.style.height = `${PREVIEW_H}px`;
@@ -185,6 +196,25 @@ export class Picker {
     this.replaceRow.hide();
     for (let i = 0; i < MAX_PRESETS; i++) {
       this.option(this.replaceRow, 'nb-ink-replace-slot', String(i + 1), `Replace favourite ${i + 1}`, () => this.saved(i)).dataset.slot = String(i);
+    }
+  }
+
+  /** The ruler's row (#20): an exact angle, and the unit of its ticks and length label. */
+  private buildRuler() {
+    const h = this.host, row = this.row('nb-ink-ruler-row', 'Ruler');
+    const input = row.createEl('input', { cls: 'nb-ink-control nb-ink-ruler-angle-input',
+      attr: { type: 'number', min: '0', max: '360', step: 'any', inputmode: 'decimal', 'aria-label': 'Ruler angle in degrees' } });
+    const apply = () => {
+      const n = Number(input.value);
+      if (input.value.trim() !== '' && Number.isFinite(n) && n >= 0 && n <= 360) h.setRulerAngle?.(n);
+    };
+    input.addEventListener('change', apply);
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter') apply();
+    });
+    row.createSpan({ cls: 'nb-ink-control nb-ink-picker-label', text: '°' });
+    for (const unit of ['cm', 'in'] as const) {
+      this.option(row, 'nb-ink-ruler-unit', unit, `Measure in ${unit === 'cm' ? 'centimetres' : 'inches'}`, () => h.setRulerUnit?.(unit)).dataset.unit = unit;
     }
   }
 
