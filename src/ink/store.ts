@@ -22,6 +22,11 @@ export interface NoteFiles {
   write(path: string, text: string): Promise<void>;
   /** Names of the files directly in a folder ([] if it doesn't exist). */
   list(folder: string): string[];
+  /**
+   * Deletes the file if it exists (#17, deleting a page). Optional so file interfaces written
+   * before page deletion still fit; without it a deleted page's file stays on disk, orphaned.
+   */
+  delete?(path: string): Promise<void>;
 }
 
 export interface StoreListener {
@@ -259,21 +264,7 @@ export class NoteStore {
 
   /** Appends a page with the note's paper size and the given template, or the note's default. */
   addPage(template?: Template): PageSlot {
-    const taken = new Set(this.index.pages);
-    for (const name of this.files.list(this.folder)) {
-      const m = /^(p-[0-9a-f]{6})\.svg$/.exec(name);
-      if (m) taken.add(m[1]);
-    }
-    for (const id of this.detached.keys()) taken.add(id); // unwritten pages that redo may bring back
-    const id = this.newId(taken);
-    const page = newPage(id, this.paperSize, template ? parseTemplate(template) : noteTemplate(this.index.template));
-    const slot: PageSlot = { id, path: this.pagePath(id), size: page.size, page, text: null, error: null };
-    this.slots.push(slot);
-    this.index.pages.push(id);
-    this.dirtyPages.add(id);
-    this.indexDirty = true;
-    this.schedule();
-    return slot;
+    return this.insertPage(this.slots.length, template);
   }
 
   // ---- changes for undo and redo (#8)
@@ -483,6 +474,7 @@ export class NoteStore {
    */
   async external(path: string, kind: 'modify' | 'create' | 'delete'): Promise<void> {
     if (this.closed || !this.owns(path)) return;
+    if (kind === 'delete' && this.ownDeletes.has(path)) return; // deletePage's own delete (#17)
     let text: string | null = null;
     if (kind !== 'delete') {
       try {
@@ -538,5 +530,121 @@ export class NoteStore {
     this.index = index;
     this.slots = slots;
     this.listener.indexChanged();
+  }
+
+  // ---- page management (#17)
+  // Inserting, moving and duplicating change the index (a duplicate also writes its new file);
+  // page files keep their names. Deleting takes the page out of the index like
+  // removePageFromIndex, then deletes its file once the index no longer embeds it; the slot is
+  // kept detached, marked changed, so insertPageInIndex (undo) puts it back and writes it again.
+
+  /** Paths being deleted by deletePage: their delete events are not changes from elsewhere. */
+  private ownDeletes = new Set<string>();
+
+  /** A page id not used by the note, its folder or a detached page. */
+  private freshId(): string {
+    const taken = new Set(this.index.pages);
+    for (const name of this.files.list(this.folder)) {
+      const m = /^(p-[0-9a-f]{6})\.svg$/.exec(name);
+      if (m) taken.add(m[1]);
+    }
+    for (const id of this.detached.keys()) taken.add(id); // unwritten pages that redo may bring back
+    return this.newId(taken);
+  }
+
+  /** Puts a new slot into the note at `index` (clamped) and marks it and the index changed. */
+  private placeSlot(slot: PageSlot, index: number): number {
+    const at = Math.max(0, Math.min(Math.floor(index) || 0, this.slots.length));
+    this.slots.splice(at, 0, slot);
+    this.index.pages.splice(at, 0, slot.id);
+    this.dirtyPages.add(slot.id);
+    this.indexDirty = true;
+    this.schedule();
+    return at;
+  }
+
+  /**
+   * Inserts a new page at `index` (clamped to 0..pages) with the note's paper size and the given
+   * template, or the note's default.
+   */
+  insertPage(index: number, template?: Template): PageSlot {
+    const id = this.freshId();
+    const page = newPage(id, this.paperSize, template ? parseTemplate(template) : noteTemplate(this.index.template));
+    const slot: PageSlot = { id, path: this.pagePath(id), size: page.size, page, text: null, error: null };
+    this.placeSlot(slot, index);
+    return slot;
+  }
+
+  /**
+   * Moves a page to position `toIndex` (clamped) of the pages as they are after taking it out.
+   * Only the index changes. Returns the position it had (to undo, move it back there), or -1 if
+   * it isn't in the note.
+   */
+  movePage(pageId: string, toIndex: number): number {
+    const from = this.index.pages.indexOf(pageId);
+    if (from < 0) return -1;
+    const to = Math.max(0, Math.min(Math.floor(toIndex) || 0, this.slots.length - 1));
+    if (to === from) return from;
+    const [slot] = this.slots.splice(from, 1);
+    this.index.pages.splice(from, 1);
+    this.slots.splice(to, 0, slot);
+    this.index.pages.splice(to, 0, pageId);
+    this.indexDirty = true;
+    this.schedule();
+    return from;
+  }
+
+  /**
+   * Inserts a copy of a page right after it: a new id and file, the same size and template, the
+   * strokes deep-copied (stroke ids are unique within a page, so they're kept). Returns the new
+   * slot, or null if there's no such page or it can't be read.
+   */
+  duplicatePage(pageId: string): PageSlot | null {
+    const from = this.index.pages.indexOf(pageId);
+    const source = from >= 0 ? this.page(this.slots[from]) : null;
+    if (!source) return null;
+    const id = this.freshId();
+    const copy = JSON.parse(JSON.stringify(source)) as Page;
+    copy.id = id;
+    const slot: PageSlot = { id, path: this.pagePath(id), size: copy.size, page: copy, text: null, error: null };
+    this.placeSlot(slot, from + 1);
+    return slot;
+  }
+
+  /**
+   * Deletes a page: takes it out of the index and deletes its file after the index is written
+   * without it (and after any write to the file already queued). The page stays in memory,
+   * detached, so insertPageInIndex(pageId, index) brings it back and writes the file again.
+   * Returns the position it had, or -1 if it isn't in the note.
+   */
+  deletePage(pageId: string): { index: number } {
+    const slot = this.slots.find(s => s.id === pageId);
+    if (!slot) return { index: -1 };
+    this.page(slot); // parsed now, so the page can be written again if the delete is undone
+    const out = this.removePageFromIndex(pageId);
+    this.detached.set(pageId, { slot, dirty: !slot.error });
+    const del = this.files.delete?.bind(this.files);
+    if (!del) return out;
+    const path = slot.path;
+    const indexWritten = this.flush();
+    const prev = this.writes.get(path) ?? Promise.resolve();
+    const job = Promise.all([prev, indexWritten]).then(async () => {
+      // Undone (and so being written again) meanwhile: keep the file.
+      if (this.slots.includes(slot)) return;
+      this.ownDeletes.add(path);
+      try {
+        await del(path);
+        this.known.delete(path);
+      } catch (e) {
+        this.listener.notice(`Couldn't delete ${path}: ${errorText(e)}`);
+      } finally {
+        this.ownDeletes.delete(path);
+      }
+    });
+    this.writes.set(path, job);
+    void job.then(() => {
+      if (this.writes.get(path) === job) this.writes.delete(path);
+    });
+    return out;
   }
 }
