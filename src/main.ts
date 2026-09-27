@@ -9,6 +9,10 @@ import type { PenStats } from './ink/input';
 import type { NavStats } from './ink/navigate';
 import { InkView } from './ink/view';
 import { RenameHandler } from './ink/rename';
+import { importPdf, PdfNameModal, PdfSourceModal, type PdfChoice } from './ink/pdf-import';
+import { PdfPages } from './ink/pdf';
+import { setSharpPdfRenderer } from './ink/renderer';
+import type { PdfTemplate } from './format/template';
 import type { Paper } from './format/page';
 import { DEFAULT_SETTINGS, NotebookSettingTab, parseSettings, type NotebookSettings } from './settings';
 
@@ -19,6 +23,8 @@ import { DEFAULT_SETTINGS, NotebookSettingTab, parseSettings, type NotebookSetti
  */
 export default class NotebookPlugin extends Plugin {
   recorder!: Recorder;
+  /** Sharp renders of PDF pages (#14); `renders` counts them, for the tests. */
+  pdfPages!: PdfPages;
   settings: NotebookSettings = { ...DEFAULT_SETTINGS };
 
   async onload() {
@@ -72,6 +78,14 @@ export default class NotebookPlugin extends Plugin {
       menu.addItem(item => item.setTitle('Open as ink note').setIcon('pencil').onClick(() => void this.openAsInk(file, leaf)));
     }));
     this.addSettingTab(new NotebookSettingTab(this.app, this));
+    // PDF import (#14), and sharp rendering of PDF pages in the ink view.
+    this.addCommand({ id: 'import-pdf', name: 'Import PDF as ink note', callback: () => this.importPdf() });
+    const pdfPages = this.pdfPages = new PdfPages(this.app.vault, t => this.noteOfTemplate(t));
+    setSharpPdfRenderer((t, w, h) => pdfPages.render(t, w, h));
+    this.register(() => {
+      setSharpPdfRenderer(null);
+      pdfPages.destroy();
+    });
 
     this.recorder = new Recorder(this);
     this.registerView(VIEW_TYPE_DEBUG, leaf => new DebugView(leaf, this));
@@ -179,6 +193,42 @@ export default class NotebookPlugin extends Plugin {
       new Notice(`Couldn't create the ink note: ${(e as Error).message}`);
       return null;
     }
+  }
+
+  /** Asks for a PDF (vault or device) and a name, then imports it into the active file's folder and opens it. */
+  importPdf() {
+    new PdfSourceModal(this.app, choice => {
+      new PdfNameModal(this.app, choice.basename, name => void this.importPdfAs(choice, name)).open();
+    }).open();
+  }
+
+  /** Imports a chosen PDF as the note `name` and opens it in a new tab; returns its path. Progress shows in a notice. */
+  async importPdfAs(choice: PdfChoice, name: string, folder = targetFolder(this.app)): Promise<string | null> {
+    const notice = new Notice('Importing PDF…', 0);
+    try {
+      const path = await importPdf(this.app, folder, name, choice.basename + '.pdf', choice.bytes, this.settings.paper,
+        (done, total) => notice.setMessage?.(`Importing PDF: page ${done} of ${total}`));
+      notice.hide();
+      const leaf = this.app.workspace.getLeaf('tab');
+      await leaf.setViewState({ type: VIEW_TYPE_INK, state: { file: path }, active: true });
+      this.app.workspace.revealLeaf(leaf);
+      return path;
+    } catch (e) {
+      notice.hide();
+      console.warn(LOG_PREFIX, 'import PDF', e); // shown in a notice; often just a file pdf.js can't read
+      new Notice(`Couldn't import the PDF: ${(e as Error).message}`);
+      return null;
+    }
+  }
+
+  /** The path of the open ink note that has a page with this template object, or null. */
+  private noteOfTemplate(template: PdfTemplate): string | null {
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_INK)) {
+      const view = leaf.view;
+      if (!(view instanceof InkView) || !view.store || !view.file) continue;
+      if (view.store.slots.some(s => s.page?.template === template)) return view.file.path;
+    }
+    return null;
   }
 
   async openAsInk(file: TFile, leaf: WorkspaceLeaf) {

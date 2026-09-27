@@ -389,4 +389,7 @@
   border-radius: 2px;
   background: var(--interactive-accent, #7b6cd9);
   pointer-events: none;
+/* PDF import (#14): the hidden file input that opens the system file picker. */
+.nb-pdf-file-input {
+  display: none;
 }

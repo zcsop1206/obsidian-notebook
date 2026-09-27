@@ -5,7 +5,7 @@
 // strokes are removed.
 import { DEFAULT_INK, type Page, type Size, type Stroke } from '../format/page';
 import { strokePath } from '../format/outline';
-import { renderTemplate, type Template } from '../format/template';
+import { renderTemplate, type PdfTemplate, type Template } from '../format/template';
 
 export interface Theme {
   dark: boolean;
@@ -74,12 +74,14 @@ export function warmOutlines(page: Page, deadline: number): boolean {
  */
 export class TemplateImages {
   private cache = new Map<string, { img: HTMLImageElement; ready: boolean; waiting: (() => void)[] }>();
+  private pdf = new PdfImages();
 
   /**
    * The image to draw, or null if the template draws nothing or isn't loaded yet (then
    * `onReady` is called once it is).
    */
   get(template: Template, size: Size, width: number, height: number, theme: Theme, onReady: () => void): HTMLImageElement | null {
+    if (template.kind === 'pdf') return this.pdf.get(template, width, height, onReady);
     const items = renderTemplate(template, size);
     if (!items.length) return null;
     const key = `${JSON.stringify(template)} ${size.width}x${size.height} ${width}x${height} ${theme.line}`;
@@ -108,7 +110,126 @@ export class TemplateImages {
 
   clear() {
     this.cache.clear();
+    this.pdf.clear();
   }
+}
+
+// ---- PDF pages (#14)
+
+/**
+ * Renders a PDF page at a pixel size from the PDF itself, or resolves null. Set by the plugin
+ * (see pdf.ts); without it, PDF pages show their embedded image.
+ */
+export type SharpPdfRenderer = (template: PdfTemplate, width: number, height: number) => Promise<HTMLImageElement | null>;
+let sharpPdf: SharpPdfRenderer | null = null;
+export function setSharpPdfRenderer(render: SharpPdfRenderer | null) {
+  sharpPdf = render;
+}
+
+/** Counts for tests: sharp renders requested and received, and times a sharp image was drawn. */
+export const pdfStats = { requested: 0, received: 0, sharpDrawn: 0, jpegDrawn: 0 };
+
+type PdfEntry = { img: HTMLImageElement | null; ready: boolean; failed: boolean; waiting: (() => void)[] };
+
+/** Frees an image's decoded pixels, and its blob URL if it has one. */
+function releaseImage(img: HTMLImageElement) {
+  if (img.src.startsWith('blob:')) URL.revokeObjectURL(img.src);
+  img.removeAttribute('src');
+}
+
+/**
+ * The template layer of pdf pages. The page's embedded JPEG is drawn first (fast, always
+ * there); a render from the PDF at the bitmap's pixel size is requested at the same time and,
+ * when it arrives, the page is redrawn with it. If it fails, the JPEG stays. Both caches are
+ * small and least recently used first out, since images of pages at 400% are large.
+ */
+class PdfImages {
+  static MAX_JPEGS = 6;
+  static MAX_SHARP = 4;
+  private jpegs = new Map<string, PdfEntry>();
+  private sharp = new Map<string, PdfEntry>();
+
+  get(t: PdfTemplate, width: number, height: number, onReady: () => void): HTMLImageElement | null {
+    try {
+      const sharpKey = `${t.source}#${t.page} ${width}x${height}`;
+      let s = touch(this.sharp, sharpKey);
+      if (!s && sharpPdf) {
+        const entry: PdfEntry = s = { img: null, ready: false, failed: false, waiting: [] };
+        this.sharp.set(sharpKey, entry);
+        this.trim(this.sharp, PdfImages.MAX_SHARP);
+        pdfStats.requested++;
+        sharpPdf(t, width, height).then(img => {
+          if (!img) throw new Error('no render');
+          if (this.sharp.get(sharpKey) !== entry) return releaseImage(img); // evicted meanwhile
+          pdfStats.received++;
+          entry.img = img;
+          entry.ready = true;
+          entry.waiting.splice(0).forEach(f => f());
+        }).catch(() => {
+          entry.failed = true;
+          entry.waiting.length = 0;
+        });
+      }
+      if (s?.ready) {
+        pdfStats.sharpDrawn++;
+        return s.img;
+      }
+      // Only the latest caller is told when the sharp image arrives: one redraw, not one per call.
+      if (s && !s.failed) s.waiting = [onReady];
+      if (!t.image) return null;
+      const jpegKey = `${t.source}#${t.page} ${t.image.length} ${t.image.slice(-32)}`;
+      let j = touch(this.jpegs, jpegKey);
+      if (!j) {
+        const img = new Image();
+        const entry: PdfEntry = j = { img, ready: false, failed: false, waiting: [] };
+        img.onload = () => {
+          entry.ready = true;
+          entry.waiting.splice(0).forEach(f => f());
+        };
+        img.onerror = () => {
+          console.error('[notebook] PDF page image failed to load', jpegKey);
+          entry.failed = true;
+          entry.waiting.length = 0;
+        };
+        img.src = t.image;
+        this.jpegs.set(jpegKey, entry);
+        this.trim(this.jpegs, PdfImages.MAX_JPEGS);
+      }
+      if (j.ready) {
+        pdfStats.jpegDrawn++;
+        return j.img;
+      }
+      if (!j.failed) j.waiting = [onReady];
+      return null;
+    } catch (e) {
+      console.error('[notebook] PDF page template', e);
+      return null;
+    }
+  }
+
+  private trim(cache: Map<string, PdfEntry>, max: number) {
+    while (cache.size > max) {
+      const [key, e] = cache.entries().next().value!;
+      cache.delete(key);
+      e.waiting.length = 0;
+      if (e.img) releaseImage(e.img);
+    }
+  }
+
+  clear() {
+    this.trim(this.jpegs, 0);
+    this.trim(this.sharp, 0);
+  }
+}
+
+/** The entry for `key`, moved to the most recently used end, or undefined. */
+function touch<V>(cache: Map<string, V>, key: string): V | undefined {
+  const v = cache.get(key);
+  if (v !== undefined) {
+    cache.delete(key);
+    cache.set(key, v);
+  }
+  return v;
 }
 
 /** The shared offscreen canvas for compositing highlighter strokes. */
