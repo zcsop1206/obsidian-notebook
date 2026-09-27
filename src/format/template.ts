@@ -13,6 +13,11 @@
 // `pdf`, which parseTemplateName rejects, and it's not in BUILT_IN_TEMPLATES or TEMPLATE_KINDS
 // (which list the kinds a user can choose). A PDF note's `template:` frontmatter is `blank`.
 //
+// The `fill` kind (#27) is a solid background of a fixed colour, the same in light and dark mode
+// (a sticky note's pale yellow). Like a pdf page, its paper doesn't follow dark mode, so default
+// ink on it stays dark in both modes (`fixedPaper`). Built-in entries may carry a page `size`
+// (the sticky note, the index card): a note or page made from one gets that size.
+//
 // Every template has a reversible name (`lined-college-margin`), used by the note's
 // `template:` frontmatter, the settings and menus. parseTemplateName throws on an unknown
 // name; code reading a name from a file the user can edit (the note's frontmatter, saved
@@ -61,10 +66,17 @@ export interface PdfTemplate {
   image: string;
 }
 
+/** A solid background of a fixed colour, the same in both modes (#27, sticky notes). */
+export interface FillTemplate {
+  kind: 'fill';
+  /** Lowercase `#rrggbb`. */
+  color: string;
+}
+
 /** A page's template, discriminated by `kind`. Extend this union with new kinds. */
-export type Template = BlankTemplate | LinedTemplate | GridTemplate | DotsTemplate | PdfTemplate;
-/** The kinds with a default, which a user can choose (not `pdf`). */
-export type TemplateKind = Exclude<Template['kind'], 'pdf'>;
+export type Template = BlankTemplate | LinedTemplate | GridTemplate | DotsTemplate | PdfTemplate | FillTemplate;
+/** The kinds with a default (not `pdf` or `fill`, which are chosen through named templates). */
+export type TemplateKind = Exclude<Template['kind'], 'pdf' | 'fill'>;
 
 export const TEMPLATE_KINDS: readonly TemplateKind[] = ['blank', 'lined', 'grid', 'dots'];
 
@@ -108,7 +120,7 @@ export function parseTemplate(value: unknown): Template {
   if (typeof value !== 'object' || value === null || typeof (value as { kind?: unknown }).kind !== 'string') {
     throw new Error('Invalid page template: expected an object with a "kind"');
   }
-  const v = value as { kind: string; rule?: unknown; margin?: unknown; spacing?: unknown; source?: unknown; page?: unknown; image?: unknown };
+  const v = value as { kind: string; color?: unknown; rule?: unknown; margin?: unknown; spacing?: unknown; source?: unknown; page?: unknown; image?: unknown };
   switch (v.kind) {
     case 'blank': return { kind: 'blank' };
     case 'lined': {
@@ -123,6 +135,11 @@ export function parseTemplate(value: unknown): Template {
     case 'dots': {
       if (!DOT_SPACINGS.includes(v.spacing as DotsTemplate['spacing'])) badOption('dots', 'spacing', v.spacing, DOT_SPACINGS);
       return { kind: 'dots', spacing: v.spacing as DotsTemplate['spacing'] };
+    }
+    case 'fill': {
+      const color = typeof v.color === 'string' ? v.color.toLowerCase() : '';
+      if (!FILL_RE.test(color)) throw new Error(`Invalid page template: fill color ${JSON.stringify(v.color)} (expected #rrggbb)`);
+      return { kind: 'fill', color };
     }
     case 'pdf': {
       if (!isPdfSource(v.source)) {
@@ -141,6 +158,18 @@ export function parseTemplate(value: unknown): Template {
   }
   return unknownKind(v.kind);
 }
+
+const FILL_RE = /^#[0-9a-f]{6}$/;
+
+/**
+ * Whether the template draws its own paper, the same in both modes (pdf and fill): default ink
+ * on such a page is dark in dark mode too, in the file and in the editor.
+ */
+export const fixedPaper = (template: Template): boolean => template.kind === 'pdf' || template.kind === 'fill';
+
+/** Whether two templates are the same (pdf templates by source and page; the image isn't compared). */
+export const sameTemplate = (a: Template, b: Template): boolean =>
+  JSON.stringify(metadataTemplate(parseTemplate(a))) === JSON.stringify(metadataTemplate(parseTemplate(b)));
 
 /** A data URL a pdf template's image may hold: safe inside an SVG attribute. */
 export const IMAGE_RE = /^data:image\/(?:jpeg|png);base64,[A-Za-z0-9+/]*={0,2}$/;
@@ -171,7 +200,14 @@ export interface BuiltInTemplate {
   /** For menus, e.g. "Lined, college rule, with margin". */
   label: string;
   template: Template;
+  /** The page size the template comes in (#27: sticky note, index card), if it has one. */
+  size?: Size;
 }
+
+/** A sticky note's colour: pale yellow, the same in both modes. */
+export const STICKY_COLOR = '#fff59d';
+/** An index card's colour: a warm off-white. */
+export const CARD_COLOR = '#fffdf5';
 
 /** Every built-in template, in menu order. */
 export const BUILT_IN_TEMPLATES: readonly BuiltInTemplate[] = Object.freeze([
@@ -183,6 +219,8 @@ export const BUILT_IN_TEMPLATES: readonly BuiltInTemplate[] = Object.freeze([
   { name: 'grid-5mm', label: 'Grid, 5 mm', template: { kind: 'grid', spacing: '5mm' } },
   { name: 'grid-quarter-inch', label: 'Grid, ¼ in', template: { kind: 'grid', spacing: '1/4in' } },
   { name: 'dots-5mm', label: 'Dots, 5 mm', template: { kind: 'dots', spacing: '5mm' } },
+  { name: 'sticky-3in', label: 'Sticky note 3 × 3 in', template: { kind: 'fill', color: STICKY_COLOR }, size: { width: 288, height: 288 } },
+  { name: 'index-card', label: 'Index card 5 × 3 in', template: { kind: 'fill', color: CARD_COLOR }, size: { width: 480, height: 288 } },
 ] as BuiltInTemplate[]);
 
 /** The fixed name of every pdf template. Not reversible: parseTemplateName rejects it. */
@@ -200,21 +238,39 @@ export function templateName(template: Template): string {
     case 'lined': return `lined-${t.rule}${t.margin ? '-margin' : ''}`;
     case 'grid': return t.spacing === '5mm' ? 'grid-5mm' : 'grid-quarter-inch';
     case 'dots': return 'dots-5mm';
+    case 'fill': {
+      // A built-in's colour gives its name; any other colour is `fill-rrggbb`.
+      const b = BUILT_IN_TEMPLATES.find(e => e.template.kind === 'fill' && e.template.color === t.color);
+      return b ? b.name : `fill-${t.color.slice(1)}`;
+    }
   }
 }
 
-export const isTemplateName = (name: string): boolean => BUILT_IN_TEMPLATES.some(b => b.name === name);
+const FILL_NAME_RE = /^fill-([0-9a-f]{6})$/;
+
+export const isTemplateName = (name: string): boolean => BUILT_IN_TEMPLATES.some(b => b.name === name) || FILL_NAME_RE.test(name);
+
+/** The page size a named template comes in (a fresh object), or null if it has none. */
+export function templateSize(name: string): Size | null {
+  const size = BUILT_IN_TEMPLATES.find(t => t.name === name)?.size;
+  return size ? { width: size.width, height: size.height } : null;
+}
 
 /** The template with this name (a fresh object). Throws if there's none. */
 export function parseTemplateName(name: string): Template {
   const b = BUILT_IN_TEMPLATES.find(t => t.name === name);
+  const fill = FILL_NAME_RE.exec(name);
+  if (!b && fill) return { kind: 'fill', color: '#' + fill[1] };
   if (!b) throw new Error(`Unknown template "${name}" (expected ${BUILT_IN_TEMPLATES.map(t => t.name).join(', ')})`);
   return parseTemplate(b.template);
 }
 
 /** The menu label of a template, e.g. "Grid, 5 mm". */
-export const templateLabel = (template: Template): string =>
-  template.kind === 'pdf' ? `PDF page ${template.page}` : BUILT_IN_TEMPLATES.find(b => b.name === templateName(template))!.label;
+export function templateLabel(template: Template): string {
+  if (template.kind === 'pdf') return `PDF page ${template.page}`;
+  const name = templateName(template);
+  return BUILT_IN_TEMPLATES.find(b => b.name === name)?.label ?? `Colour ${(template as FillTemplate).color}`;
+}
 
 // ---- rendering
 
@@ -268,6 +324,10 @@ export function renderTemplate(template: Template, size: Size): string[] {
       const row = dot + `m${num(s)} 0${dot}`.repeat(xs.length - 1);
       const d = ys.map(y => `M${num(xs[0] - 0.5)} ${num(y)}${row}`).join('');
       return [`<path class="t" fill="none" stroke-width="1" d="${d}"/>`];
+    }
+    case 'fill': {
+      if (!FILL_RE.test(template.color)) throw new Error('Invalid page template: fill color is not #rrggbb');
+      return [`<rect x="0" y="0" width="${w}" height="${h}" fill="${template.color}"/>`];
     }
     case 'pdf': {
       // The page image, stretched to the page (its pixel size rounds a little differently).

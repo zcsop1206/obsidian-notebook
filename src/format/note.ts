@@ -4,7 +4,7 @@
 // folder is normally the note's basename, but any relative folder is read (a folder renamed by
 // hand, or one that couldn't follow a rename, #26), the folder of the first page embed; page-shaped embeds from other folders are text.
 import { isPageId } from './ids';
-import type { Paper } from './page';
+import { parsePaper, type NotePaper, type Paper } from './page';
 
 export interface NoteIndex {
   /** The note's file name without `.md`; its pages normally live in the folder of the same name next to it. */
@@ -14,7 +14,8 @@ export interface NoteIndex {
    * with `../`): the basename unless it was read otherwise.
    */
   folder: string;
-  paper: Paper;
+  /** `letter`, `a4`, or a custom size such as `288x288` (#27): the size of pages added later. */
+  paper: NotePaper;
   /** Template kind name for new pages (`blank`; #19 adds more). */
   template: string;
   /** Page ids in order. */
@@ -40,7 +41,7 @@ export interface NoteSource {
 export const PAPERS: readonly Paper[] = ['letter', 'a4'];
 
 /** A new, empty note. */
-export function newNote(basename: string, paper: Paper = 'letter', template = 'blank'): NoteIndex {
+export function newNote(basename: string, paper: NotePaper = 'letter', template = 'blank'): NoteIndex {
   return { basename, folder: basename, paper, template, pages: [] };
 }
 
@@ -122,8 +123,8 @@ export function readNote(markdown: string, noteBasename: string): NoteIndex {
 
   if (values.ink === undefined) throw new Error('Not an ink note: the frontmatter has no "ink: 1"');
   if (values.ink !== '1') throw new Error(`Unsupported ink note version "ink: ${values.ink}" (expected 1)`);
-  const paper = (values.paper ?? 'letter').toLowerCase() as Paper;
-  if (!PAPERS.includes(paper)) throw new Error(`Unknown paper "${values.paper}" (expected letter or a4)`);
+  const paper = parsePaper(values.paper ?? 'letter');
+  if (!paper) throw new Error(`Unknown paper "${values.paper}" (expected letter, a4 or <width>x<height> in px)`);
   const template = values.template || 'blank';
 
   const pages: string[] = [];
@@ -147,6 +148,12 @@ export function readNote(markdown: string, noteBasename: string): NoteIndex {
 const encodePath = (path: string) =>
   path.replace(/[\s%()<>[\]#?^|\\]/g, c => c === '(' ? '%28' : c === ')' ? '%29' : encodeURIComponent(c));
 
+/**
+ * A standard markdown image embed of a path, e.g. a page's vault path for "Copy embed for this
+ * page" (#27): `![](School/lecture/p-7f3a0c.svg)`, link-breaking characters encoded.
+ */
+export const markdownEmbed = (path: string) => `![](${encodePath(path)})`;
+
 const embedLine = (folder: string, id: string, alt: string) =>
   `![${alt}](${encodePath(pagePath(folder, id))})`;
 
@@ -163,7 +170,7 @@ const NEW_SOURCE: NoteSource = { eol: '\n', front: KEYS.map(key => ({ key })), b
 export function writeNote(index: NoteIndex): string {
   const { basename, pages } = index;
   const folder = index.folder ?? basename;
-  if (!PAPERS.includes(index.paper)) throw new Error(`Unknown paper "${index.paper}"`);
+  if (typeof index.paper !== 'string' || parsePaper(index.paper) !== index.paper) throw new Error(`Unknown paper "${index.paper}"`);
   if (!basename || /[\r\n/]/.test(basename)) throw new Error(`Invalid note name "${basename}"`);
   if (!isRelativeFolder(folder)) throw new Error(`Invalid page folder "${folder}"`);
   if (!index.template || /[\r\n]/.test(index.template)) throw new Error(`Invalid template "${index.template}"`);

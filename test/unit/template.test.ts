@@ -5,6 +5,7 @@ import { A4, LETTER, newPage, readPage, writePage } from '../../src/format/page'
 import {
   BUILT_IN_TEMPLATES, defaultTemplate, isTemplateName, parseTemplate, parseTemplateName, renderTemplate,
   TEMPLATE_KINDS, templateLabel, templateName, type Template,
+  fixedPaper, sameTemplate, STICKY_COLOR, templateSize,
 } from '../../src/format/template';
 
 /** The segments of a path's `d` as [command, numbers] pairs. */
@@ -19,6 +20,7 @@ function segments(el: string): [string, number[]][] {
 test('names: every built-in template round-trips through its name', () => {
   assert.deepEqual(BUILT_IN_TEMPLATES.map(b => b.name), [
     'blank', 'lined-college', 'lined-college-margin', 'lined-wide', 'lined-wide-margin', 'grid-5mm', 'grid-quarter-inch', 'dots-5mm',
+    'sticky-3in', 'index-card',
   ]);
   for (const b of BUILT_IN_TEMPLATES) {
     assert.equal(templateName(b.template), b.name);
@@ -158,7 +160,48 @@ test('render: deterministic, and every template writes and reads back in a page'
     assert.deepEqual(readPage(svg).template, b.template);
     const layer = /<g id="template">([\s\S]*?)<\/g>/.exec(svg)![1];
     assert.equal(layer.trim(), renderTemplate(b.template, LETTER).join('\n'));
-    // The <style> is the same for every template.
+    // The <style> is the same for every template with paper that follows dark mode.
+    if (b.template.kind === 'fill') continue;
     assert.match(svg, /<style>\.i\{fill:#1f1f1f\}\.t\{stroke:#c9c9c9\}@media \(prefers-color-scheme:dark\)\{\.i\{fill:#e6e3de\}\.t\{stroke:#3c3c3c\}\}<\/style>/);
   }
+});
+
+// ---- sized templates and the fill kind (#27)
+
+test('fill: parses, renders a full-page rect of its colour, and has reversible names', () => {
+  assert.deepEqual(parseTemplate({ kind: 'fill', color: '#FFF59D', extra: 1 }), { kind: 'fill', color: '#fff59d' });
+  assert.throws(() => parseTemplate({ kind: 'fill', color: 'yellow' }), /fill color "yellow"/);
+  assert.throws(() => parseTemplate({ kind: 'fill' }), /fill color/);
+  assert.deepEqual(renderTemplate({ kind: 'fill', color: '#fff59d' }, { width: 288, height: 288 }),
+    ['<rect x="0" y="0" width="288" height="288" fill="#fff59d"/>']);
+  assert.equal(templateName({ kind: 'fill', color: STICKY_COLOR }), 'sticky-3in');
+  assert.equal(templateName({ kind: 'fill', color: '#abcdef' }), 'fill-abcdef');
+  assert.deepEqual(parseTemplateName('fill-abcdef'), { kind: 'fill', color: '#abcdef' });
+  assert.ok(isTemplateName('fill-abcdef') && !isTemplateName('fill-xyz'));
+  assert.equal(templateLabel({ kind: 'fill', color: '#abcdef' }), 'Colour #abcdef');
+  assert.ok(fixedPaper({ kind: 'fill', color: '#abcdef' }) && fixedPaper({ kind: 'pdf', source: 'a.pdf', page: 1, image: '' }));
+  assert.ok(!fixedPaper({ kind: 'blank' }));
+  assert.ok(sameTemplate({ kind: 'pdf', source: 'a.pdf', page: 1, image: '' }, { kind: 'pdf', source: 'a.pdf', page: 1, image: 'data:image/png;base64,AA==' }));
+  assert.ok(!sameTemplate({ kind: 'pdf', source: 'a.pdf', page: 1, image: '' }, { kind: 'pdf', source: 'b.pdf', page: 1, image: '' }));
+});
+
+test('sized built-ins: sticky note and index card carry their size; others have none', () => {
+  assert.deepEqual(templateSize('sticky-3in'), { width: 288, height: 288 });
+  assert.deepEqual(templateSize('index-card'), { width: 480, height: 288 });
+  assert.equal(templateSize('lined-college'), null);
+  assert.equal(templateSize('nope'), null);
+  const s = templateSize('sticky-3in')!;
+  s.width = 1;
+  assert.equal(templateSize('sticky-3in')!.width, 288);
+  assert.equal(templateLabel(parseTemplateName('sticky-3in')), 'Sticky note 3 × 3 in');
+});
+
+test('fill page: fixed colour, dark ink in both modes, reads back byte-stable', () => {
+  const page = newPage('p-0000ab', { width: 288, height: 288 }, parseTemplateName('sticky-3in'));
+  const svg = writePage(page);
+  assert.ok(svg.includes('<style>.i{fill:#1f1f1f}.t{stroke:#c9c9c9}</style>'));
+  assert.ok(!svg.includes('prefers-color-scheme'));
+  assert.ok(svg.includes('viewBox="0 0 288 288"') && svg.includes('fill="#fff59d"'));
+  assert.equal(writePage(readPage(svg)), svg);
+  assert.deepEqual(readPage(svg).size, { width: 288, height: 288 });
 });
