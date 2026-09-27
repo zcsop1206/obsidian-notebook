@@ -1132,6 +1132,169 @@ try:
         check('undo: the commands are unavailable outside an ink view (the editor keeps its own undo)', r['outside'] == [False, False], r['outside'])
         # --- end of 13. Undo and redo (#8) -------------------------------------------------
 
+        # ======== 14. The stroke eraser (#7) ========
+        ev("""async () => {
+          await p.createInkNote('Eraser', '', 'letter', 'blank');
+          await T.sleep(150);
+          /** Pixels darker than 128 in page i's bitmap inside the page-px box. */
+          T.darkIn = (i, x0, y0, x1, y1) => {
+            const c = T.pages()[i].querySelector('canvas.nb-ink-bitmap'), s = c.width / view.store.slots[i].size.width;
+            const d = c.getContext('2d').getImageData(Math.round(x0 * s), Math.round(y0 * s), Math.round((x1 - x0) * s), Math.round((y1 - y0) * s)).data;
+            let n = 0;
+            for (let k = 0; k < d.length; k += 4) if (d[k] < 128) n++;
+            return n;
+          };
+          T.col = x => Array.from({ length: 201 }, (_, j) => [x, 200 + j, 0.3]);  // a vertical line, 1 px per sample
+          T.ids = () => view.store.slots[0].page.strokes.map(s => s.id);
+        }""")
+        r = ev("""async () => {
+          for (const x of [150, 250, 350, 450, 550]) await T.pen(0, T.col(x), { predict: 0 });
+          // A highlighter stroke through the view's commit path (the highlighter tool is #6).
+          view.commit({ key: view.pages[0] }, { tool: 'highlighter', color: '#ffd400', size: 20,
+            points: Array.from({ length: 301 }, (_, j) => ({ x: 100 + j, y: 600, p: 0.5, t: 2 * j })) });
+          await view.save();
+          const strip = view.contentEl.querySelector('.nb-ink-strip');
+          const sizes = strip.querySelector('.nb-ink-eraser-sizes');
+          const before = { sizesHidden: sizes.style.display === 'none', cmd: commands['tool-eraser'].checkCallback(true) };
+          strip.querySelector('.nb-ink-eraser').click();
+          const after = { tool: view.pen.tool, active: strip.querySelector('.nb-ink-eraser').classList.contains('is-active'),
+            sizesShown: sizes.style.display !== 'none', small: strip.querySelector('.nb-ink-eraser-size.is-active').dataset.eraserSize };
+          return { ids: T.ids(), tools: view.store.slots[0].page.strokes.map(s => s.tool), before, after,
+            yellow: T.near(0, [255, 239, 153], 14), lines: [150, 250, 350, 450, 550].map(x => T.darkIn(0, x - 5, 280, x + 5, 320)) };
+        }""")
+        er_ids = r['ids']
+        print('eraser: setup:', {k: r[k] for k in ('tools', 'before', 'after', 'yellow', 'lines')})
+        check('eraser setup: five pen lines and a highlighter stroke, drawn', r['tools'] == ['pen'] * 5 + ['highlighter'] and all(n > 20 for n in r['lines']) and r['yellow'] > 1000, r)
+        check('eraser strip: the Eraser button selects the eraser and shows its sizes (small first)',
+              r['before'] == {'sizesHidden': True, 'cmd': True} and r['after'] == {'tool': 'eraser', 'active': True, 'sizesShown': True, 'small': '6'}, r)
+
+        # A drag across the middle three lines, checked mid-drag (cursor) and after release.
+        r = ev("""async () => {
+          T.mark();
+          const drag = Array.from({ length: 301 }, (_, j) => [200 + j, 300, 0.3]);
+          await T.pen(0, drag, { predict: 0, up: false });
+          const mid = { live: T.liveInk(), ids: T.ids().length };
+          const c = view.contentEl.querySelector('canvas.nb-ink-live-tail'), s = c.width / 816;
+          const g = c.getContext('2d'), at = (x, y) => g.getImageData(Math.round(x * s), Math.round(y * s), 1, 1).data[3];
+          mid.center = at(500, 300);  // the last sample
+          mid.away = at(480, 300);    // 20 px behind it: the cursor moved on
+          mid.area = Math.PI * (6 * s) ** 2;
+          T.penUp(0, drag[drag.length - 1]);
+          return { mid, ids: T.ids(), live: T.liveInk(), last: view.input.lastErase,
+            lines: [150, 250, 350, 450, 550].map(x => T.darkIn(0, x - 5, 220, x + 5, 380)), writesNow: T.writesTo(view.store.slots[0].path) };
+        }""")
+        print('eraser: drag:', {k: r[k] for k in ('mid', 'ids', 'live', 'lines', 'last')})
+        check('eraser: the cursor circle (radius 6) shows on the overlay at the pointer during the drag',
+              r['mid']['center'] > 0 and r['mid']['away'] == 0 and 0.5 * r['mid']['area'] < r['mid']['live'] < 2 * r['mid']['area'], r['mid'])
+        check('eraser: a drag across three of five lines removes exactly those three from the model',
+              r['ids'] == [er_ids[0], er_ids[4], er_ids[5]] and r['last']['removed'] == 3, (r['ids'], er_ids))
+        check('eraser: ... and from the bitmap; the untouched lines stay',
+              r['lines'][1:4] == [0, 0, 0] and r['lines'][0] > 50 and r['lines'][4] > 50, r['lines'])
+        check('eraser: the eraser never draws (no stroke added, overlay clear after up)', r['live'] == 0 and len(r['ids']) == 3, r)
+        check('eraser: nothing written at once', r['writesNow'] == 0, r['writesNow'])
+        r = ev("""async () => {
+          await T.sleep(2400);
+          const path = view.store.slots[0].path;
+          return { writes: T.writesTo(path), disk: ink.readPage(fs.get(path)).strokes.map(s => s.id) };
+        }""")
+        check('eraser: the autosave writes the page without the erased strokes', r['writes'] == 1 and r['disk'] == [er_ids[0], er_ids[4], er_ids[5]], r)
+
+        # The highlighter stroke, touches, sizes and commands.
+        r = ev("""async () => {
+          const n = T.ids().length;
+          await T.pen(0, Array.from({ length: 40 }, (_, j) => [300, 570 + j, 0.3]), { type: 'touch', id: 31, predict: 0 });
+          const touch = n - T.ids().length;
+          await T.pen(0, Array.from({ length: 40 }, (_, j) => [300, 570 + j, 0.3]), { predict: 0 });
+          const hl = { ids: T.ids(), yellow: T.near(0, [255, 239, 153], 14) };
+          // 10 px beside the first line (reach: radius + 1.25): the small eraser misses, the large one hits.
+          const beside = Array.from({ length: 100 }, (_, j) => [160, 250 + j, 0.3]);
+          await T.pen(0, beside, { predict: 0 });
+          const small = T.ids().length;
+          view.contentEl.querySelector('[data-eraser-size="14"]').click();
+          const large = view.eraser.size;
+          await T.pen(0, beside, { predict: 0 });
+          const afterLarge = T.ids().length;
+          commands['eraser-next-size'].checkCallback(false);
+          const next = view.eraser.size;
+          // Erasing where there is nothing removes nothing and draws nothing.
+          await T.pen(0, Array.from({ length: 100 }, (_, j) => [700, 900 + j, 0.3]), { predict: 0 });
+          return { touch, hl, small, large, afterLarge, next, empty: T.ids().length, live: T.liveInk() };
+        }""")
+        print('eraser: highlighter, sizes:', r)
+        check('eraser: a touch never erases', r['touch'] == 0, r)
+        check('eraser: a highlighter stroke is erasable (model and bitmap)', r['hl']['ids'] == [er_ids[0], er_ids[4]] and r['hl']['yellow'] == 0, r['hl'])
+        check('eraser: the large size (from the strip) reaches further than the small one',
+              r['small'] == 2 and r['large'] == 14 and r['afterLarge'] == 1, r)
+        check('eraser: "Next eraser size" cycles back to the small size', r['next'] == 6, r)
+        check('eraser: erasing empty paper changes nothing', r['empty'] == 1 and r['live'] == 0, r)
+
+        # A page reloaded from disk gets a fresh index; switching back to the pen draws again.
+        r = ev("""async () => {
+          await view.save();
+          const path = view.store.slots[0].path, pg = ink.readPage(fs.get(path));
+          pg.strokes.push({ ...pg.strokes[0], id: 'e0e0e0e0', points: pg.strokes[0].points.map(q => ({ ...q, x: 650 })) });
+          externalWrite(path, ink.writePage(pg));
+          await T.sleep(150);
+          const reloaded = T.ids();
+          await T.pen(0, Array.from({ length: 60 }, (_, j) => [620 + j, 300, 0.3]), { predict: 0 });
+          const erased = T.ids();
+          view.contentEl.querySelector('.nb-ink-tool[data-tool="pen"]').click();  // back to the pen
+          const tool = view.pen.tool, sizesHidden = view.contentEl.querySelector('.nb-ink-eraser-sizes').style.display === 'none';
+          await T.pen(0, T.col(400), { predict: 0 });
+          const drawn = T.ids().length;
+          commands['tool-eraser'].checkCallback(false);
+          const viaCmd = view.pen.tool;
+          view.setTool('pen');
+          return { reloaded, erased, tool, sizesHidden, drawn, viaCmd, line: T.darkIn(0, 395, 280, 405, 320) };
+        }""")
+        check('eraser: after a reload from disk, a stroke that came from disk is erasable', r['reloaded'][-1] == 'e0e0e0e0' and 'e0e0e0e0' not in r['erased'], r)
+        check('eraser: the Pen button goes back to the pen, which draws again', r['tool'] == 'pen' and r['sizesHidden'] and r['drawn'] == len(r['erased']) + 1 and r['line'] > 20, r)
+        check('eraser: "Use the eraser" selects the eraser', r['viaCmd'] == 'eraser', r)
+        page.locator('#leaf').screenshot(path=os.path.join(OUT, 'eraser.png'))
+
+        # A 1,000-stroke page: an erase drag across it, measured.
+        r = ev("""async () => {
+          const files = ink.largeNote('Dense', 'Thousand', 1, 1000);
+          dirs.add('Dense'); dirs.add('Dense/Thousand');
+          for (const [k, v] of Object.entries(files)) fs.set(k, v);
+          await app.workspace.getLeaf(false).openFile(app.vault.getFile('Dense/Thousand.md'));
+          await T.sleep(300);
+          const before = view.store.slots[0].page.strokes.length;
+          view.setTool('eraser');
+          view.setEraser({ size: 14 });
+          const pv = view.pages[0], bm = pv.bitmap, render = bm.render;
+          let renders = 0;
+          bm.render = function (...a) { renders++; return render.apply(this, a); };
+          const t0 = performance.now();
+          // A wavy diagonal sweep, about 1 px per sample, 8 coalesced samples per event and a frame after each.
+          const sweep = Array.from({ length: 800 }, (_, j) => [80 + j * 0.8, 150 + j * 0.9 + 30 * Math.sin(j / 40), 0.3]);
+          await T.pen(0, sweep, { per: 8, predict: 0, up: false });
+          const frames = view.input.erasing.frames.map((ms, i) => [i, ms]).sort((a, b) => b[1] - a[1]).slice(0, 3);
+          T.penUp(0, sweep[sweep.length - 1]);
+          const wall = performance.now() - t0;
+          bm.render = render;
+          const after = view.store.slots[0].page.strokes.length;
+          const last = view.input.lastErase;
+          view.setTool('pen');
+          const tb = performance.now();
+          new pv.spatial.constructor(view.store.slots[0].page.size, view.store.slots[0].page.strokes);  // what the first erase frame builds
+          const build = performance.now() - tb;
+          const tr = performance.now();
+          bm.render(view.store.slots[0].page, { dark: false, paper: '#ffffff', ink: '#1f1f1f', line: '#c9c9c9' }, null);  // one redraw
+          const redraw = performance.now() - tr;
+          return { before, after, renders, wall, last, build, redraw, frames, index: pv.spatial ? pv.spatial.size : -1 };
+        }""")
+        L = r['last']
+        print(f"eraser on a page with {r['before']} strokes: {L['events']} events, {L['samples']} samples, removed {L['removed']}; "
+              f"handler median {L['handlerMs']:.3f} ms (max {L['handlerMaxMs']:.3f}), frame (hit test + remove + redraw) median {L['frameMs']:.2f} ms "
+              f"(max {L['frameMaxMs']:.2f}, {L['frames']} frames), page redraws {r['renders']}, drag {r['wall']:.0f} ms; "
+              f"index build {r['build']:.1f} ms (in the first frame), one page redraw {r['redraw']:.1f} ms; slowest frames [index, ms] {r['frames']}")
+        check('eraser perf: the sweep removes strokes from the 1,000-stroke page, the index kept in step',
+              r['before'] == 1000 and L['removed'] > 20 and r['after'] == 1000 - L['removed'] and r['index'] == r['after'], r)
+        check('eraser perf: median handler time under 4 ms (Chromium)', L['handlerMs'] < 4, L['handlerMs'])
+        check('eraser perf: the page is redrawn at most once per frame', 0 < r['renders'] <= L['frames'] + 1, (r['renders'], L['frames']))
+        # ======== end of 14. The stroke eraser (#7) ========
+
         # --- unload removes the patch
         r = ev("""async () => {
           p.unload();
