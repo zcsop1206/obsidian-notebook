@@ -2,7 +2,12 @@
 // by the ink view; persistence and the real picker are #10.
 import { DEFAULT_INK, NIBS, type Nib } from '../format/page';
 
+/** The tool the next stroke of the Pencil uses. Highlighter is #6, eraser is #7. */
+export type ToolKind = 'pen' | 'highlighter' | 'eraser';
+export const TOOL_KINDS: readonly ToolKind[] = ['pen', 'highlighter', 'eraser'];
+
 export interface PenSettings {
+  tool: ToolKind;
   nib: Nib;
   /** Lowercase `#rrggbb`; `#000000` is the default ink, drawn in the theme's ink colour. */
   color: string;
@@ -10,7 +15,7 @@ export interface PenSettings {
   size: number;
 }
 
-export const DEFAULT_PEN: Readonly<PenSettings> = Object.freeze({ nib: 'uniform', color: DEFAULT_INK, size: 2.5 });
+export const DEFAULT_PEN: Readonly<PenSettings> = Object.freeze({ tool: 'pen', nib: 'uniform', color: DEFAULT_INK, size: 2.5 });
 
 export interface ColorPreset {
   color: string;
@@ -56,6 +61,10 @@ export function parseColor(c: unknown): string | null {
  */
 export function withPen(pen: Readonly<PenSettings>, change: Partial<PenSettings>): PenSettings {
   const next = { ...pen };
+  if (change.tool !== undefined) {
+    if (!TOOL_KINDS.includes(change.tool)) throw new Error(`Unknown tool ${JSON.stringify(change.tool)} (expected ${TOOL_KINDS.join(', ')})`);
+    next.tool = change.tool;
+  }
   if (change.nib !== undefined) {
     if (!NIBS.includes(change.nib)) throw new Error(`Unknown nib ${JSON.stringify(change.nib)} (expected ${NIBS.join(' or ')})`);
     next.nib = change.nib;
