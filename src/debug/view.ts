@@ -10,7 +10,7 @@ import type { Recorder } from './recorder';
 import { type InkStroke, toSvg, width } from './ink-svg';
 import { ROOT, appendText, ensureDir, fmt, kb, median, mmss, stamp, yn } from './util';
 
-export const VIEW_TYPE_DEBUG = 'notebook-spike';
+export const VIEW_TYPE_DEBUG = 'notebook-debug';
 
 /** A stroke while it is drawn, with the counters the readout needs. */
 interface LiveStroke extends InkStroke {
@@ -65,7 +65,7 @@ export class DebugView extends ItemView {
   }
 
   getViewType() { return VIEW_TYPE_DEBUG; }
-  getDisplayText() { return 'Notebook spike'; }
+  getDisplayText() { return 'Ink debug'; }
   getIcon() { return 'pencil'; }
 
   async onOpen() {

@@ -6,7 +6,7 @@
 import type { DataAdapter } from 'obsidian';
 
 export const ROOT = '_spike';
-export const LOG_PREFIX = '[notebook-spike]';
+export const LOG_PREFIX = '[notebook]';
 
 export const pad = (n: number | string, w = 2) => String(n).padStart(w, '0');
 export const r1 = (v: number) => Math.round(v * 10) / 10;

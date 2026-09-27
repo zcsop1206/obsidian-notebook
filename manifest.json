@@ -1,9 +1,9 @@
 {
-  "id": "notebook-spike",
-  "name": "Notebook spike",
+  "id": "notebook",
+  "name": "Notebook",
   "version": "0.0.2",
   "minAppVersion": "1.7.2",
-  "description": "Throwaway test of Apple Pencil input and audio recording inside Obsidian. Writes to _spike/.",
+  "description": "Handwritten notes with the Apple Pencil, stored as SVG pages in the vault. Includes an ink debug view for pen and audio measurements.",
   "author": "Adit Bhargava",
   "isDesktopOnly": false
 }
