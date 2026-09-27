@@ -126,6 +126,7 @@ class Recorder {
     this.chunks = 0;
     this.lateChunks = 0;
     this.worstGap = 0;
+    this.hiddenAt = null;
     this.hasAppend = typeof this.adapter.appendBinary === 'function';
     [this.mime, this.ext] = pickFormat();
 
@@ -151,6 +152,7 @@ class Recorder {
     this.state = 'recording';
     this.startSegment();
     this.ticker = window.setInterval(() => this.summary(), 60000);
+    this.dog = window.setInterval(() => this.watchdog(), 1000);
     new Notice('Recording');
   }
 
@@ -229,20 +231,40 @@ class Recorder {
   async visibilityChanged() {
     const track = this.track();
     this.note(`app ${document.visibilityState}; mic ${track ? track.readyState + (track.muted ? ', muted' : '') : 'gone'}; recorder ${this.rec ? this.rec.state : 'none'}`);
-    if (document.visibilityState !== 'visible' || this.state !== 'recording') return;
+    if (document.visibilityState === 'hidden') { this.hiddenAt = Date.now(); return; }
+    if (this.state !== 'recording') return;
     await this.holdScreen();
-    if (!track || track.readyState === 'ended') await this.reopen('mic track had ended');
+    // On iOS the mic unmutes and the recorder still says "recording" after a lock or app
+    // switch, but it never delivers audio again. So always start over on a fresh stream.
+    const away = this.hiddenAt ? r1((Date.now() - this.hiddenAt) / 1000) : null;
+    this.hiddenAt = null;
+    if (away != null) await this.reopen(`back after ${away} s hidden (audio from that time is lost)`);
+    else if (!track || track.readyState === 'ended') await this.reopen('mic track had ended');
     else if (!this.rec || this.rec.state === 'inactive') {
       this.note('recorder had stopped, starting a new segment');
       this.startSegment();
     }
   }
 
+  // Restarts the recording if no chunk has arrived for 3 timeslices while visible.
+  watchdog() {
+    if (this.state !== 'recording' || this.reopening || document.visibilityState !== 'visible') return;
+    const quiet = Date.now() - this.lastChunk;
+    if (quiet > CHUNK_MS * 3) this.reopen(`no audio for ${r1(quiet / 1000)} s`);
+  }
+
   async reopen(reason) {
-    this.note(`${reason}, reopening the mic`);
-    if (this.rec && this.rec.state !== 'inactive') this.rec.stop();
-    if (this.stream) this.stream.getTracks().forEach(t => t.stop());
-    if (await this.openMic()) this.startSegment();
+    if (this.reopening) return;
+    this.reopening = true;
+    try {
+      this.note(`${reason}, reopening the mic`);
+      if (this.rec && this.rec.state !== 'inactive') this.rec.stop();
+      if (this.stream) this.stream.getTracks().forEach(t => t.stop());
+      if (await this.openMic()) this.startSegment();
+      this.lastChunk = Date.now();
+    } finally {
+      this.reopening = false;
+    }
   }
 
   async holdScreen() {
@@ -265,6 +287,7 @@ class Recorder {
     if (this.state !== 'recording') return;
     this.state = 'stopping';
     window.clearInterval(this.ticker);
+    window.clearInterval(this.dog);
     const rec = this.rec;
     if (rec && rec.state !== 'inactive') {
       await new Promise(res => { rec.addEventListener('stop', () => res(), { once: true }); rec.stop(); });

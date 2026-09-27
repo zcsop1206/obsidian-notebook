@@ -84,6 +84,26 @@ try:
         for f in page.evaluate(f"() => [...fs.keys()].filter(k => k.startsWith('{dirA}/audio-'))"):
             print(page.evaluate(decode, f))
 
+        # --- audio C: what the iPad does. Hidden, then back with the mic live and the recorder
+        # saying "recording" but delivering nothing. Then the same stall while visible (watchdog).
+        page.evaluate("async () => { await p.recorder.start(); }")
+        page.wait_for_timeout(4500)
+        page.evaluate("""() => { Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' }); document.dispatchEvent(new Event('visibilitychange')); p.recorder.rec.ondataavailable = null; }""")
+        page.wait_for_timeout(2000)
+        page.evaluate("""() => { Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' }); document.dispatchEvent(new Event('visibilitychange')); }""")
+        page.wait_for_timeout(4500)
+        page.evaluate("() => { p.recorder.rec.ondataavailable = null; }")  # stall while visible
+        page.wait_for_timeout(9000)
+        page.evaluate("async () => { await p.recorder.stop(); }")
+        dirC = page.evaluate("() => p.recorder.dir")
+        logC = page.evaluate(f"() => fs.get('{dirC}/_log.md')")
+        print('LOG C:\n' + logC)
+        segsC = sorted(page.evaluate(f"() => [...fs.keys()].filter(k => k.startsWith('{dirC}/audio-'))"))
+        for f in segsC:
+            print(page.evaluate(decode, f))
+        ok_c = len(segsC) == 3 and 'back after' in logC and 'no audio for' in logC and 'DECODE FAILED' not in ''.join(page.evaluate(decode, f) for f in segsC)
+        print('AUDIO C', 'ok: return and watchdog each started a new segment' if ok_c else 'FAILED')
+
         # --- audio B: no appendBinary, then a crash mid-recording, then recovery on next load
         page.evaluate("async () => { delete adapter.appendBinary; await p.recorder.start(); }")
         page.wait_for_timeout(7000)

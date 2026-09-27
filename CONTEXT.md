@@ -56,7 +56,7 @@ The end state: every device (iPad and laptop now, others later) holds a copy of 
 - **Links:** Obsidian wikilinks turned off, standard markdown links used, so the site needs no link-rewriting step.
 - **Where the vault lives:** not decided. The Working Copy link assumption (vault = repo root) no longer applies. With API sync, the plugin could sync a vault to any repo and path. The goal of each device holding the portfolio and updating it points toward syncing with the portfolio repo itself (the whole repo, or a notebook folder inside it) rather than a separate notebook repo the site pulls in at build time, but this isn't settled.
 
-## What exists now (0.0.1, the spike)
+## What exists now (0.0.2, the spike)
 
 A throwaway plugin, id `notebook-spike`, to measure whether the plugin approach holds up on the iPad before building the real thing. Plain CommonJS in `main.js`, no build step. It writes only under `_spike/` in the vault.
 
@@ -72,7 +72,8 @@ A throwaway plugin, id `notebook-spike`, to measure whether the plugin approach 
 - **Recording:**
   - `MediaRecorder` at 96 kbps, preferring `audio/mp4` (iOS), then webm or ogg, with a 2 s timeslice.
   - Each chunk is written to disk as it arrives, through a serial write queue. If `adapter.appendBinary` exists (Obsidian 1.12.3+), chunks are appended to `audio-NN.<ext>`; otherwise they go to `parts-NN/00001.bin`… and are merged on stop.
-  - On `visibilitychange` back to visible: if the mic track ended, reopen the mic and start a new segment; if the recorder stopped, start a new segment. A mic muted for over 3 s while visible also triggers a reopen.
+  - On `visibilitychange` back to visible after being hidden (0.0.2): always reopen the mic and start a new segment, because on iOS the old recorder never delivers audio again (see Verified so far). Otherwise, if the mic track ended, reopen; if the recorder stopped, start a new segment. A mic muted for over 3 s while visible also triggers a reopen.
+  - Watchdog (0.0.2): if no chunk arrives for 3 timeslices (6 s) while visible, reopen the mic and start a new segment.
   - Tries to hold a screen wake lock.
   - Logs to `_spike/rec-<stamp>/_log.md`: device, format, mic settings, app hidden/visible, pagehide, freeze, mute/unmute/ended, late chunks (over 3.5 s apart), wake lock, a summary every minute. `meta.json` holds the format.
   - **Recovery:** on layout ready, any `rec-*` folder whose log lacks "session stopped" has its parts merged, and the log is marked "recovered after unclean exit".
@@ -100,10 +101,11 @@ Audio numbers, from `_spike/rec-20260926-201500/` (a 15 s recording in the foreg
 
 Backgrounding (protocol steps 4–6, 2026-09-26 8:20 PM; the lock and switch were short, 3 s and 9 s, not 30 s):
 - **iOS cuts the mic whenever Obsidian isn't visible.** On both screen lock (`rec-20260926-202056`) and app switch (`rec-20260926-202120`), the app went hidden and the mic track was muted at the same moment. The recorder stayed in the "recording" state with no error, but delivered no chunks until the app came back. The gaps were 5.7 s and 12.1 s.
-- **Coming back resumes by itself.** The mic unmuted, the page resumed and the wake lock was reacquired, all within the same second. The same segment carried on, with no reopen or new segment needed.
-- **Audio is lost while hidden:** 83 kB for 14 s and 36 kB for 16 s, against 181 kB for 15 s in the foreground. Still unknown: whether the file has silence in the gap or simply skips it, which changes where timestamps land. That needs the `.m4a` files, which the sync plugin ignores by default.
-- **Force quit** (`rec-20260926-202140`): recovery ran on the next launch. The log was marked "recovered after unclean exit: audio was appended live, nothing to rebuild". Still unknown: whether that truncated `.m4a` plays. An MP4 whose index (`moov`) is written only at the end won't play; a fragmented one plays up to the last fragment.
-- **Implication:** in Obsidian's web view, recording only works while Obsidian is in front and the screen is on. The wake lock stops auto-lock, but a manual lock or an app switch drops audio for as long as it lasts. Background recording would need a native app, which is out given the constraints. So either live with foreground-only recording (show that it's paused while hidden, and log the gaps), or record long sessions in Voice Memos and import the file.
+- **Coming back looks fine but isn't (0.0.1).** The mic unmuted, the page resumed and the wake lock was reacquired, all within the same second, and the recorder still said "recording". But the owner found it never recorded again: the files hold only the audio from before the hide. The sizes agree: 83 kB ≈ 7 s and 36 kB ≈ 3 s at the foreground rate. The only chunk after returning was the final flush on stop. 0.0.1 didn't notice, because it only reopened when the track had ended or the recorder had stopped.
+- **Fix in 0.0.2:** coming back from hidden always reopens the mic and starts a new segment, and a watchdog reopens if no audio arrives for 6 s while visible. Checked in headless Chromium by simulating the stall (audio C in the test). **Needs rerunning on the iPad** (protocol steps 4–5), expecting a second segment that holds the audio after returning.
+- **Audio is lost while hidden, with no silence in its place:** the owner reports that the file skips the hidden time entirely. So a position in the audio doesn't map to wall-clock time across a gap. Anything that lines audio up with time (notes, ink) has to use the per-segment start times, not an offset into one file. Separate segments per return, as 0.0.2 makes, keep that honest.
+- **Force quit** (`rec-20260926-202140`): recovery ran on the next launch. The log was marked "recovered after unclean exit: audio was appended live, nothing to rebuild". The owner reports the file **plays**, roughly like the others, so appending chunks live survives a force quit with no rebuild step needed.
+- **Implication:** in Obsidian's web view, recording only works while Obsidian is in front and the screen is on. The wake lock stops auto-lock, but a manual lock or an app switch drops audio for as long as it lasts. Background recording would need a native app, which is out given the constraints. So either live with foreground-only recording (make it obvious that it's paused while hidden, restart on return, and log the gaps), or record long sessions in Voice Memos and import the file.
 
 In headless Chromium, through `test/run_spike_test.py`:
 - Synthetic pen strokes, a finger touch, a tap and a real mouse stroke all draw.
