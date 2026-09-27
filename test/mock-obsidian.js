@@ -393,7 +393,16 @@
     p = p.replace(/[\\/]+/g, '/').replace(/^\/+|\/+$/g, '');
     return p === '' ? '/' : p;
   };
-  const setIcon = (el, name) => el.setAttribute('data-icon', name);
+  // A stand-in icon: an svg with the icon name's first two letters, so screenshots show the buttons.
+  const setIcon = (el, name) => {
+    el.setAttribute('data-icon', name);
+    el.querySelector(':scope > svg.mock-icon')?.remove();
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('class', 'mock-icon');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.innerHTML = `<rect x="1" y="1" width="22" height="22" rx="5" fill="none" stroke="currentColor"/><text x="12" y="16" font-size="10" text-anchor="middle" fill="currentColor">${name.slice(0, 2)}</text>`;
+    el.prepend(svg);
+  };
   const Platform = { isMobile: false, isMobileApp: false, isIosApp: false, isDesktop: true, isDesktopApp: true };
 
   // ---- a fake pdf.js for loadPdfJs (#14). A fake PDF is text: `%PDF-FAKE` then one line per
