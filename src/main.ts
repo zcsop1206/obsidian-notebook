@@ -85,6 +85,7 @@ export default class NotebookPlugin extends Plugin {
     this.addInkCommand('tool-lasso', 'Use the lasso', view => view.setTool('lasso'));
     this.addInkCommand('toggle-ruler', 'Toggle ruler', view => view.toggleRuler()); // #20
     this.addInkCommand('ruler-angle', 'Type the ruler angle', view => view.editRulerAngle());
+    this.addInkCommand('toggle-shapes', 'Toggle shape recognition', view => view.toggleShapes()); // #16
     this.addCommand({
       id: 'paste-strokes',
       name: 'Paste strokes',
