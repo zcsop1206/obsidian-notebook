@@ -11,7 +11,7 @@
 // Also here: the question modals of #54 and #56 (ConfirmModal, NameModal).
 import { FuzzySuggestModal, Modal, Notice, setIcon, Setting, type App, type FuzzyMatch } from 'obsidian';
 import type { Size } from '../format/page';
-import { fixedPaper, parseTemplate, type Template } from '../format/template';
+import { fixedPaper, parseTemplate, renderTemplate, type Template } from '../format/template';
 import { isFavourite, type TemplatePrefs } from './favourites';
 import { templateItems, type TemplateItem } from './template-changes';
 import { currentTheme, TemplateImages } from './renderer';
@@ -19,36 +19,72 @@ import { templateRegistry, type TemplateEntry } from './templates';
 
 export { CUSTOM_SIZE_LABEL, customLabel, templateItems, type TemplateItem } from './template-changes';
 
-/** Templates drawn for the previews, shared by every chooser. */
+/** Pdf and image templates drawn for the previews, shared by every chooser. */
 const previewImages = new TemplateImages();
+/** Other templates' preview images, per template, size and pixel size. */
+const previewSvgs = new Map<string, { img: HTMLImageElement; ready: boolean; waiting: (() => void)[] }>();
 /** A preview's longest side, in CSS px. */
 export const PREVIEW_SIDE = 40;
 
 /**
- * A canvas with the template drawn at thumbnail size (its paper, then its template layer once
- * the image is ready), fitted into PREVIEW_SIDE px keeping the page's shape.
+ * The template layer at `width` × `height` device px: pdf and image templates as the page
+ * renderer draws them; the others from the page file's own template layer (renderTemplate), with
+ * lines thickened to about a device pixel so they show at thumbnail size. Null until loaded
+ * (then `onReady`), or if the template draws nothing.
  */
-export function templatePreview(template: Template, size: Size): HTMLCanvasElement {
+function previewImage(template: Template, size: Size, width: number, height: number, onReady: () => void): HTMLImageElement | null {
+  const theme = currentTheme();
+  if (template.kind === 'pdf' || template.kind === 'image') return previewImages.get(template, size, width, height, theme, onReady);
+  const items = renderTemplate(template, size);
+  if (!items.length) return null;
+  const key = `${JSON.stringify(template)} ${size.width}x${size.height} ${width}x${height} ${theme.line}`;
+  let e = previewSvgs.get(key);
+  if (!e) {
+    const px = size.width / Math.max(1, width); // page px per device px
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size.width} ${size.height}" width="${width}" height="${height}">` +
+      `<style>.t{stroke:${theme.dark ? '#6a6a6a' : '#a8a8a8'};stroke-width:${Math.max(1, px)}px}</style>${items.join('')}</svg>`;
+    const img = new Image();
+    const entry: { img: HTMLImageElement; ready: boolean; waiting: (() => void)[] } = e = { img, ready: false, waiting: [onReady] };
+    img.onload = () => {
+      entry.ready = true;
+      entry.waiting.splice(0).forEach(f => f());
+    };
+    img.onerror = () => { entry.waiting.length = 0; };
+    img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+    previewSvgs.set(key, e);
+    return null;
+  }
+  if (e.ready) return e.img;
+  e.waiting.push(onReady);
+  return null;
+}
+
+/**
+ * A preview of the template (its paper, then its template layer once the image is ready),
+ * fitted into a PREVIEW_SIDE px box keeping the page's shape.
+ */
+export function templatePreview(template: Template, size: Size): HTMLElement {
   const k = PREVIEW_SIDE / Math.max(size.width, size.height, 1);
   const w = Math.max(4, Math.round(size.width * k)), h = Math.max(4, Math.round(size.height * k));
   const dpr = window.devicePixelRatio || 1;
-  const canvas = document.createElement('canvas');
+  const box = document.createElement('span');
+  box.className = 'nb-tpl-thumb';
+  const canvas = box.appendChild(document.createElement('canvas'));
   canvas.className = 'nb-tpl-preview';
   canvas.width = Math.round(w * dpr);
   canvas.height = Math.round(h * dpr);
   canvas.style.width = `${w}px`;
   canvas.style.height = `${h}px`;
-  const theme = currentTheme();
   const draw = () => {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
-    ctx.fillStyle = fixedPaper(template) ? '#ffffff' : theme.paper;
+    ctx.fillStyle = fixedPaper(template) ? '#ffffff' : currentTheme().paper;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-    const img = previewImages.get(template, size, canvas.width, canvas.height, theme, draw);
+    const img = previewImage(template, size, canvas.width, canvas.height, draw);
     if (img) ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
   };
   draw();
-  return canvas;
+  return box;
 }
 
 export class TemplateChooser extends FuzzySuggestModal<TemplateItem> {
