@@ -56,7 +56,7 @@ The end state: every device (iPad and laptop now, others later) holds a copy of 
 - **Links:** Obsidian wikilinks turned off, standard markdown links used, so the site needs no link-rewriting step.
 - **Where the vault lives:** not decided. The Working Copy link assumption (vault = repo root) no longer applies. With API sync, the plugin could sync a vault to any repo and path. The goal of each device holding the portfolio and updating it points toward syncing with the portfolio repo itself (the whole repo, or a notebook folder inside it) rather than a separate notebook repo the site pulls in at build time, but this isn't settled.
 
-## What exists now (0.4.0: the ink editor, M1 in progress)
+## What exists now (0.5.0: the ink editor, M1 in progress)
 
 The plugin is **Notebook**, id `notebook`: a TypeScript project under `src/`, built to `main.js` by esbuild (see Repo mechanics). Up to 0.0.2 it shipped as the throwaway spike, id `notebook-spike`, which measured whether the plugin approach holds up on the iPad; the spike's view and recorder live on as the **ink debug view** (described further down).
 
