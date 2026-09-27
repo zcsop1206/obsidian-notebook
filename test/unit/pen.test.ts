@@ -11,7 +11,7 @@ import {
 import { clampSize, COLOR_PRESETS, DEFAULT_PEN, nextColor, nextSize, parseColor, SIZE_PRESETS, withPen } from '../../src/ink/pen';
 
 test('pen: defaults, presets and clampSize', () => {
-  assert.deepEqual(DEFAULT_PEN, { nib: 'uniform', color: '#000000', size: 2.5 });
+  assert.deepEqual(DEFAULT_PEN, { tool: 'pen', nib: 'uniform', color: '#000000', size: 2.5 });
   assert.deepEqual(COLOR_PRESETS.map(c => c.color),
     ['#000000', '#1e6fff', '#e0301e', '#1f9d55', '#f28c28', '#7b4fd6', '#ff5fa2', '#8a8a8a']);
   assert.deepEqual(SIZE_PRESETS, [1.5, 2.5, 4]);
@@ -31,8 +31,8 @@ test('pen: colours must be #rrggbb and are lowercased; withPen validates and cla
   assert.equal(parseColor(' #abcdef '), '#abcdef');
   for (const bad of ['red', '#12345', '#1234567', '123456', '#ggg000', '', 5, null]) assert.equal(parseColor(bad), null, String(bad));
   const pen = withPen(DEFAULT_PEN, { color: '#A0B0C0', size: 7.3, nib: 'pressure' });
-  assert.deepEqual(pen, { nib: 'pressure', color: '#a0b0c0', size: 7.5 });
-  assert.deepEqual(DEFAULT_PEN, { nib: 'uniform', color: '#000000', size: 2.5 }); // not changed
+  assert.deepEqual(pen, { tool: 'pen', nib: 'pressure', color: '#a0b0c0', size: 7.5 });
+  assert.deepEqual(DEFAULT_PEN, { tool: 'pen', nib: 'uniform', color: '#000000', size: 2.5 }); // not changed
   assert.throws(() => withPen(DEFAULT_PEN, { color: 'blue' }), /Invalid pen colour/);
   assert.throws(() => withPen(DEFAULT_PEN, { nib: 'fountain' as never }), /Unknown nib/);
   assert.equal(withPen(DEFAULT_PEN, { size: 99 }).size, 16);
