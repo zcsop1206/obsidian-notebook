@@ -60,12 +60,16 @@
 // started on, not clamped) and the pointer's client position (to find the page under it); the
 // host draws the preview (see selection.ts) and commits on release (endSelectionDrag). Touches
 // never lasso. Like every gesture, these follow their pointer on the window until it lifts.
+// A lasso that never moves more than LASSO_TAP_SLOP CSS px from where it went down is a tap:
+// it's given to the host's lassoTap, if it has one (#12: a tap on an image selects it).
 import { strokePath } from '../format/outline';
 import { roundP, roundXY, type HighlighterStroke, type PenStroke, type Point, type Size } from '../format/page';
 import { fmt, median, yn } from '../debug/util';
 import type { EraserMode, EraserSettings, PenSettings } from './pen';
 import { HIGHLIGHT_ALPHA, pixelRatio } from './renderer';
 
+/** A lasso gesture staying within this many CSS px of its start is a tap (#12). */
+export const LASSO_TAP_SLOP = 6;
 /** Samples closer than this (page px) to the previous one are dropped. */
 export const MIN_STEP = 0.25;
 /** More live (unfrozen) points than this and the older ones are frozen onto the head canvas. */
@@ -127,6 +131,8 @@ export interface PenHost {
   dragSelection(kind: 'move' | 'resize', from: Point, to: Point, clientX: number, clientY: number): void;
   /** The drag ended where dragSelection last put it: commit it, or with `cancelled` drop it. */
   endSelectionDrag(cancelled: boolean): void;
+  /** A tap with the lasso (no loop) at `point` (page px) on `target` (#12: selects an image there). */
+  lassoTap?(target: PageTarget, point: Point): void;
 }
 
 /** What a pointer going down grabs with the lasso: the selection's box, its corner handle, or nothing. */
@@ -920,7 +926,10 @@ export class PenInput {
       this.lastDrag = { kind: la.drag, frames: f.length, frameMs: median(f), frameMaxMs: f.length ? Math.max(...f) : NaN };
     } else {
       this.clear();
-      if (!cancelled) this.host.lassoSelect(la.target, la.trace.points);
+      const pts = la.trace.points, a = pts[0], slop = LASSO_TAP_SLOP * la.map.sx;
+      const tap = !!a && !!this.host.lassoTap && pts.every(q => Math.abs(q.x - a.x) <= slop && Math.abs(q.y - a.y) <= slop);
+      if (!cancelled && tap) this.host.lassoTap!(la.target, a);
+      else if (!cancelled) this.host.lassoSelect(la.target, la.trace.points);
     }
     this.host.statsChanged();
   }

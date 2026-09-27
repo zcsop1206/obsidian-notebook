@@ -13,11 +13,11 @@
 //
 // The menu is a popover in the view (like the picker), under the box, or above it when there's
 // no room below; every element is a button (or .nb-ink-control) so Pencil taps reach it.
-import type { Size, Stroke } from '../format/page';
+import type { PageImage, Size, Stroke } from '../format/page';
 import { COLOR_PRESETS, DEFAULT_PEN } from './pen';
 import type { Box, Transform } from './lasso';
 import type { SelectionHit } from './input';
-import { HIGHLIGHT_ALPHA, pixelRatio, strokeColor, strokePath2D, type Theme } from './renderer';
+import { drawImages, HIGHLIGHT_ALPHA, pixelRatio, strokeColor, strokePath2D, type Theme } from './renderer';
 
 /** Half the handle's hit area, CSS px (a 22 px square around the corner). */
 export const HANDLE_HIT = 11;
@@ -108,15 +108,17 @@ export class SelectionOverlay {
 
   /**
    * One frame of a drag: the strokes (in page px of the page they're on) under `t`, then moved by
-   * (ox, oy) onto the page the overlay is over, and the box around them.
+   * (ox, oy) onto the page the overlay is over, and the box around them. Selected images (#12)
+   * are drawn first, under the strokes.
    */
-  drawDrag(strokes: readonly Stroke[], t: Transform, ox: number, oy: number, box: Box, theme: Theme) {
+  drawDrag(strokes: readonly Stroke[], t: Transform, ox: number, oy: number, box: Box, theme: Theme, images?: readonly PageImage[]) {
     this.clear();
     const ctx = this.ctx;
     ctx.save();
     // x' = ox + dx + tx + k (x - tx), as a canvas transform after the page one.
     const e = ox + t.dx + t.ox * (1 - t.k), f = oy + t.dy + t.oy * (1 - t.k);
     ctx.transform(t.k, 0, 0, t.k, e, f);
+    if (images?.length) drawImages(ctx, images);
     ctx.globalAlpha = HIGHLIGHT_ALPHA;
     for (const s of strokes) {
       if (s.tool !== 'highlighter') continue;

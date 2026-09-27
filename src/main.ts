@@ -93,6 +93,10 @@ export default class NotebookPlugin extends Plugin {
         return true;
       },
     });
+    // Images (#12): on the current page, as a page of their own, or from the clipboard.
+    this.addInkCommand('insert-image', 'Insert image', view => view.insertImage(false));
+    this.addInkCommand('insert-image-page', 'Insert image as a whole page', view => view.insertImage(true));
+    this.addInkCommand('paste-image', 'Paste image', view => void view.pasteImage());
     this.registerEvent(this.app.workspace.on('file-menu', (menu, file, _source, leaf) => {
       if (!(file instanceof TFile) || !leaf || leaf.view.getViewType() !== 'markdown' || !cachedIsInk(this.app, file)) return;
       menu.addItem(item => item.setTitle('Open as ink note').setIcon('pencil').onClick(() => void this.openAsInk(file, leaf)));

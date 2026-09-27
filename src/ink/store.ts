@@ -9,6 +9,7 @@ import { readNote, writeNote, type NoteIndex } from '../format/note';
 import { dirOf, nameOf, rebase, relative, resolve, within } from './paths';
 import { newPage, paperSize, readPage, writePage, type Page, type Size, type Stroke } from '../format/page';
 import { parseTemplate, parseTemplateName, sameTemplate, templateName, templateSize, type Template } from '../format/template';
+import type { PageImage } from '../format/page';
 
 const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -842,6 +843,53 @@ export class NoteStore {
       out.push({ index, stroke: page.strokes[index] });
       page.strokes[index] = stroke;
       at.delete(id);
+    }
+    if (out.length) this.changed(slot);
+    return out;
+  }
+
+  // ---- images (#12)
+  // Each returns what it replaced, so the view can undo it; each marks the page changed once.
+
+  /** Puts an image on the page at `index` of its images (default: on top). False if there's no such page or the id is taken. */
+  addImage(pageId: string, image: PageImage, index = Infinity): boolean {
+    const slot = this.slots.find(s => s.id === pageId);
+    const page = slot && this.page(slot);
+    if (!slot || !page) return false;
+    const images = page.images ?? (page.images = []);
+    if (images.some(im => im.id === image.id)) return false;
+    images.splice(Math.max(0, Math.min(index, images.length)), 0, image);
+    this.changed(slot);
+    return true;
+  }
+
+  /** Removes these images; returns them with the indices they had, ascending (to put back with addImage). */
+  removeImages(pageId: string, ids: Iterable<string>): { index: number; image: PageImage }[] {
+    const slot = this.slots.find(s => s.id === pageId);
+    const page = slot && this.page(slot);
+    if (!slot || !page || !page.images) return [];
+    const remove = new Set(ids);
+    const removed: { index: number; image: PageImage }[] = [];
+    page.images = page.images.filter((image, index) => {
+      if (!remove.has(image.id)) return true;
+      removed.push({ index, image });
+      return false;
+    });
+    if (removed.length) this.changed(slot);
+    return removed;
+  }
+
+  /** Replaces images in place, each `id` by `image`; returns the old ones (to undo, replace them back). */
+  replaceImages(pageId: string, entries: readonly { id: string; image: PageImage }[]): { id: string; image: PageImage }[] {
+    const slot = this.slots.find(s => s.id === pageId);
+    const page = slot && this.page(slot);
+    if (!slot || !page || !page.images || !entries.length) return [];
+    const out: { id: string; image: PageImage }[] = [];
+    for (const { id, image } of entries) {
+      const i = page.images.findIndex(im => im.id === id);
+      if (i < 0) continue;
+      out.push({ id: image.id, image: page.images[i] });
+      page.images[i] = image;
     }
     if (out.length) this.changed(slot);
     return out;
