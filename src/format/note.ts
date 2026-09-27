@@ -2,7 +2,7 @@
 // whose body embeds each page in order with a standard markdown image link into the note's
 // folder: `![](lecture/p-7f3a0c.svg)`. Everything else in the file is kept verbatim. The pages'
 // folder is normally the note's basename, but any relative folder is read (a folder renamed by
-// hand, or one that couldn't follow a rename, #26), as long as every page is in the same one.
+// hand, or one that couldn't follow a rename, #26), the folder of the first page embed; page-shaped embeds from other folders are text.
 import { isPageId } from './ids';
 import type { Paper } from './page';
 
@@ -96,9 +96,9 @@ function embedOf(line: string): { page: string; alt: string; folder: string } | 
 
 /**
  * Reads a note index. `noteBasename` is the note's file name without `.md`. Throws if the file
- * isn't an ink note (no frontmatter with `ink: 1`), a page is embedded twice, or pages are
- * embedded from more than one folder. The pages' folder is the one the embeds use (the
- * basename if there are none).
+ * isn't an ink note (no frontmatter with `ink: 1`) or a page is embedded twice. The pages'
+ * folder is the one the first page embed uses (the basename if there is none); page-shaped
+ * embeds from other folders are kept as text.
  */
 export function readNote(markdown: string, noteBasename: string): NoteIndex {
   const eol = markdown.includes('\r\n') ? '\r\n' : '\n';
@@ -130,11 +130,9 @@ export function readNote(markdown: string, noteBasename: string): NoteIndex {
   let folder: string | null = null;
   const body: BodyLine[] = lines.slice(end + 1).map(line => {
     const embed = embedOf(line);
-    if (!embed) return line;
+    // The first page embed sets the folder; a page-shaped embed from another folder is text.
+    if (!embed || (folder !== null && embed.folder !== folder)) return line;
     if (pages.includes(embed.page)) throw new Error(`Page ${embed.page} is embedded twice in the note`);
-    if (folder !== null && embed.folder !== folder) {
-      throw new Error(`Pages are embedded from more than one folder ("${folder}" and "${embed.folder}")`);
-    }
     folder = embed.folder;
     pages.push(embed.page);
     return { page: embed.page, alt: embed.alt };
