@@ -259,6 +259,10 @@ export class InkView extends FileView {
     // and selection menu are outside it and take Pencil taps and drags as they take a finger's.
     this.registerDomEvent(this.scroller, 'touchstart', e => blockStylusTouch(e), { passive: false });
     this.registerDomEvent(this.scroller, 'touchmove', e => blockStylusTouch(e) || blockFingerTouch(e, this.scroller), { passive: false });
+    // A drag that starts on the toolbar, Pages panel, a picker or the selection menu (Pencil or
+    // finger) scrolls natively and taps still work, but its touchmoves stop at the view, so they
+    // never reach Obsidian's sidebar swipes (not prevented: passive).
+    this.registerDomEvent(root, 'touchmove', e => e.stopPropagation(), { passive: true });
     // Two fingers tapped undo, three redo (a tap never pans: see NAV_SLOP in navigate.ts).
     listenForUndoTaps((type, fn, options) => this.registerDomEvent(this.pagesEl, type, fn, options), () => this.undo(), () => this.redo());
     // One or two fingers pan with momentum, two pinch-zoom; Ctrl/Cmd+wheel zooms.
