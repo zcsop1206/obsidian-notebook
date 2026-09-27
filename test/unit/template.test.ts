@@ -11,7 +11,7 @@ import {
 function segments(el: string): [string, number[]][] {
   const d = /\sd="([^"]*)"/.exec(el)![1];
   const out: [string, number[]][] = [];
-  const re = /([MmHhVv])([^MmHhVv]*)/g;
+  const re = /([MmHhVvAa])([^MmHhVvAa]*)/g;
   for (let m = re.exec(d); m; m = re.exec(d)) out.push([m[1], m[2].trim() ? m[2].trim().split(/[ ,]+/).map(Number) : []]);
   return out;
 }
@@ -121,16 +121,25 @@ test('render: grid lines from the page edges, 5 mm (18.9 px) and 1/4 in (24 px)'
   assert.deepEqual(segments(renderTemplate({ kind: 'grid', spacing: '5mm' }, LETTER)[0]).length / 2, 55 + 43);
 });
 
-test('render: dots at the 5 mm grid points, one spacing in, round 2 px caps (radius 1 px)', () => {
+test('render: dots at the 5 mm grid points, one spacing in, circles of two arcs (radius 0.5 px, 1 px stroke)', () => {
   const [el] = renderTemplate({ kind: 'dots', spacing: '5mm' }, LETTER);
-  assert.match(el, /^<path class="t" fill="none" stroke-width="2" stroke-linecap="round" d="[^"]+"\/>$/);
-  // Walk the path: each `h0` is a dot where the pen is.
+  assert.match(el, /^<path class="t" fill="none" stroke-width="1" d="[^"]+"\/>$/);
+  assert.ok(!el.includes('linecap') && !/[hHvV]0(?![.\d])/.test(el), 'no zero-length segments');
+  assert.ok(!/\d\.\d\d/.test(el), 'one decimal at most');
+  // Walk the path: each dot is two relative half-circle arcs from its left point and back.
   let x = 0, y = 0;
   const dots: [number, number][] = [];
-  for (const [c, n] of segments(el)) {
+  const segs = segments(el);
+  for (let i = 0; i < segs.length; i++) {
+    const [c, n] = segs[i];
     if (c === 'M') [x, y] = n;
     else if (c === 'm') { x += n[0]; y += n[1]; }
-    else if (c === 'h') { assert.equal(n[0], 0); dots.push([Math.round(x * 10) / 10, Math.round(y * 10) / 10]); }
+    else {
+      assert.equal(c, 'a');
+      assert.deepEqual([n, segs[i + 1]], [[0.5, 0.5, 0, 1, 0, 1, 0], ['a', [0.5, 0.5, 0, 1, 0, -1, 0]]]);
+      dots.push([Math.round((x + 0.5) * 10) / 10, Math.round(y * 10) / 10]);
+      i++;
+    }
   }
   const xs = [...new Set(dots.map(d => d[0]))], ys = [...new Set(dots.map(d => d[1]))];
   assert.equal(dots.length, xs.length * ys.length);
