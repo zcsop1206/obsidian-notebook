@@ -4,8 +4,11 @@
 # synthetic pen events, autosave timing, saving when hidden or closed, reopening, changes on
 # disk, adding pages, a 20-page note, the markdown takeover, page templates, and the pen (live
 # and committed outlines, nibs, stylus touches, the pen strip, stats and handler time), and the
-# highlighter (tools, layers, crossings, the live overlay, long strokes). Run by
-# `npm test`; screenshots land in test/out/. Exits non-zero if any check fails.
+# highlighter (tools, layers, crossings, the live overlay, long strokes), undo and redo, the
+# eraser, and zoom and finger navigation (#9: pans with momentum, pinches, zoom commands and
+# Ctrl+wheel, strokes at 50-400%, the pen during finger gestures, touch rules, frame times on
+# the 20-page note, bitmap memory at 400%). Run by `npm test`; screenshots land in test/out/.
+# Exits non-zero if any check fails.
 import os, subprocess, sys, time
 from playwright.sync_api import sync_playwright
 
@@ -651,7 +654,7 @@ try:
         }""")
         check('pen: a stylus touch outside any page is prevented (touchstart and touchmove)', r['offPage'] == [True, True] and r['scroller'] == [True, True], r)
         check('pen: a stylus touch on a page is prevented', r['onPage'] == [True, True], r)
-        check('pen: a finger touch is not prevented', r['finger'] == [False, False], r)
+        check('pen: a finger touchstart is not prevented; a finger touchmove over the pages is (#9: the view pans itself)', r['finger'] == [False, True], r)
         check('pen: a stylus touchstart on a control is not prevented (taps work); touchmove is', r['control'] == [False, False, True], r)
 
         # (7) the pen strip and the commands set the next stroke's nib, colour and size
@@ -1319,6 +1322,461 @@ try:
         check('eraser perf: median handler time under 4 ms (Chromium)', L['handlerMs'] < 4, L['handlerMs'])
         check('eraser perf: the page is redrawn at most once per frame', 0 < r['renders'] <= L['frames'] + 1, (r['renders'], L['frames']))
         # ======== end of 14. The stroke eraser (#7) ========
+
+        # ======== 15. Zoom and finger navigation (#9) ========
+        ev("""async () => {
+          T.sc = () => view.contentEl.querySelector('.nb-ink-scroll');
+          T.frame = () => new Promise(r => requestAnimationFrame(r));
+          T.targets = {};
+          /** A finger pointer event at client (x, y), on the element under the finger when it landed. */
+          T.finger = (type, id, x, y) => {
+            if (type === 'pointerdown') {
+              const el = document.elementFromPoint(x, y);
+              T.targets[id] = el && T.sc().contains(el) ? el : T.sc();
+            }
+            const e = new PointerEvent(type, { pointerId: id, pointerType: 'touch', isPrimary: id === 101, clientX: x, clientY: y,
+              bubbles: true, cancelable: true, button: type === 'pointermove' ? -1 : 0, buttons: type === 'pointerup' ? 0 : 1 });
+            (T.targets[id] || T.sc()).dispatchEvent(e);
+            return e;
+          };
+          /** Moves fingers from `from` ([[x, y], ...]) to `to` in n steps, a frame after each. */
+          T.drag = async (from, to, n, { down = true, up = true } = {}) => {
+            const at = (i, s) => [from[i][0] + (to[i][0] - from[i][0]) * s / n, from[i][1] + (to[i][1] - from[i][1]) * s / n];
+            if (down) from.forEach(([x, y], i) => T.finger('pointerdown', 101 + i, x, y));
+            for (let s = 1; s <= n; s++) {
+              from.forEach((_, i) => T.finger('pointermove', 101 + i, ...at(i, s)));
+              await T.frame();
+            }
+            if (up) to.forEach(([x, y], i) => T.finger('pointerup', 101 + i, x, y));
+          };
+          /** Waits for momentum to end; returns whether it did. */
+          T.settle = async (ms = 6000) => {
+            const t0 = performance.now();
+            while (view.nav.active && performance.now() - t0 < ms) await T.sleep(50);
+            return !view.nav.active;
+          };
+          T.centre = () => { const sc = T.sc(), r = sc.getBoundingClientRect(); return [r.left + sc.clientWidth / 2, r.top + sc.clientHeight / 2]; };
+          /** The page point under client (x, y): [page index, page x, page y], or null. */
+          T.pagePoint = (x, y) => {
+            for (const [i, el] of T.pages().entries()) {
+              const r = el.getBoundingClientRect(), s = view.store.slots[i].size;
+              if (y >= r.top && y < r.bottom) return [i, (x - r.left) * s.width / r.width, (y - r.top) * s.height / r.height];
+            }
+            return null;
+          };
+          /** Where page point [i, x, y] is on screen. */
+          T.screenPoint = ([i, x, y]) => {
+            const r = T.pages()[i].getBoundingClientRect(), s = view.store.slots[i].size;
+            return [r.left + x * r.width / s.width, r.top + y * r.height / s.height];
+          };
+          T.off = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+          T.bitmapWidth = i => { const c = T.pages()[i].querySelector('canvas.nb-ink-bitmap'); return c ? c.width : 0; };
+          /**
+           * A pen stroke through client points `pts`, a frame after each move; `between(j)` runs
+           * before move j. Returns the page and, for each sample, the page point under it at the
+           * moment it was sent (through the page's bounding rect).
+           */
+          T.penAt = async (pts, { id = 61, between = null } = {}) => {
+            const target = document.elementFromPoint(pts[0][0], pts[0][1]), pageEl = target.closest('.nb-ink-page');
+            const i = T.pages().indexOf(pageEl), size = view.store.slots[i].size;
+            const init = ([x, y], b = 1) => ({ pointerId: id, pointerType: 'pen', pressure: 0.5, clientX: x, clientY: y, bubbles: true, cancelable: true, button: 0, buttons: b });
+            const under = ([x, y]) => { const r = pageEl.getBoundingClientRect(); return [(x - r.left) * size.width / r.width, (y - r.top) * size.height / r.height]; };
+            const expected = [under(pts[0])];
+            target.dispatchEvent(new PointerEvent('pointerdown', init(pts[0])));
+            for (let j = 1; j < pts.length; j++) {
+              if (between) await between(j);
+              expected.push(under(pts[j]));
+              target.dispatchEvent(new PointerEvent('pointermove', init(pts[j])));
+              await T.frame();
+            }
+            target.dispatchEvent(new PointerEvent('pointerup', init(pts[pts.length - 1], 0)));
+            return { i, expected };
+          };
+          /** The largest distance between the last stroke on page i and `expected` (page px), or -1 if the counts differ. */
+          T.landed = (i, expected) => {
+            const s = view.store.page(view.store.slots[i]).strokes, pts = s[s.length - 1].points;
+            if (pts.length !== expected.length) return -1;
+            return Math.max(...pts.map((q, j) => Math.max(Math.abs(q.x - expected[j][0]), Math.abs(q.y - expected[j][1]))));
+          };
+          await p.createInkNote('Zoom', '', 'letter', 'lined-college');
+          await T.sleep(150);
+          for (let i = 0; i < 3; i++) view.addPage();
+          T.sc().scrollTop = 0;
+          await T.sleep(150);
+        }""")
+        r = ev("""() => {
+          const sc = T.sc(), cs = getComputedStyle(sc), pagesEl = view.contentEl.querySelector('.nb-ink-pages');
+          return { touchAction: cs.touchAction, overflowX: cs.overflowX, zoom: view.zoom, layer: [pagesEl.style.width, pagesEl.style.height],
+            client: sc.clientWidth, scrollW: sc.scrollWidth };
+        }""")
+        check('zoom: the pages area takes no native touch panning (touch-action: none) and can scroll sideways',
+              r['touchAction'] == 'none' and r['overflowX'] == 'auto', r)
+        check('zoom: a note opens at 100%, the pages layer explicitly sized to the view width (no sideways scroll)',
+              r['zoom'] == 1 and r['layer'][0] == f"{r['client']}px" and r['scrollW'] == r['client'], r)
+
+        # (1) one finger pans, then coasts (momentum) and stops
+        r = ev("""async () => {
+          const sc = T.sc(), [cx, cy] = T.centre();
+          let y = cy;
+          T.finger('pointerdown', 101, cx, y);
+          y -= 12; T.finger('pointermove', 101, cx, y); await T.frame();  // past the slop (10 px): the pan starts here
+          const start = sc.scrollTop;
+          for (let s = 0; s < 15; s++) { y -= 20; T.finger('pointermove', 101, cx, y); await T.frame(); }
+          const dragged = sc.scrollTop - start;
+          T.finger('pointerup', 101, cx, y);
+          const atUp = sc.scrollTop;
+          await T.sleep(300);
+          const coasting = view.nav.active, after300 = sc.scrollTop;
+          const stopped = await T.settle();
+          const end = sc.scrollTop;
+          await T.sleep(200);
+          return { start, dragged, atUp, coasting, after300, stopped, end, still: sc.scrollTop === end, nav: { ...view.stats.nav } };
+        }""")
+        print(f"finger pan: dragged {r['dragged']:.1f} px for 300 px of finger; momentum carried {r['end'] - r['atUp']:.0f} px; "
+              f"frames {r['nav']['frames']}, median {r['nav']['medianMs']:.1f} ms, max {r['nav']['maxMs']:.1f} ms, slow {r['nav']['slow']}")
+        check('nav: a one-finger drag scrolls with the finger (slop eaten, no jump)', r['start'] == 0 and abs(r['dragged'] - 300) <= 1, r)
+        check('nav: after release the view keeps coasting (momentum)', r['coasting'] and r['after300'] > r['atUp'] + 50, r)
+        check('nav: ... slows down and stops', r['stopped'] and r['still'] and 150 < r['end'] - r['atUp'] < 1500, r)
+        r = ev("""async () => {
+          const sc = T.sc(), [cx, cy] = T.centre();
+          sc.scrollTop = 0;
+          await T.sleep(50);
+          await T.drag([[cx, cy]], [[cx, cy - 250]], 10);
+          await T.sleep(120);
+          const moving = view.nav.active, a = sc.scrollTop;
+          T.finger('pointerdown', 103, cx, cy);
+          const stopped = !view.nav.active;
+          await T.sleep(150);
+          const b = sc.scrollTop;
+          T.finger('pointerup', 103, cx, cy);
+          return { moving, stopped, a, b };
+        }""")
+        check('nav: a new touch stops the momentum', r['moving'] and r['stopped'] and r['a'] == r['b'] and r['a'] > 0, r)
+        r = ev("""async () => {
+          const sc = T.sc(), [cx, cy] = T.centre();
+          sc.scrollTop = 100;
+          await T.sleep(50);
+          const from = [[cx - 60, cy], [cx + 60, cy]];
+          await T.drag(from, from.map(([x, y]) => [x, y - 12]), 1, { up: false });
+          const start = sc.scrollTop;
+          await T.drag(from.map(([x, y]) => [x, y - 12]), from.map(([x, y]) => [x, y - 212]), 20, { down: false });
+          const moved = sc.scrollTop - start;
+          await T.settle();
+          return { moved, zoom: view.zoom, transform: view.contentEl.querySelector('.nb-ink-pages').style.transform, pinches: view.stats.nav.pinches };
+        }""")
+        check('nav: two fingers moving together pan (no zoom)', abs(r['moved'] - 200) <= 1 and r['zoom'] == 1 and r['transform'] == '' and r['pinches'] == 0, r)
+
+        # (2) pinch out to 2x, then in to 0.5x, around the pinch centre
+        r = ev("""async () => {
+          const sc = T.sc(), pagesEl = view.contentEl.querySelector('.nb-ink-pages');
+          sc.scrollTop = T.pages()[1].offsetTop + 200;
+          await T.sleep(300);
+          const [cx, cy] = T.centre(), before = T.pagePoint(cx, cy), i = before[0];
+          const w0 = T.bitmapWidth(i), pw0 = T.pages()[i].offsetWidth, renders = view.stats.lastRenderMs;
+          const from = [[cx - 50, cy], [cx + 50, cy]];
+          await T.drag(from, [[cx - 62, cy], [cx + 62, cy]], 1, { up: false });  // the pan and the pinch start (distance 124)
+          await T.drag([[cx - 62, cy], [cx + 62, cy]], [[cx - 124, cy], [cx + 124, cy]], 12, { down: false, up: false });  // to 248: 2x
+          const during = { transform: pagesEl.style.transform, zoom: view.zoom, w: T.bitmapWidth(i), pw: T.pages()[i].offsetWidth,
+            off: T.off(T.screenPoint(before), [cx, cy]), scrollH: sc.scrollHeight };
+          T.finger('pointerup', 101, cx - 124, cy);
+          T.finger('pointerup', 102, cx + 124, cy);
+          const after = { zoom: view.zoom, transform: pagesEl.style.transform, w: T.bitmapWidth(i), pw: T.pages()[i].offsetWidth,
+            off: T.off(T.screenPoint(before), [cx, cy]), layerW: parseFloat(pagesEl.style.width), client: sc.clientWidth, left: sc.scrollLeft };
+          await T.sleep(100);
+          return { before, w0, pw0, during, after, active: view.nav.active, nav: { ...view.stats.nav } };
+        }""")
+        print('pinch out:', r)
+        d, a = r['during'], r['after']
+        check('pinch: during the pinch the pages layer is scaled by a transform, with no relayout or re-render',
+              d['transform'] == 'scale(2)' and d['zoom'] == 1 and d['w'] == r['w0'] and d['pw'] == r['pw0'], d)
+        check('pinch: ... and the page point under the pinch centre stays under it', d['off'] < 1, d['off'])
+        check('pinch: on release the zoom is committed at 2x: relaid out, no transform', a['zoom'] == 2 and a['transform'] == '' and abs(a['pw'] - 2 * r['pw0']) <= 1, a)
+        check('pinch: ... the page point under the centre is still under it (within 1 px)', a['off'] < 1, a['off'])
+        check('pinch: ... the visible page is redrawn sharp at the new size', abs(a['w'] - 2 * r['w0']) <= 2, (r['w0'], a['w']))
+        check('pinch: ... and the view scrolls sideways at 2x', a['layerW'] > a['client'] and a['left'] > 0, a)
+        r = ev("""async () => {
+          const sc = T.sc(), pagesEl = view.contentEl.querySelector('.nb-ink-pages');
+          const [cx, cy] = T.centre(), before = T.pagePoint(cx, cy), i = before[0], w0 = T.bitmapWidth(i);
+          await T.drag([[cx - 220, cy], [cx + 220, cy]], [[cx - 208, cy], [cx + 208, cy]], 1, { up: false });  // distance 416
+          await T.drag([[cx - 208, cy], [cx + 208, cy]], [[cx - 52, cy], [cx + 52, cy]], 15, { down: false, up: false });  // 104: a quarter
+          const during = { transform: pagesEl.style.transform, off: T.off(T.screenPoint(before), [cx, cy]), top: sc.scrollTop };
+          T.finger('pointerup', 101, cx - 52, cy);
+          T.finger('pointerup', 102, cx + 52, cy);
+          const after = { zoom: view.zoom, transform: pagesEl.style.transform, w: T.bitmapWidth(i), off: T.off(T.screenPoint(before), [cx, cy]),
+            layerW: parseFloat(pagesEl.style.width), client: sc.clientWidth, left: sc.scrollLeft, pw: T.pages()[i].offsetWidth };
+          await T.sleep(300);
+          const visible = T.pages().map((el, j) => [j, el.getBoundingClientRect()]).filter(([, rc]) => rc.bottom > sc.getBoundingClientRect().top && rc.top < sc.getBoundingClientRect().bottom).map(([j]) => j);
+          return { before, w0, during, after, visible, drawn: visible.map(T.bitmapWidth) };
+        }""")
+        print('pinch in:', r)
+        d, a = r['during'], r['after']
+        check('pinch in: scaled by a quarter during the pinch, the centre point kept', d['transform'] == 'scale(0.25)' and d['off'] < 1, d)
+        check('pinch in: committed at 0.5x (clamped range), centre point within 1 px, pages centred in the view width',
+              a['zoom'] == 0.5 and a['transform'] == '' and a['off'] < 1 and a['layerW'] == a['client'] and a['left'] == 0, a)
+        check('pinch in: the page is redrawn at a quarter of the 2x resolution, and all visible pages are drawn',
+              abs(a['w'] - r['w0'] / 4) <= 2 and len(r['visible']) >= 2 and all(w > 0 for w in r['drawn']), r)
+
+        # (3) zoom commands and Ctrl+wheel
+        r = ev("""async () => {
+          const sc = T.sc(), out = [];
+          commands['zoom-reset'].checkCallback(false);
+          sc.scrollTop = T.pages()[1].offsetTop + 100;
+          await T.sleep(50);
+          const [cx, cy] = T.centre();
+          let off = 0;
+          for (const c of ['zoom-in', 'zoom-in', 'zoom-out', 'zoom-out', 'zoom-out', 'zoom-reset']) {
+            const before = T.pagePoint(cx, cy);
+            commands[c].checkCallback(false);
+            out.push(view.zoom);
+            off = Math.max(off, T.off(T.screenPoint(before), [cx, cy]));
+          }
+          view.setZoom(9);
+          const max = view.zoom;
+          view.setZoom(0.1);
+          const min = view.zoom;
+          view.setZoom(1);
+          const shown = [commands['zoom-in'].checkCallback(true), commands['zoom-out'].checkCallback(true), commands['zoom-reset'].checkCallback(true)];
+          return { out, off, max, min, shown };
+        }""")
+        check('zoom commands: in and out by 25%, reset to 100%, clamped to 50-400%',
+              r['out'] == [1.25, 1.5, 1.25, 1, 0.75, 1] and r['max'] == 4 and r['min'] == 0.5 and r['shown'] == [True, True, True], r)
+        check('zoom commands: the page point at the middle of the view stays there (within 1 px each time)', r['off'] < 1, r['off'])
+        r = ev("""async () => {
+          const sc = T.sc(), pagesEl = view.contentEl.querySelector('.nb-ink-pages'), r0 = sc.getBoundingClientRect();
+          const x = r0.left + 200, y = r0.top + 150, before = T.pagePoint(x, y);
+          const wheel = (ctrlKey, deltaY) => { const e = new WheelEvent('wheel', { deltaY, ctrlKey, clientX: x, clientY: y, bubbles: true, cancelable: true }); sc.dispatchEvent(e); return e.defaultPrevented; };
+          const plain = wheel(false, 40), plainZoom = view.zoom;
+          await T.sleep(50);
+          const top = sc.scrollTop;
+          const prevented = [wheel(true, -100), wheel(true, -100), wheel(true, -100)];
+          const during = { zoom: view.zoom, transform: pagesEl.style.transform, off: T.off(T.screenPoint(before), [x, y]) };
+          await T.sleep(300);
+          return { plain, plainZoom, prevented, during, zoom: view.zoom, expected: Math.exp(0.6), off: T.off(T.screenPoint(before), [x, y]), top };
+        }""")
+        check('wheel: a plain wheel is left to native scrolling', r['plain'] is False and r['plainZoom'] == 1, r)
+        check('wheel: Ctrl+wheel is taken and previewed as a transform around the cursor', r['prevented'] == [True] * 3 and r['during']['zoom'] == 1
+              and r['during']['transform'].startswith('scale(') and r['during']['off'] < 1, r)
+        check('wheel: ... then committed, the point under the cursor kept', abs(r['zoom'] - r['expected']) < 1e-6 and r['off'] < 1, r)
+
+        # (4) strokes land under the pointer at 50%, 100% and 400%
+        r = ev("""async () => {
+          const out = {};
+          for (const z of [0.5, 1, 4]) {
+            view.setZoom(z);
+            // the middle of page 1 in the middle of the view
+            const sc = T.sc(), pg = T.pages()[1];
+            sc.scrollTop = pg.offsetTop + pg.offsetHeight / 2 - sc.clientHeight / 2;
+            sc.scrollLeft = pg.offsetLeft + pg.offsetWidth / 2 - sc.clientWidth / 2;
+            await T.sleep(100);
+            // a wavy line inside the view, 4 px apart on screen, on the page under the view's middle
+            const [cx, cy] = T.centre();
+            const pts = Array.from({ length: 40 }, (_, j) => [cx - 80 + 4 * j, cy + 20 * Math.sin(j / 5)]);
+            const { i, expected } = await T.penAt(pts);
+            out[z] = { page: i, worst: T.landed(i, expected), n: expected.length, first: expected[0] };
+          }
+          view.setZoom(1);
+          return out;
+        }""")
+        print('strokes at zoom (worst distance from the pointer, page px):', {k: round(v['worst'], 3) for k, v in r.items()})
+        check('zoom: strokes at 50%, 100% and 400% land under the pointer (within 0.2 page px)',
+              all(0 <= v['worst'] <= 0.2 for v in r.values()) and len(r) == 3, r)
+
+        # (5) the pen keeps writing while a finger pans or two fingers pinch
+        r = ev("""async () => {
+          const sc = T.sc();
+          sc.scrollTop = T.pages()[1].offsetTop + 100;
+          await T.sleep(100);
+          const [cx, cy] = T.centre(), n = view.store.slots.reduce((k, s) => k + view.store.page(s).strokes.length, 0);
+          const top0 = sc.scrollTop;
+          let fy = cy + 100;
+          T.finger('pointerdown', 101, cx + 150, fy);
+          const pts = Array.from({ length: 30 }, (_, j) => [cx - 150 + 5 * j, cy]);
+          const pan = await T.penAt(pts, { between: async () => { fy -= 12; T.finger('pointermove', 101, cx + 150, fy); await T.frame(); } });
+          T.finger('pointerup', 101, cx + 150, fy);
+          await T.settle();
+          const panned = { worst: T.landed(pan.i, pan.expected), moved: sc.scrollTop - top0, strokes: view.store.slots.reduce((k, s) => k + view.store.page(s).strokes.length, 0) - n,
+            span: pan.expected[pan.expected.length - 1][1] - pan.expected[0][1] };
+          // Now a pinch from 100% towards 150% while writing; the zoom is committed mid-stroke.
+          const f = [[cx - 60, cy + 120], [cx + 60, cy + 120]];
+          T.finger('pointerdown', 101, ...f[0]);
+          T.finger('pointerdown', 102, ...f[1]);
+          let spread = 60;
+          const pts2 = Array.from({ length: 30 }, (_, j) => [cx - 150 + 5 * j, cy - 60]);
+          const pinch = await T.penAt(pts2, { id: 62, between: async j => {
+            if (j < 20) {
+              spread += 3;
+              T.finger('pointermove', 101, cx - spread, cy + 120);
+              T.finger('pointermove', 102, cx + spread, cy + 120);
+              await T.frame();
+            } else if (j === 20) {
+              T.finger('pointerup', 101, cx - spread, cy + 120);
+              T.finger('pointerup', 102, cx + spread, cy + 120);
+            }
+          } });
+          const pinched = { worst: T.landed(pinch.i, pinch.expected), zoom: view.zoom,
+            strokes: view.store.slots.reduce((k, s) => k + view.store.page(s).strokes.length, 0) - n };
+          view.setZoom(1);
+          return { panned, pinched, live: T.liveInk() };
+        }""")
+        print('pen during finger gestures:', r)
+        check('nav: a pen stroke while a finger pans is one stroke, every point under the pen (within 0.2 page px)',
+              r['panned']['strokes'] == 1 and 0 <= r['panned']['worst'] <= 0.2 and r['panned']['moved'] > 200 and r['panned']['span'] > 150, r['panned'])
+        check('nav: a pen stroke while two fingers pinch (zoom committed mid-stroke) is one stroke, every point under the pen',
+              r['pinched']['strokes'] == 2 and 0 <= r['pinched']['worst'] <= 0.2 and r['pinched']['zoom'] > 1.2, r['pinched'])
+        check('nav: fingers never draw; the live overlays are clear afterwards', r['live'] == 0, r['live'])
+
+        # (6) a two-finger tap still undoes, without panning or zooming
+        r = ev("""async () => {
+          const sc = T.sc(), [cx, cy] = T.centre();
+          await T.stroke(1, T.wave(100, 300));
+          const n = view.store.page(view.store.slots[1]).strokes.length;
+          const top = sc.scrollTop, zoom = view.zoom;
+          // As the iPad sends it: pointer events and touch events for the same two fingers, moving 3 px.
+          const pagesEl = view.contentEl.querySelector('.nb-ink-pages');
+          const touches = dx => [0, 1].map(i => new Touch({ identifier: 70 + i, target: pagesEl, clientX: cx - 40 + 80 * i + dx, clientY: cy + dx }));
+          const fire = (type, t, c) => { const e = new TouchEvent(type, { touches: t, changedTouches: c, bubbles: true, cancelable: true }); pagesEl.dispatchEvent(e); return e.defaultPrevented; };
+          T.finger('pointerdown', 101, cx - 40, cy); T.finger('pointerdown', 102, cx + 40, cy);
+          fire('touchstart', touches(0), touches(0));
+          await T.sleep(40);
+          T.finger('pointermove', 101, cx - 37, cy + 3); T.finger('pointermove', 102, cx + 43, cy + 3);
+          const moveBlocked = fire('touchmove', touches(3), touches(3));
+          await T.frame();
+          await T.sleep(40);
+          T.finger('pointerup', 101, cx - 37, cy + 3); T.finger('pointerup', 102, cx + 43, cy + 3);
+          fire('touchend', [], touches(3));
+          await T.sleep(50);
+          return { before: n, after: view.store.page(view.store.slots[1]).strokes.length, moved: sc.scrollTop - top, zoom: view.zoom === zoom, moveBlocked };
+        }""")
+        check('nav: a two-finger tap (pointer and touch events) still undoes, and neither scrolls nor zooms',
+              r['after'] == r['before'] - 1 and r['moved'] == 0 and r['zoom'], r)
+
+        # (7) touch rules: finger touchmoves over the pages are prevented, touchstarts and the strip are not
+        r = ev("""() => {
+          const sc = T.sc(), pagesEl = view.contentEl.querySelector('.nb-ink-pages'), add = view.contentEl.querySelector('.nb-ink-add');
+          const strip = view.contentEl.querySelector('.nb-ink-strip'), swatch = view.contentEl.querySelector('.nb-ink-swatch');
+          return {
+            fingerMove: [T.touch(T.pages()[0], 'touchmove', 'direct'), T.touch(pagesEl, 'touchmove', 'direct'), T.touch(sc, 'touchmove', 'direct'), T.touch(add, 'touchmove', 'direct')],
+            fingerStart: [T.touch(T.pages()[0], 'touchstart', 'direct'), T.touch(add, 'touchstart', 'direct')],
+            strip: [T.touch(strip, 'touchstart', 'direct'), T.touch(swatch, 'touchmove', 'direct')],
+            stylus: [T.touch(T.pages()[0], 'touchstart', 'stylus'), T.touch(T.pages()[0], 'touchmove', 'stylus'), T.touch(add, 'touchstart', 'stylus')],
+          };
+        }""")
+        check('touch: a finger touchmove anywhere over the pages is prevented (no sidebar swipes)', r['fingerMove'] == [True] * 4, r)
+        check('touch: finger touchstarts are not prevented, so taps on "Add page" still click', r['fingerStart'] == [False, False], r)
+        check('touch: fingers on the pen strip are left alone (it scrolls natively)', r['strip'] == [False, False], r)
+        check('touch: stylus rules unchanged (prevented, except a touchstart on a control)', r['stylus'] == [True, True, False], r)
+        r = ev("""async () => {
+          const add = view.contentEl.querySelector('.nb-ink-add'), n = view.store.slots.length;
+          add.scrollIntoView();
+          await T.sleep(50);
+          const rc = add.getBoundingClientRect(), x = rc.left + rc.width / 2, y = rc.top + rc.height / 2;
+          const hit = document.elementFromPoint(x, y) === add;
+          T.finger('pointerdown', 101, x, y);
+          T.finger('pointerup', 101, x, y);
+          add.click();  // what the tap's click does
+          await T.sleep(50);
+          const added = view.store.slots.length - n === 1;
+          view.undo();
+          return { hit, added };
+        }""")
+        check('touch: "Add page" can be tapped with a finger at 100%', r['hit'] and r['added'], r)
+
+        # (8) zoom and scroll are kept while the note is open, reset for another note
+        r = ev("""async () => {
+          const sc = T.sc();
+          view.setZoom(2);
+          sc.scrollLeft = 150;
+          sc.scrollTop = 900;
+          await T.sleep(50);
+          view.contentEl.querySelector('.nb-ink-add').click();
+          const added = { zoom: view.zoom, left: sc.scrollLeft, newPage: T.pagePoint(...T.centre()) };
+          view.undo();
+          await T.sleep(50);
+          const undone = { zoom: view.zoom, left: sc.scrollLeft };
+          sc.scrollTop = 1200;
+          await T.sleep(50);
+          const path = view.file.path, kept = { zoom: view.zoom, top: sc.scrollTop, left: sc.scrollLeft };
+          await app.workspace.getLeaf(false).openFile(app.vault.getFile('Physics.md'));
+          await T.sleep(100);
+          const other = { zoom: view.zoom, top: T.sc().scrollTop, left: T.sc().scrollLeft, w: T.pages()[0].offsetWidth, client: T.sc().clientWidth };
+          await app.workspace.getLeaf(false).openFile(app.vault.getFile(path));
+          await T.sleep(100);
+          return { added, undone, kept, other, back: { zoom: view.zoom, top: T.sc().scrollTop } };
+        }""")
+        check('keep: after adding a page the zoom and sideways scroll are kept (and the new page is shown)',
+              r['added']['zoom'] == 2 and r['added']['left'] == 150 and r['added']['newPage'] and r['added']['newPage'][0] == 4, r['added'])
+        check('keep: ... and after undoing it', r['undone'] == {'zoom': 2, 'left': 150}, r['undone'])
+        check('keep: loading another note in the view resets to 100% and the top', r['other']['zoom'] == 1 and r['other']['top'] == 0 and r['other']['left'] == 0
+              and r['other']['w'] == r['other']['client'] - 32, r['other'])
+        check('keep: zoom is not saved: the note comes back at 100%, at the top', r['back'] == {'zoom': 1, 'top': 0}, r['back'])
+
+        # (9) the 20-page note, 300 strokes per page: frame times of a finger pan, zoom 4 memory
+        r = ev("""async () => {
+          const files = ink.largeNote('Big3', 'Lecture', 20, 300);
+          dirs.add('Big3'); dirs.add('Big3/Lecture');
+          for (const [k, v] of Object.entries(files)) fs.set(k, v);
+          await app.workspace.getLeaf(false).openFile(app.vault.getFile('Big3/Lecture.md'));
+          await T.sleep(800);
+          const sc = T.sc(), r0 = sc.getBoundingClientRect(), x = r0.left + 300;
+          let y = r0.top + 450;
+          T.finger('pointerdown', 101, x, y);
+          const t0 = performance.now();
+          while (sc.scrollTop + sc.clientHeight < sc.scrollHeight - 2 && performance.now() - t0 < 60000) {
+            y -= 25;  // 25 px a frame, 1.5 px/ms: a brisk pan through all 20 pages, fresh (outlines not yet computed)
+            T.finger('pointermove', 101, x, y);
+            await T.frame();
+          }
+          T.finger('pointerup', 101, x, y);
+          await T.settle();
+          const nav = { ...view.stats.nav }, fromPlugin = p.inkNavStats();
+          const rendered = T.pages().map((e, i) => e.querySelector('canvas.nb-ink-bitmap') ? i : -1).filter(i => i >= 0);
+          return { nav, same: fromPlugin && fromPlugin.frames === nav.frames, rendered, bottom: sc.scrollTop + sc.clientHeight >= sc.scrollHeight - 2, ink19: T.ink(19) };
+        }""")
+        n = r['nav']
+        print(f"large note finger pan (20 pages, 300 strokes each, fresh): {n['frames']} frames, median {n['medianMs']:.1f} ms, "
+              f"max {n['maxMs']:.1f} ms, over 32 ms: {n['over32']} {n['slow']}; bitmaps at the bottom {r['rendered']}")
+        check('large pan: reaches the bottom with the last page drawn', r['bottom'] and r['ink19'] > 10000 and len(r['rendered']) <= 4, r)
+        check('large pan: no frame over 32 ms in Chromium (one outlier allowed, printed above)', n['frames'] > 500 and n['over32'] <= 1, n)
+        check('large pan: plugin.inkNavStats() returns the same numbers (the debug view prints them)', r['same'], r)
+        r = ev("""async () => {
+          const sc = T.sc();
+          sc.scrollTop = T.pages()[10].offsetTop;
+          await T.sleep(400);
+          const at1 = view.pages.filter(pv => pv.bitmap).length;
+          view.setZoom(4);
+          await T.sleep(600);
+          const live = () => view.pages.map((pv, i) => pv.bitmap && [i, pv.bitmap.canvas.width, pv.bitmap.canvas.height]).filter(Boolean);
+          const at4 = live();
+          // pan down three pages' worth at 400%, with a finger
+          const [cx, cy] = T.centre();
+          let y = cy;
+          T.finger('pointerdown', 101, cx, y);
+          for (let s = 0; s < 150; s++) { y -= 25; T.finger('pointermove', 101, cx, y); await T.frame(); }
+          T.finger('pointerup', 101, cx, y);
+          await T.settle();
+          await T.sleep(600);
+          const panned = live();
+          const cssW = T.pages()[panned[0][0]].offsetWidth, cssH = T.pages()[panned[0][0]].offsetHeight;
+          const nav = { ...view.stats.nav };
+          view.setZoom(1);
+          return { at1, at4, panned, cssW, cssH, nav, dpr: devicePixelRatio };
+        }""")
+        mb = lambda pages: sum(w * h * 4 for _, w, h in pages) / 1e6
+        print(f"zoom 400% on the large note: page {r['cssW']}x{r['cssH']} CSS px; bitmaps {r['at4']} ({mb(r['at4']):.0f} MB), "
+              f"after panning {r['panned']} ({mb(r['panned']):.0f} MB); at 100% {r['at1']} bitmaps; "
+              f"pan at 400%: {r['nav']['frames']} frames, median {r['nav']['medianMs']:.1f} ms, max {r['nav']['maxMs']:.1f} ms, over 32 ms {r['nav']['over32']}")
+        check("zoom 4: at most 3 pages keep bitmaps, each within iOS's 16M-pixel canvas limit",
+              1 <= len(r['at4']) <= 3 and 1 <= len(r['panned']) <= 3 and all(w * h <= 16_777_216 for _, w, h in r['at4'] + r['panned']), r)
+
+        # (10) the stats overlay and the debug readout show navigation
+        r = ev("""() => {
+          view.toggleStats();
+          const text = view.contentEl.querySelector('.nb-ink-stats').textContent;
+          view.toggleStats();
+          return text;
+        }""")
+        check('stats overlay: shows the zoom and the last finger gesture frame times', 'zoom 100%' in r and 'last finger gesture' in r and 'over 32 ms' in r, r)
+        # ======== end of 15. Zoom and finger navigation (#9) ========
 
         # --- unload removes the patch
         r = ev("""async () => {
