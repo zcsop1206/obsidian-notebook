@@ -57,3 +57,19 @@ export function pageAtY(layout: Layout, y: number): number {
   });
   return found;
 }
+
+/**
+ * The page taking up most of the band [start, end) (the viewport): the current page. The
+ * first of equals wins; -1 if no page overlaps the band.
+ */
+export function mostVisiblePage(layout: Layout, start: number, end: number): number {
+  let best = -1, most = 0;
+  layout.pages.forEach((p, i) => {
+    const seen = Math.min(end, p.top + p.height) - Math.max(start, p.top);
+    if (seen > most) {
+      most = seen;
+      best = i;
+    }
+  });
+  return best;
+}

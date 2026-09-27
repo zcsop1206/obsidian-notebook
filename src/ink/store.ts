@@ -7,7 +7,9 @@
 import { newPageId } from '../format/ids';
 import { pagePath, readNote, writeNote, type NoteIndex } from '../format/note';
 import { newPage, PAPER_SIZES, readPage, writePage, type Page, type Size, type Stroke } from '../format/page';
-import { defaultTemplate, isTemplateKind, type Template } from '../format/template';
+import { parseTemplate, parseTemplateName, templateName, type Template } from '../format/template';
+
+const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 export const SAVE_DELAY = 2000;
 export const MAX_SAVE_DELAY = 10000;
@@ -58,9 +60,25 @@ export function peekSize(svg: string): Size | null {
   return m ? { width: Number(m[1]), height: Number(m[2]) } : null;
 }
 
-/** The template for new pages from the note's `template:` name; unknown names give blank. */
+/**
+ * The template for new pages from the note's `template:` name. The frontmatter can be edited
+ * by hand, so an unknown name gives blank with a console warning rather than an error.
+ */
 export function noteTemplate(name: string): Template {
-  return defaultTemplate(isTemplateKind(name) ? name : 'blank');
+  try {
+    return parseTemplateName(name);
+  } catch (e) {
+    console.warn('[notebook]', `${errorText(e)}; using blank`);
+    return { kind: 'blank' };
+  }
+}
+
+/** What setAllTemplates changed, to reverse it: the note's default and each page's template. */
+export interface TemplatesBefore {
+  /** The note's `template:` name. */
+  note: string;
+  /** Each page that could be read and the template it had. */
+  pages: { id: string; template: Template }[];
 }
 
 /** 32-bit FNV-1a with the length: enough to recognise our own writes without keeping the text. */
@@ -72,8 +90,6 @@ export function fingerprint(text: string): string {
   }
   return (h >>> 0).toString(16) + ':' + text.length;
 }
-
-const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 export class NoteStore {
   index!: NoteIndex;
@@ -196,15 +212,58 @@ export class NoteStore {
     this.schedule();
   }
 
-  /** Appends a page with the note's paper size and default template. */
-  addPage(): PageSlot {
+  /**
+   * Sets one page's template; the strokes are untouched. Returns the template it had (to undo,
+   * set that again), or null if there's no such page or it can't be read.
+   */
+  setPageTemplate(pageId: string, template: Template): Template | null {
+    const slot = this.slots.find(s => s.id === pageId);
+    const page = slot && this.page(slot);
+    if (!slot || !page) return null;
+    const before = page.template;
+    const next = parseTemplate(template);
+    if (templateName(next) !== templateName(before)) {
+      page.template = next;
+      this.changed(slot);
+    }
+    return before;
+  }
+
+  /**
+   * Sets the template of every page that can be read, and makes it the note's default for new
+   * pages. Returns what it replaced.
+   */
+  setAllTemplates(template: Template): TemplatesBefore {
+    const pages: TemplatesBefore['pages'] = [];
+    for (const slot of this.slots) {
+      if (!this.page(slot)) continue;
+      const before = this.setPageTemplate(slot.id, template);
+      if (before) pages.push({ id: slot.id, template: before });
+    }
+    return { note: this.setNoteTemplate(template), pages };
+  }
+
+  /** Sets the note's default template for new pages. Returns the `template:` name it had. */
+  setNoteTemplate(template: Template): string {
+    const before = this.index.template;
+    const name = templateName(template);
+    if (name !== before) {
+      this.index.template = name;
+      this.indexDirty = true;
+      this.schedule();
+    }
+    return before;
+  }
+
+  /** Appends a page with the note's paper size and the given template, or the note's default. */
+  addPage(template?: Template): PageSlot {
     const taken = new Set(this.index.pages);
     for (const name of this.files.list(this.folder)) {
       const m = /^(p-[0-9a-f]{6})\.svg$/.exec(name);
       if (m) taken.add(m[1]);
     }
     const id = this.newId(taken);
-    const page = newPage(id, this.paperSize, noteTemplate(this.index.template));
+    const page = newPage(id, this.paperSize, template ? parseTemplate(template) : noteTemplate(this.index.template));
     const slot: PageSlot = { id, path: this.pagePath(id), size: page.size, page, text: null, error: null };
     this.slots.push(slot);
     this.index.pages.push(id);

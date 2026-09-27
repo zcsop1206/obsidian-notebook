@@ -4,9 +4,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { newNote, readNote, writeNote } from '../../src/format/note';
 import { A4, LETTER, newPage, readPage, writePage, type Page } from '../../src/format/page';
-import { FOOTER, GAP, layoutPages, MARGIN, pageAtY, pagesInBand } from '../../src/ink/layout';
+import { parseTemplateName, templateName } from '../../src/format/template';
+import { FOOTER, GAP, layoutPages, MARGIN, mostVisiblePage, pageAtY, pagesInBand } from '../../src/ink/layout';
 import { cleanName, DEFAULT_NAME, uniqueName } from '../../src/ink/names';
-import { fingerprint, NoteStore, peekSize, type NoteFiles, type PageSlot } from '../../src/ink/store';
+import { fingerprint, noteTemplate, NoteStore, peekSize, type NoteFiles, type PageSlot } from '../../src/ink/store';
 
 test('layout: pages fit the width at one scale, centred, stacked with a gap', () => {
   const l = layoutPages([LETTER, A4, LETTER], 848, LETTER);
@@ -33,6 +34,16 @@ test('layout: pages in a band of the scroll area, and the page at a height', () 
   assert.equal(pageAtY(l, 1100), 1);
   assert.equal(pageAtY(l, 99999), 3);
   assert.equal(pageAtY(layoutPages([], 848, LETTER), 10), -1);
+});
+
+test('layout: the current page is the one taking up most of the viewport', () => {
+  const l = layoutPages([LETTER, LETTER, LETTER], 848, LETTER); // pages 1056 tall, 1080 apart, from 16
+  assert.equal(mostVisiblePage(l, 0, 700), 0);
+  assert.equal(mostVisiblePage(l, 700, 1400), 0); // 372 px of page 0, 304 of page 1
+  assert.equal(mostVisiblePage(l, 800, 1500), 1);
+  assert.equal(mostVisiblePage(l, 1073, 1095), -1); // only the gap
+  assert.equal(mostVisiblePage(l, 2000, 5000), 2);
+  assert.equal(mostVisiblePage(layoutPages([], 848, LETTER), 0, 100), -1);
 });
 
 test('names: unsafe characters become spaces; empty names get the default', () => {
@@ -224,4 +235,96 @@ test('store: a changed index reloads pages, keeping the ones already loaded', as
   assert.deepEqual(events, ['index']);
   assert.deepEqual(store.slots.map(s => s.id), ['p-000002', 'p-000003']);
   assert.equal(store.slots[0], kept);
+});
+
+// ---- templates
+
+test('store: noteTemplate reads a template name; an unknown one gives blank', () => {
+  assert.deepEqual(noteTemplate('lined-wide-margin'), { kind: 'lined', rule: 'wide', margin: true });
+  const warn = console.warn;
+  const warned: unknown[] = [];
+  console.warn = (...a: unknown[]) => { warned.push(a); };
+  try {
+    assert.deepEqual(noteTemplate('wallpaper'), { kind: 'blank' });
+  } finally {
+    console.warn = warn;
+  }
+  assert.equal(warned.length, 1);
+});
+
+test('store: setPageTemplate keeps the ink, returns the old template, and setting it back restores the file', async () => {
+  const files = new MemFiles();
+  const written = newPage('p-000001');
+  written.strokes.push(dot('00000001'), dot('00000002', 40));
+  makeNote(files, [written, newPage('p-000002')]);
+  const original = files.files.get('dir/lec/p-000001.svg')!;
+  const { store } = makeStore(files, 1000);
+  await store.load();
+  const grid = parseTemplateName('grid-5mm');
+  const before = store.setPageTemplate('p-000001', grid);
+  assert.deepEqual(before, { kind: 'blank' });
+  assert.equal(store.unsaved, true);
+  await store.flush();
+  const page = readPage(files.files.get('dir/lec/p-000001.svg')!);
+  assert.equal(templateName(page.template), 'grid-5mm');
+  assert.deepEqual(page.strokes.map(s => s.id), ['00000001', '00000002']);
+  assert.equal(files.log.filter(l => l.startsWith('start')).length, 1, 'only the changed page is written, not the index');
+  // Reverse it (what undo will do).
+  assert.deepEqual(store.setPageTemplate('p-000001', before!), grid);
+  await store.flush();
+  assert.equal(files.files.get('dir/lec/p-000001.svg'), original);
+  // The same template again changes nothing; an unknown page gives null.
+  files.log.length = 0;
+  assert.deepEqual(store.setPageTemplate('p-000001', { kind: 'blank' }), { kind: 'blank' });
+  assert.equal(store.unsaved, false);
+  assert.equal(store.setPageTemplate('p-00ffff', grid), null);
+  store.close();
+});
+
+test('store: setAllTemplates changes every readable page and the note default, returning what it replaced', async () => {
+  const files = new MemFiles();
+  const a = newPage('p-000001', LETTER, parseTemplateName('lined-college'));
+  a.strokes.push(dot('00000001'));
+  makeNote(files, [a, newPage('p-000002', LETTER, parseTemplateName('dots-5mm'))]);
+  const note = readNote(files.files.get('dir/lec.md')!, 'lec');
+  note.pages.push('p-000003'); // no file: skipped
+  files.files.set('dir/lec.md', writeNote(note));
+  const { store } = makeStore(files, 1000);
+  await store.load();
+  const before = store.setAllTemplates(parseTemplateName('grid-quarter-inch'));
+  assert.deepEqual(before, {
+    note: 'blank',
+    pages: [{ id: 'p-000001', template: parseTemplateName('lined-college') }, { id: 'p-000002', template: parseTemplateName('dots-5mm') }],
+  });
+  assert.equal(store.index.template, 'grid-quarter-inch');
+  await store.flush();
+  assert.equal(readNote(files.files.get('dir/lec.md')!, 'lec').template, 'grid-quarter-inch');
+  for (const id of ['p-000001', 'p-000002']) assert.equal(templateName(readPage(files.files.get(`dir/lec/${id}.svg`)!).template), 'grid-quarter-inch');
+  assert.equal(readPage(files.files.get('dir/lec/p-000001.svg')!).strokes.length, 1);
+  assert.equal(files.files.has('dir/lec/p-000003.svg'), false);
+  // New pages take the new default; an explicit template wins.
+  assert.equal(templateName(store.page(store.addPage())!.template), 'grid-quarter-inch');
+  assert.equal(templateName(store.page(store.addPage(parseTemplateName('lined-wide')))!.template), 'lined-wide');
+  // Reversing: the old default and each page's old template.
+  assert.equal(store.setNoteTemplate(parseTemplateName(before.note)), 'grid-quarter-inch');
+  for (const p of before.pages) store.setPageTemplate(p.id, p.template);
+  await store.flush();
+  assert.equal(readNote(files.files.get('dir/lec.md')!, 'lec').template, 'blank');
+  assert.equal(templateName(readPage(files.files.get('dir/lec/p-000002.svg')!).template), 'dots-5mm');
+  store.close();
+});
+
+test('store: a note with pages on three templates saves and reopens with them', async () => {
+  const files = new MemFiles();
+  makeNote(files, [newPage('p-000001', LETTER, parseTemplateName('lined-college-margin'))]);
+  const { store } = makeStore(files, 1000);
+  await store.load();
+  store.addPage(parseTemplateName('grid-5mm'));
+  store.addPage(parseTemplateName('dots-5mm'));
+  await store.flush();
+  store.close();
+  const again = makeStore(files).store;
+  await again.load();
+  assert.deepEqual(again.slots.map(s => templateName(again.page(s)!.template)), ['lined-college-margin', 'grid-5mm', 'dots-5mm']);
+  again.close();
 });
