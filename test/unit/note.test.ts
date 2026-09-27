@@ -34,7 +34,7 @@ test('pages are read in body order; other text and unknown frontmatter are kept 
     '![Page one](lecture/p-cccccc.svg)',
     '',
     '![](lecture/p-aaaaaa.svg)',
-    '![](https://example.com/other/p-dddddd.svg)',
+    '![](other/p-dddddd.svg)',
     '![](lecture/p-bbbbbb.png)',
     '',
     '![[lecture/p-eeeeee.svg]]',
@@ -143,8 +143,11 @@ test('the pages\' folder is read from the embeds; the default serializes as befo
   assert.equal(writeNote(deep), FRONT + '![](../School/My%20pages/p-000001.svg)\n');
 });
 
-test('pages embedded from more than one folder, or bad folders, are rejected', () => {
-  assert.throws(() => readNote(FRONT + '![](a/p-000001.svg)\n![](b/p-000002.svg)\n', 'a'), /more than one folder \("a" and "b"\)/);
+test('page embeds from a second folder are text; bad folders are rejected', () => {
+  const mixed = FRONT + '![](a/p-000001.svg)\n![](b/p-000002.svg)\n![](a/p-000003.svg)\n';
+  const note = readNote(mixed, 'n');
+  assert.deepEqual([note.folder, note.pages], ['a', ['p-000001', 'p-000003']]);
+  assert.equal(writeNote(note), mixed);
   assert.throws(() => writeNote({ ...newNote('n'), folder: '/abs', pages: ['p-000001'] }), /Invalid page folder/);
   assert.throws(() => writeNote({ ...newNote('n'), folder: 'a//b', pages: ['p-000001'] }), /Invalid page folder/);
   // Not page embeds (kept as text): a URL, an absolute path, a page next to the note.
