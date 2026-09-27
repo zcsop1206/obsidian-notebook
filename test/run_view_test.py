@@ -4690,7 +4690,7 @@ try:
         check('shapes: saved as ordinary strokes (the file reads back and writes identically)', r['same'] and r['n'] == r['n1'], r)
         # ======== end of 27. Shapes (#16) ========
 
-        # ======== 27. Autosave on a dense page (#37) ========
+        # ======== 28. Autosave on a dense page (#37) ========
         # A 1,000-stroke page: write one stroke, then record every frame until the autosave has
         # written the page. The save only outlines and encodes the new stroke (the rest are
         # cached from drawing the page), so it takes a few ms and no frame around it is long.
@@ -4729,7 +4729,7 @@ try:
               r['saved'] and r['strokes'] == 1001 and r['same'], r)
         check('dense save: writePage after one new stroke on a 1,000-stroke page takes under 16 ms', r['saveMs'] < 16, r)
         check('dense save: no frame over 32 ms while the autosave runs', r['maxFrame'] <= 32, r)
-        # ======== end of 27. Autosave on a dense page (#37) ========
+        # ======== end of 28. Autosave on a dense page (#37) ========
 
         # --- unload removes the patch
         r = ev("""async () => {
