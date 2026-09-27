@@ -2734,7 +2734,8 @@ try:
         print('toolbar:', {k: r[k] for k in ('groups', 'buttons', 'lasso', 'ruler', 'header')})
         check('toolbar: tools, presets and page actions in three groups; the provisional strip is gone',
               r['groups'] == ['nb-ink-tools', 'nb-ink-presets', 'nb-ink-page-actions'] and not r['strip'], r)
-        check('toolbar: 15 buttons, each a 40 px icon target', r['buttons'] == 15 and all(w >= 40 and h >= 40 for w, h in r['size']), r['size'])
+        check('toolbar: 15 buttons, each a 40 px target; all but the five presets have an icon',
+              r['buttons'] == 15 and r['icons'] == 10 and all(w >= 40 and h >= 40 for w, h in r['size']), r)
         check('toolbar: lasso and ruler are placeholders, disabled with their issue', r['lasso'] == [True, 'Lasso: coming in #11'] and r['ruler'] == [True, 'Ruler: coming in #20'], r)
         check('toolbar: every tool is one tap from every other', r['taps'] == [True] * 6, r['taps'])
         check('toolbar: "Open as markdown" stays the header action', r['header'] == ['Open as markdown'], r['header'])
