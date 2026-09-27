@@ -16,8 +16,10 @@ import {
   DEFAULT_HIGHLIGHTER, HIGHLIGHTER_COLORS, HIGHLIGHTER_SIZES, nextHighlighterColor, nextHighlighterSize, withHighlighter,
   type HighlighterSettings, type ToolKind,
 } from './pen';
+import { DEFAULT_ERASER, ERASER_SIZES, nextEraserSize, withEraser, type EraserSettings } from './pen';
 import { layoutPages, MARGIN, mostVisiblePage, pageAtY, pagesInBand, type Layout } from './layout';
 import { currentTheme, PageBitmap, releaseScratch, strokeColor, TemplateImages, type Theme } from './renderer';
+import { SpatialIndex } from './spatial';
 import { NoteStore, type NoteFiles, type PageSlot, type TemplatesBefore } from './store';
 import { VIEW_TYPE_INK } from './takeover';
 import { TemplateChooser } from './template-chooser';
@@ -45,6 +47,8 @@ interface PageView {
   slot: PageSlot;
   el: HTMLElement;
   bitmap: PageBitmap | null;
+  /** The page's strokes for the eraser: built when the eraser first touches the page (#7). */
+  spatial?: SpatialIndex | null;
 }
 
 /** NoteStore's file access through the vault API, so Obsidian's embeds and caches follow. */
@@ -90,6 +94,8 @@ export class InkView extends FileView {
   pen: PenSettings = { ...DEFAULT_PEN };
   /** The highlighter's colour and size (the pen's `tool` says which one is in use). */
   highlighter: HighlighterSettings = { ...DEFAULT_HIGHLIGHTER };
+  /** The eraser's settings (used when `pen.tool` is 'eraser'). */
+  eraser: EraserSettings = { ...DEFAULT_ERASER };
   store: NoteStore | null = null;
   /** The open note's undo history (#8): cleared when the note closes or another is loaded. */
   readonly history = new History(() => this.renderHistory());
@@ -160,6 +166,8 @@ export class InkView extends FileView {
       commit: (target, stroke) => this.commit(target, stroke),
       statsChanged: () => this.renderStats(),
       strokeStyle: () => this.strokeStyle(),
+      eraser: () => this.eraser,
+      erase: (target, path, radius) => this.eraseAlong(target, path, radius),
     }, (type, fn, options) => this.registerDomEvent(this.pagesEl, type, fn, options), this.stats.pen);
     // A Pencil drag anywhere in the view, on a page or not, never scrolls it; fingers do. The
     // rules are in blockStylusTouch.
@@ -506,6 +514,7 @@ export class InkView extends FileView {
     if (!page) return;
     const stroke = { id: newStrokeId(page.strokes.map(s => s.id)), ...drawn };
     store.addStroke(pv.slot, stroke);
+    pv.spatial?.add(stroke);
     if (pv.bitmap) pv.bitmap.addStroke(page, stroke, this.theme, this.template(pv, page));
     else this.renderPage(pv);
     this.updateStats();
@@ -563,6 +572,7 @@ export class InkView extends FileView {
     button(stepper, 'nb-ink-step', '+', 'Thicker', () => this.setPen({ size: this.pen.size + SIZE_STEP })).dataset.step = '1';
     strip.createSpan({ cls: 'nb-ink-control nb-ink-provisional', text: 'provisional' });
     this.buildToolGroups(button);
+    this.buildEraserStrip(button);
     this.renderStrip();
   }
 
@@ -579,6 +589,7 @@ export class InkView extends FileView {
     mark('.nb-ink-size', el => Number(el.dataset.size) === pen.size);
     this.strip.querySelector<HTMLElement>('.nb-ink-size-value')?.setText(`${pen.size} px`);
     this.renderToolGroups();
+    this.renderEraserStrip();
   }
 
   // ---- tools and the highlighter (#6)
@@ -590,7 +601,7 @@ export class InkView extends FileView {
     return { tool: 'pen', nib: pen.nib, color: pen.color, size: pen.size };
   }
 
-  /** Switches the tool; each tool keeps its own colour and size. An unknown tool throws. */
+  /** Switches the tool (pen, highlighter or eraser); each keeps its own settings. An unknown tool throws. */
   setTool(tool: ToolKind) {
     this.setPen({ tool });
   }
@@ -647,6 +658,61 @@ export class InkView extends FileView {
     const show = (sel: string, on: boolean) => strip.querySelectorAll<HTMLElement>(sel).forEach(el => (on ? el.show() : el.hide()));
     show('.nb-ink-nibs, .nb-ink-colors, .nb-ink-sizes, .nb-ink-stepper', pen.tool === 'pen');
     show('.nb-ink-highlighter', pen.tool === 'highlighter');
+  }
+
+  // ---- the eraser (#7)
+
+  /** Changes the eraser's size (snapped to one of ERASER_SIZES). */
+  setEraser(change: Partial<EraserSettings>) {
+    this.eraser = withEraser(this.eraser, change);
+    this.renderStrip();
+  }
+
+  nextEraserSize() {
+    this.setEraser({ size: nextEraserSize(this.eraser.size) });
+  }
+
+  /** The eraser moved along `path` on a page: erases the strokes it touched. */
+  private eraseAlong(target: PageTarget, path: readonly { x: number; y: number }[], radius: number): number {
+    const pv = target.key as PageView;
+    const index = this.pages.indexOf(pv);
+    const page = this.store && index >= 0 ? this.store.page(pv.slot) : null;
+    if (!page) return 0;
+    if (!pv.spatial) pv.spatial = new SpatialIndex(page.size, page.strokes);
+    const ids = pv.spatial.hitPath(path, radius, this.eraseHits);
+    const n = ids.length ? this.eraseStrokes(index, ids).length : 0;
+    ids.length = 0;
+    return n;
+  }
+
+  /** Reused for the ids each eraser frame hits. */
+  private eraseHits: string[] = [];
+
+  /**
+   * PROVISIONAL (#10): the Eraser button, third in the tool group, and the eraser's two sizes
+   * (before the "provisional" label), shown while the eraser is in use.
+   */
+  private buildEraserStrip(button: (parent: HTMLElement, cls: string, text: string, label: string, fn: () => void) => HTMLElement) {
+    const strip = this.strip;
+    const tools = strip.querySelector<HTMLElement>('.nb-ink-tools');
+    if (tools) button(tools, 'nb-ink-tool nb-ink-eraser', 'Eraser', 'Eraser', () => this.setTool('eraser')).dataset.tool = 'eraser';
+    const sizes = strip.createDiv({ cls: 'nb-ink-control nb-ink-group nb-ink-eraser-sizes' });
+    strip.insertBefore(sizes, strip.querySelector('.nb-ink-provisional'));
+    ERASER_SIZES.forEach((size, i) => {
+      button(sizes, 'nb-ink-eraser-size', i ? 'Large' : 'Small', `Eraser size ${size} px`, () => this.setEraser({ size })).dataset.eraserSize = String(size);
+    });
+  }
+
+  private renderEraserStrip() {
+    const sizes = this.strip.querySelector<HTMLElement>('.nb-ink-eraser-sizes');
+    if (!sizes) return;
+    if (this.pen.tool === 'eraser') sizes.show();
+    else sizes.hide();
+    sizes.querySelectorAll<HTMLElement>('.nb-ink-eraser-size').forEach(el => {
+      const active = Number(el.dataset.eraserSize) === this.eraser.size;
+      el.toggleClass('is-active', active);
+      el.setAttribute('aria-pressed', String(active));
+    });
   }
 
   // ---- stats overlay
@@ -730,6 +796,7 @@ export class InkView extends FileView {
     const pv = this.pages.find(p => p.slot === slot);
     if (!pv) return;
     this.showError(pv);
+    pv.spatial = null; // reloaded from disk: rebuilt when next erased
     this.relayout(); // the size may have changed
     if (pv.bitmap) this.renderPage(pv);
     this.update();
@@ -773,18 +840,20 @@ export class InkView extends FileView {
   }
 
   /**
-   * Removes strokes from page `pageIndex` as one undoable edit and redraws the page. MINIMAL
-   * VERSION for #8: the stroke eraser (#7) routes all erasing through a method of this name and
-   * signature; when the branches merge, keep one method that does both (the eraser's
-   * behaviour plus this recording).
+   * Removes these strokes from page `pageIndex` as one undoable edit, keeps the page's eraser
+   * index in step and redraws the page once. Every erase goes through here (the eraser, #7, via
+   * eraseAlong). Returns the removed strokes with the indices they had (see
+   * NoteStore.removeStrokes); nothing is recorded if nothing was removed. Saved by the autosave.
    */
-  eraseStrokes(pageIndex: number, ids: Iterable<string>): void {
+  eraseStrokes(pageIndex: number, ids: Iterable<string>): { index: number; stroke: Stroke }[] {
     const pv = this.pages[pageIndex];
-    if (!this.store || !pv) return;
+    if (!this.store || !pv) return [];
     const removed = this.store.removeStrokes(pv.slot.id, ids);
-    if (!removed.length) return;
+    if (!removed.length) return removed;
+    if (pv.spatial) for (const r of removed) pv.spatial.remove(r.stroke.id);
     this.redrawPage(pv.slot.id);
     this.recordStrokes('Erase', pv.slot.id, removed, false);
+    return removed;
   }
 
   /**
@@ -795,14 +864,20 @@ export class InkView extends FileView {
     const store = this.store;
     if (!store) return;
     const ids = entries.map(e => e.stroke.id);
+    // The page's eraser index (#7), if built, follows the strokes in and out.
+    const spatial = () => this.pages.find(p => p.slot.id === pageId)?.spatial;
     const remove = () => {
       if (this.store !== store) return;
       store.removeStrokes(pageId, ids);
+      const index = spatial();
+      if (index) for (const id of ids) index.remove(id);
       this.redrawPage(pageId);
     };
     const insert = () => {
       if (this.store !== store) return;
       store.insertStrokes(pageId, entries);
+      const index = spatial();
+      if (index) for (const e of entries) index.add(e.stroke);
       this.redrawPage(pageId);
     };
     this.history.push({ label, undo: added ? remove : insert, redo: added ? insert : remove });

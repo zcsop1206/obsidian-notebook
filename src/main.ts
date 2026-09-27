@@ -51,6 +51,9 @@ export default class NotebookPlugin extends Plugin {
     this.addInkCommand('toggle-ink-stats', 'Toggle ink stats overlay', view => view.toggleStats());
     this.addHistoryCommand('undo', 'Undo', { modifiers: ['Mod'], key: 'z' }, view => view.undo());
     this.addHistoryCommand('redo', 'Redo', { modifiers: ['Mod', 'Shift'], key: 'z' }, view => view.redo());
+    // The eraser (#7), also until #10's toolbar.
+    this.addInkCommand('tool-eraser', 'Use the eraser', view => view.setTool('eraser'));
+    this.addInkCommand('eraser-next-size', 'Next eraser size', view => view.nextEraserSize());
     this.registerEvent(this.app.workspace.on('file-menu', (menu, file, _source, leaf) => {
       if (!(file instanceof TFile) || !leaf || leaf.view.getViewType() !== 'markdown' || !cachedIsInk(this.app, file)) return;
       menu.addItem(item => item.setTitle('Open as ink note').setIcon('pencil').onClick(() => void this.openAsInk(file, leaf)));

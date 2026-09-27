@@ -26,10 +26,16 @@
 // The highlighter (#6) is drawn translucent, at HIGHLIGHT_ALPHA like the page's highlight layer,
 // but composited once so that its frozen head and its tail (and the stroke where it crosses
 // itself) don't darken where they overlap: see PenInput.highlight.
+//
+// Erasing (#7): with the eraser selected, a pen or mouse drag draws nothing. Its samples are
+// filtered as above and collected by the handlers; once per animation frame the host is given
+// the path since the last frame (from the last sample already tested), hit-tests it and
+// removes what it touches, redrawing a page at most once. A circle of the hit radius follows
+// the pointer on the tail overlay and is cleared on release. Touches never erase.
 import { strokePath } from '../format/outline';
 import { roundP, roundXY, type HighlighterStroke, type PenStroke, type Point, type Size } from '../format/page';
 import { fmt, median, yn } from '../debug/util';
-import type { PenSettings } from './pen';
+import type { EraserSettings, PenSettings } from './pen';
 import { HIGHLIGHT_ALPHA, pixelRatio } from './renderer';
 
 /** Samples closer than this (page px) to the previous one are dropped. */
@@ -70,6 +76,14 @@ export interface PenHost {
   statsChanged(): void;
   /** What a stroke starting now is written with (the active tool's own colour and size). */
   strokeStyle(): StrokeStyle;
+  /** The eraser settings for an erase starting now. */
+  eraser(): Readonly<EraserSettings>;
+  /**
+   * The eraser moved along `path` (page px; one point for a tap) on a page since the last call:
+   * remove the strokes within `radius` of it. Called at most once per animation frame. `path`
+   * is reused afterwards, so don't keep it. Returns how many strokes were removed.
+   */
+  erase(target: PageTarget, path: readonly Point[], radius: number): number;
 }
 
 // ---- sampling (pure; tested with fake events)
@@ -309,6 +323,43 @@ interface Live {
   head: boolean;
 }
 
+/** An erase gesture in progress. */
+interface Erasing {
+  pointerId: number;
+  pointerType: string;
+  target: PageTarget;
+  map: PageMap;
+  /** Hit radius, page px. */
+  radius: number;
+  /** Samples not yet tested, after the last one tested (points[0], once `sent`). */
+  trace: Trace;
+  sent: boolean;
+  /** The cursor circle's box on the tail canvas, page px, or null. */
+  cursor: [number, number, number, number] | null;
+  events: number;
+  handler: number[];
+  frames: number[];
+  removed: number;
+}
+
+/** One erase gesture's input measurements. */
+export interface EraseStats {
+  pointerType: string;
+  /** pointermove events handled. */
+  events: number;
+  /** Samples seen (coalesced ones included, dropped ones too). */
+  samples: number;
+  /** Time in the pointermove handler, median and worst, ms. */
+  handlerMs: number;
+  handlerMaxMs: number;
+  /** Erase frames (hit-testing, removing and redrawing) and their time, median and worst, ms. */
+  frames: number;
+  frameMs: number;
+  frameMaxMs: number;
+  /** Strokes removed. */
+  removed: number;
+}
+
 type Listen = <K extends keyof HTMLElementEventMap>(type: K, fn: (e: HTMLElementEventMap[K]) => void, options?: AddEventListenerOptions) => void;
 
 function overlay(cls: string): [HTMLCanvasElement, CanvasRenderingContext2D] {
@@ -325,7 +376,10 @@ export class PenInput {
   private headCtx: CanvasRenderingContext2D;
   private tailCtx: CanvasRenderingContext2D;
   private live: Live | null = null;
+  private erasing: Erasing | null = null;
   private frame = 0;
+  /** The last erase gesture's measurements, or null. */
+  lastErase: EraseStats | null = null;
   /** The path `d` of the tail drawn in the last frame (for tests). */
   livePath = '';
   /** Where a highlighter frame is put together before it's composited (see highlight). */
@@ -352,7 +406,7 @@ export class PenInput {
       this.host.statsChanged();
       return;
     }
-    if (this.live || (e.pointerType === 'mouse' && e.button !== 0)) return;
+    if (this.live || this.erasing || (e.pointerType === 'mouse' && e.button !== 0)) return;
     const target = this.host.pageAt(e.target);
     if (!target) return;
     e.preventDefault();
@@ -363,6 +417,10 @@ export class PenInput {
     }
     const rect = target.el.getBoundingClientRect();
     this.place(target, rect);
+    if (this.host.pen().tool === 'eraser') {
+      this.eraseDown(e, target, rect);
+      return;
+    }
     const pen = { ...this.host.pen() };
     const style = { ...this.host.strokeStyle() };
     // The highlighter's head canvas only stores the frozen part, opaque; highlight() shows it.
@@ -379,6 +437,10 @@ export class PenInput {
   }
 
   private move(e: PointerEvent) {
+    if (this.erasing) {
+      this.eraseMove(e);
+      return;
+    }
     const live = this.live;
     if (!live || e.pointerId !== live.pointerId) return;
     const t0 = performance.now();
@@ -394,6 +456,10 @@ export class PenInput {
   }
 
   private up(e: PointerEvent) {
+    if (this.erasing) {
+      this.eraseUp(e);
+      return;
+    }
     const live = this.live;
     if (!live || e.pointerId !== live.pointerId) return;
     this.live = null;
@@ -415,6 +481,10 @@ export class PenInput {
   /** The frame callback: freezes older points if needed and redraws the tail. */
   private draw() {
     this.frame = 0;
+    if (this.erasing) {
+      this.eraseFrame(this.erasing);
+      return;
+    }
     const live = this.live;
     if (!live) return;
     const t0 = performance.now();
@@ -543,6 +613,8 @@ export class PenInput {
 
   /** The page moved under a stroke in progress (the view scrolled): follow it. */
   viewMoved() {
+    const er = this.erasing;
+    if (er) er.map = pageMap(er.target.el.getBoundingClientRect(), er.target.size, er.map.t0);
     const live = this.live;
     if (!live) return;
     const rect = live.target.el.getBoundingClientRect();
@@ -561,9 +633,90 @@ export class PenInput {
   /** Abandons a stroke in progress (the page it was on went away). */
   cancel() {
     this.live = null;
+    this.erasing = null;
     cancelAnimationFrame(this.frame);
     this.frame = 0;
     this.clear();
+  }
+
+  // ---- erasing
+
+  private eraseDown(e: PointerEvent, target: PageTarget, rect: DOMRect) {
+    const er: Erasing = this.erasing = {
+      pointerId: e.pointerId, pointerType: e.pointerType, target, map: pageMap(rect, target.size, e.timeStamp),
+      radius: this.host.eraser().size, trace: newTrace(), sent: false, cursor: null, events: 0, handler: [], frames: [], removed: 0,
+    };
+    addSamples(er.trace, [e], er.map);
+    this.schedule();
+  }
+
+  private eraseMove(e: PointerEvent) {
+    const er = this.erasing!;
+    if (e.pointerId !== er.pointerId) return;
+    const t0 = performance.now();
+    e.preventDefault();
+    er.events++;
+    addSamples(er.trace, samplesOf(e), er.map);
+    this.schedule();
+    er.handler.push(performance.now() - t0);
+  }
+
+  private eraseUp(e: PointerEvent) {
+    const er = this.erasing!;
+    if (e.pointerId !== er.pointerId) return;
+    this.erasing = null;
+    cancelAnimationFrame(this.frame);
+    this.frame = 0;
+    this.eraseStep(er); // samples since the last frame
+    this.clear();
+    this.lastErase = {
+      pointerType: er.pointerType,
+      events: er.events,
+      samples: er.trace.samples,
+      handlerMs: median(er.handler),
+      handlerMaxMs: er.handler.length ? Math.max(...er.handler) : NaN,
+      frames: er.frames.length,
+      frameMs: median(er.frames),
+      frameMaxMs: er.frames.length ? Math.max(...er.frames) : NaN,
+      removed: er.removed,
+    };
+    this.host.statsChanged();
+  }
+
+  /** Gives the host the path not yet tested; keeps its last point as the next path's start. */
+  private eraseStep(er: Erasing) {
+    const pts = er.trace.points;
+    if (pts.length > 1 || (pts.length === 1 && !er.sent)) {
+      er.removed += this.host.erase(er.target, pts, er.radius);
+      er.sent = true;
+      pts.splice(0, pts.length - 1);
+    }
+  }
+
+  /** The frame callback while erasing: erases along the new samples and moves the cursor. */
+  private eraseFrame(er: Erasing) {
+    const t0 = performance.now();
+    this.eraseStep(er);
+    const ctx = this.tailCtx;
+    if (er.cursor) {
+      const [x0, y0, x1, y1] = er.cursor;
+      ctx.clearRect(x0, y0, x1 - x0, y1 - y0);
+      er.cursor = null;
+    }
+    const pts = er.trace.points, p = pts[pts.length - 1];
+    if (p) {
+      const r = er.radius, line = er.map.sx; // 1 CSS px in page px
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, r, 0, 2 * Math.PI);
+      ctx.fillStyle = 'rgba(128, 128, 128, 0.18)';
+      ctx.fill();
+      ctx.lineWidth = line;
+      ctx.strokeStyle = 'rgba(110, 110, 110, 0.9)';
+      ctx.stroke();
+      const m = r + line + 1;
+      er.cursor = [p.x - m, p.y - m, p.x + m, p.y + m];
+    }
+    er.frames.push(performance.now() - t0);
   }
 
   destroy() {
