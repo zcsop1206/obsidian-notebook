@@ -22,7 +22,7 @@ try:
         page.on('pageerror', lambda e: errors.append(str(e)))
         page.on('console', lambda m: m.type == 'error' and errors.append(m.text))
         page.goto(f'http://localhost:{port}/test/harness.html')
-        page.evaluate("async () => { window.p = await loadPlugin(); await p.open(); }")
+        page.evaluate("async () => { window.p = await loadPlugin(); await p.openDebugView(); }")
 
         # --- ink: synthetic pen strokes with varying pressure, one touch, one tap, one real mouse stroke
         page.evaluate("""async () => {

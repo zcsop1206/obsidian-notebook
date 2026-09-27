@@ -4,16 +4,16 @@ import { DebugView, VIEW_TYPE_DEBUG } from './debug/view';
 import { LOG_PREFIX } from './debug/util';
 
 /**
- * Notebook spike: measures Apple Pencil input and audio recording inside Obsidian on the iPad.
+ * Notebook: handwritten notes with the Apple Pencil, stored as SVG pages in the vault.
+ * For now it holds the spike's measurements as an ink debug view and a test recorder.
  */
-export default class NotebookSpike extends Plugin {
+export default class NotebookPlugin extends Plugin {
   recorder!: Recorder;
 
   async onload() {
     this.recorder = new Recorder(this);
     this.registerView(VIEW_TYPE_DEBUG, leaf => new DebugView(leaf, this));
-    this.addRibbonIcon('pencil', 'Notebook spike', () => this.open());
-    this.addCommand({ id: 'open', name: 'Open pen and audio test', callback: () => this.open() });
+    this.addCommand({ id: 'open-debug-view', name: 'Open ink debug view', callback: () => this.openDebugView() });
     this.addCommand({ id: 'toggle-recording', name: 'Start or stop test recording', callback: () => this.recorder.toggle() });
     this.app.workspace.onLayoutReady(() => {
       this.recorder.recover().catch(e => console.error(LOG_PREFIX, 'recover', e));
@@ -24,7 +24,7 @@ export default class NotebookSpike extends Plugin {
     this.recorder.stop();
   }
 
-  async open() {
+  async openDebugView() {
     const ws = this.app.workspace;
     let leaf = ws.getLeavesOfType(VIEW_TYPE_DEBUG)[0];
     if (!leaf) {
