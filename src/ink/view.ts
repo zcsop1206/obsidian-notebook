@@ -6,6 +6,10 @@ import { newStrokeId } from '../format/ids';
 import { isInkNote } from '../format/note';
 import type { Page } from '../format/page';
 import type { Template } from '../format/template';
+import { parseTemplate, templateName } from '../format/template';
+import type { Stroke } from '../format/page';
+import { listenForUndoTaps } from './gestures';
+import { History } from './history';
 import { blockStylusTouch, newPenStats, PenInput, penStatsLines, type NewStroke, type PageTarget, type PenStats, type StrokeStyle } from './input';
 import { COLOR_PRESETS, DEFAULT_PEN, nextColor, nextSize, SIZE_PRESETS, SIZE_STEP, withPen, type PenSettings } from './pen';
 import {
@@ -87,6 +91,8 @@ export class InkView extends FileView {
   /** The highlighter's colour and size (the pen's `tool` says which one is in use). */
   highlighter: HighlighterSettings = { ...DEFAULT_HIGHLIGHTER };
   store: NoteStore | null = null;
+  /** The open note's undo history (#8): cleared when the note closes or another is loaded. */
+  readonly history = new History(() => this.renderHistory());
   private scroller!: HTMLElement;
   private pagesEl!: HTMLElement;
   /** The "Add page" controls below the last page. */
@@ -133,6 +139,7 @@ export class InkView extends FileView {
     root.addClass('nb-ink-view');
     this.strip = root.createDiv({ cls: 'nb-ink-strip' });
     this.buildStrip();
+    this.buildHistoryGroup();
     this.scroller = root.createDiv({ cls: 'nb-ink-scroll' });
     this.pagesEl = this.scroller.createDiv({ cls: 'nb-ink-pages' });
     this.messageEl = this.scroller.createDiv({ cls: 'nb-ink-message' });
@@ -158,6 +165,10 @@ export class InkView extends FileView {
     // rules are in blockStylusTouch.
     this.registerDomEvent(root, 'touchstart', e => blockStylusTouch(e), { passive: false });
     this.registerDomEvent(root, 'touchmove', e => blockStylusTouch(e), { passive: false });
+    // Two fingers tapped undo, three redo; passive, so finger scrolling is untouched.
+    listenForUndoTaps((type, fn, options) => this.registerDomEvent(this.pagesEl, type, fn, options), () => this.undo(), () => this.redo());
+    // Ctrl/Cmd+Z and Shift+Ctrl/Cmd+Z when focus is in the view, if the commands' hotkeys didn't take them.
+    this.registerDomEvent(this.containerEl, 'keydown', e => this.historyKey(e));
 
     this.registerDomEvent(this.scroller, 'scroll', () => {
       this.input.viewMoved();
@@ -273,6 +284,7 @@ export class InkView extends FileView {
     const store = this.store;
     if (!store) return;
     this.store = null;
+    this.history.clear();
     this.input.cancel();
     const saved = store.flush();
     store.close();
@@ -497,6 +509,7 @@ export class InkView extends FileView {
     if (pv.bitmap) pv.bitmap.addStroke(page, stroke, this.theme, this.template(pv, page));
     else this.renderPage(pv);
     this.updateStats();
+    this.recordStrokes('Add stroke', pv.slot.id, [{ index: page.strokes.length - 1, stroke }], true);
   }
 
   // ---- pen settings and the provisional pen strip
@@ -665,6 +678,7 @@ export class InkView extends FileView {
     const box = this.layout?.pages[this.pages.length - 1];
     if (box) this.scroller.scrollTop = box.top - MARGIN;
     this.update();
+    this.recordAddPage(pv.slot.id);
   }
 
   // ---- templates
@@ -697,6 +711,7 @@ export class InkView extends FileView {
     if (!this.store || !pv) return null;
     const before = this.store.setPageTemplate(pv.slot.id, template);
     if (before && pv.bitmap) this.renderPage(pv);
+    if (before) this.recordPageTemplate(pv.slot.id, before, template);
     return before;
   }
 
@@ -705,6 +720,7 @@ export class InkView extends FileView {
     if (!this.store) return null;
     const before = this.store.setAllTemplates(template);
     for (const pv of this.pages) if (pv.bitmap) this.renderPage(pv);
+    this.recordAllTemplates(before, template);
     return before;
   }
 
@@ -721,8 +737,196 @@ export class InkView extends FileView {
 
   private indexChanged() {
     this.input.cancel();
+    this.history.clear(); // pages were added, removed or reordered elsewhere: the history no longer fits
     this.buildPages();
     this.relayout();
     this.update();
+  }
+
+  // ---- undo and redo (#8)
+  // Each edit is recorded where it happens (commit, eraseStrokes, setPageTemplate,
+  // setAllTemplates, addPage) as an Op whose closures change the store and redraw; the store
+  // marks what changed, so autosave writes the result like any other edit.
+
+  get canUndo(): boolean {
+    return this.history.canUndo;
+  }
+
+  get canRedo(): boolean {
+    return this.history.canRedo;
+  }
+
+  /** Reverses the latest edit. Returns false if there was nothing to undo. */
+  undo(): boolean {
+    if (!this.store) return false;
+    const op = this.history.undo();
+    this.updateStats();
+    return !!op;
+  }
+
+  /** Repeats the latest undone edit. Returns false if there was nothing to redo. */
+  redo(): boolean {
+    if (!this.store) return false;
+    const op = this.history.redo();
+    this.updateStats();
+    return !!op;
+  }
+
+  /**
+   * Removes strokes from page `pageIndex` as one undoable edit and redraws the page. MINIMAL
+   * VERSION for #8: the stroke eraser (#7) routes all erasing through a method of this name and
+   * signature; when the branches merge, keep one method that does both (the eraser's
+   * behaviour plus this recording).
+   */
+  eraseStrokes(pageIndex: number, ids: Iterable<string>): void {
+    const pv = this.pages[pageIndex];
+    if (!this.store || !pv) return;
+    const removed = this.store.removeStrokes(pv.slot.id, ids);
+    if (!removed.length) return;
+    this.redrawPage(pv.slot.id);
+    this.recordStrokes('Erase', pv.slot.id, removed, false);
+  }
+
+  /**
+   * Records strokes added to (`added`) or removed from a page, with the indices they have (or
+   * had): undo removes or reinserts them, redo the opposite.
+   */
+  private recordStrokes(label: string, pageId: string, entries: { index: number; stroke: Stroke }[], added: boolean) {
+    const store = this.store;
+    if (!store) return;
+    const ids = entries.map(e => e.stroke.id);
+    const remove = () => {
+      if (this.store !== store) return;
+      store.removeStrokes(pageId, ids);
+      this.redrawPage(pageId);
+    };
+    const insert = () => {
+      if (this.store !== store) return;
+      store.insertStrokes(pageId, entries);
+      this.redrawPage(pageId);
+    };
+    this.history.push({ label, undo: added ? remove : insert, redo: added ? insert : remove });
+  }
+
+  private recordPageTemplate(pageId: string, before: Template, after: Template) {
+    const store = this.store;
+    if (!store || templateName(before) === templateName(parseTemplate(after))) return;
+    const set = (template: Template) => () => {
+      if (this.store !== store) return;
+      store.setPageTemplate(pageId, template);
+      this.redrawPage(pageId);
+    };
+    this.history.push({ label: 'Change page template', undo: set(before), redo: set(after) });
+  }
+
+  private recordAllTemplates(before: TemplatesBefore | null, after: Template) {
+    const store = this.store;
+    if (!store || !before) return;
+    const name = templateName(parseTemplate(after));
+    if (before.note === name && before.pages.every(p => templateName(p.template) === name)) return;
+    const redrawAll = () => {
+      for (const pv of this.pages) if (pv.bitmap) this.renderPage(pv);
+    };
+    this.history.push({
+      label: 'Change all templates',
+      undo: () => {
+        if (this.store !== store) return;
+        store.setNoteTemplateName(before.note);
+        for (const p of before.pages) store.setPageTemplate(p.id, p.template);
+        redrawAll();
+      },
+      redo: () => {
+        if (this.store !== store) return;
+        store.setAllTemplates(after);
+        redrawAll();
+      },
+    });
+  }
+
+  /**
+   * Records an added page: undo takes it out of the index (its file, if already written, stays
+   * on disk, orphaned until redo; deleting page files is #17), redo puts it back where it was.
+   */
+  private recordAddPage(pageId: string) {
+    const store = this.store;
+    if (!store) return;
+    let index = -1;
+    this.history.push({
+      label: 'Add page',
+      undo: () => {
+        if (this.store !== store) return;
+        index = store.removePageFromIndex(pageId).index;
+        this.removePageView(pageId);
+      },
+      redo: () => {
+        if (this.store !== store) return;
+        store.insertPageInIndex(pageId, index);
+        this.insertPageView(pageId);
+      },
+    });
+  }
+
+  /** Redraws a page from its model if it has a bitmap (otherwise it's drawn when scrolled to). */
+  private redrawPage(pageId: string) {
+    const pv = this.pages.find(p => p.slot.id === pageId);
+    if (pv?.bitmap) this.renderPage(pv);
+    this.updateStats();
+  }
+
+  /** Drops the element of a page that left the index. */
+  private removePageView(pageId: string) {
+    const i = this.pages.findIndex(p => p.slot.id === pageId);
+    if (i < 0) return;
+    this.input.cancel();
+    const [pv] = this.pages.splice(i, 1);
+    this.dropBitmap(pv);
+    pv.el.remove();
+    this.relayout();
+    this.update();
+  }
+
+  /** Adds the element of a page that came back into the index, at its position. */
+  private insertPageView(pageId: string) {
+    const store = this.store;
+    const i = store ? store.slots.findIndex(s => s.id === pageId) : -1;
+    if (!store || i < 0 || this.pages.some(p => p.slot.id === pageId)) return;
+    const pv = this.makePage(store.slots[i]);
+    this.pages.splice(i, 0, pv);
+    this.pagesEl.insertBefore(pv.el, this.pages[i + 1]?.el ?? this.footer);
+    this.relayout();
+    this.update();
+  }
+
+  /** Ctrl/Cmd+Z undoes, Shift+Ctrl/Cmd+Z redoes. Skips keys already handled (by the commands' hotkeys). */
+  private historyKey(e: KeyboardEvent) {
+    if (e.defaultPrevented || e.altKey || !(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'z' || !this.store) return;
+    e.preventDefault();
+    e.stopPropagation(); // so a hotkey listener further up doesn't run it again
+    if (e.shiftKey) this.redo();
+    else this.undo();
+  }
+
+  /** The Undo and Redo buttons, in their own group of the pen strip. */
+  private buildHistoryGroup() {
+    const strip = this.strip;
+    const group = strip.createDiv({ cls: 'nb-ink-control nb-ink-group nb-ink-history' });
+    strip.insertBefore(group, strip.querySelector('.nb-ink-provisional'));
+    const button = (what: 'undo' | 'redo', text: string, fn: () => boolean) => {
+      const b = group.createEl('button', { cls: `nb-ink-control nb-ink-${what}`, text, attr: { 'aria-label': text, type: 'button' } });
+      b.addEventListener('click', () => void fn());
+    };
+    button('undo', 'Undo', () => this.undo());
+    button('redo', 'Redo', () => this.redo());
+    this.renderHistory();
+  }
+
+  private renderHistory() {
+    if (!this.strip) return;
+    const set = (sel: string, on: boolean) => {
+      const b = this.strip.querySelector<HTMLButtonElement>(sel);
+      if (b) b.disabled = !on;
+    };
+    set('.nb-ink-undo', this.history.canUndo);
+    set('.nb-ink-redo', this.history.canRedo);
   }
 }

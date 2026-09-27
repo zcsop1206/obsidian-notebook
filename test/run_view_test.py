@@ -916,6 +916,222 @@ try:
         check('highlighter: the tool commands are hidden outside an ink view', r == [False] * 4, r)
         # ======== end of the highlighter (#6) ========
 
+        # --- 13. Undo and redo (#8) --------------------------------------------------------
+        ev("""() => {
+          /** Saves, then compares page i's file with the model and its bitmap with a fresh full render. */
+          T.consistent = async (i = 0) => {
+            await view.save();
+            const pv = view.pages[i], disk = fs.get(pv.slot.path) === ink.writePage(view.store.page(pv.slot));
+            if (!pv.bitmap) return { disk, screen: null };
+            const c = pv.bitmap.canvas, g = c.getContext('2d');
+            const a = g.getImageData(0, 0, c.width, c.height).data;
+            view.renderPage(pv);
+            const b = g.getImageData(0, 0, c.width, c.height).data;
+            let diff = 0;
+            for (let k = 0; k < a.length; k += 4) if (a[k] !== b[k] || a[k + 1] !== b[k + 1] || a[k + 2] !== b[k + 2]) diff++;
+            return { disk, screen: diff };
+          };
+          T.ids = (i = 0) => view.store.page(view.store.slots[i]).strokes.map(s => s.id);
+          T.buttons = () => ['.nb-ink-undo', '.nb-ink-redo'].map(s => !view.contentEl.querySelector(s).disabled);
+          /** A Ctrl(+Shift)+Z keydown on the strip; returns [handled, defaultPrevented]. */
+          T.key = (shift = false, prevented = false) => {
+            const e = new KeyboardEvent('keydown', { key: shift ? 'Z' : 'z', ctrlKey: true, shiftKey: shift, bubbles: true, cancelable: true });
+            if (prevented) e.preventDefault();
+            const n = view.history.labels.length;
+            view.contentEl.querySelector('.nb-ink-strip').dispatchEvent(e);
+            return [view.history.labels.length !== n, e.defaultPrevented];
+          };
+          /** Fingers tapped (or dragged by `move` px) on the pages container. */
+          T.fingers = async (n, move = 0) => {
+            const el = view.contentEl.querySelector('.nb-ink-pages'), r = T.pages()[0].getBoundingClientRect();
+            const at = dx => Array.from({ length: n }, (_, i) => new Touch({ identifier: 40 + i, target: el, clientX: r.left + 100 + 60 * i + dx, clientY: r.top + 300 + dx }));
+            const fire = (type, touches, changed) => el.dispatchEvent(new TouchEvent(type, { touches, changedTouches: changed, bubbles: true, cancelable: true }));
+            fire('touchstart', at(0), at(0));
+            await T.sleep(40);
+            if (move) fire('touchmove', at(move), at(move));
+            await T.sleep(40);
+            fire('touchend', [], at(move));
+          };
+        }""")
+        r = ev("""async () => {
+          const U = window.U = {};
+          await p.createInkNote('Undo');
+          await T.sleep(150);
+          const path = view.store.slots[0].path;
+          const fresh = { undo: view.canUndo, redo: view.canRedo, buttons: T.buttons() };
+          Object.assign(U, { ink: T.ink(0), tpl: T.templates()[0] });  // the empty page, with the default template
+          await T.stroke(0, T.wave(100, 200));
+          const ink1 = T.ink(0);
+          await T.stroke(0, T.wave(100, 500));
+          await view.save();
+          Object.assign(U, { path, two: fs.get(path), ids: T.ids() });
+          const buttons = T.buttons(), labels = view.history.labels;
+          view.contentEl.querySelector('.nb-ink-undo').click();
+          const s2 = view.store.page(view.store.slots[0]).strokes;
+          const after = { ids: T.ids(), ink: T.ink(0), ink1, buttons: T.buttons() };
+          T.mark();
+          await T.sleep(2400);  // autosave
+          const disk = ink.readPage(fs.get(path)).strokes.map(s => s.id);
+          return { fresh, buttons, labels, after, ids: U.ids, disk, writes: T.writesTo(path), cons: await T.consistent() };
+        }""")
+        print('undo: after one undo:', {k: r[k] for k in ('fresh', 'buttons', 'labels', 'writes', 'cons')})
+        check('undo: a new note has nothing to undo or redo; both buttons disabled',
+              r['fresh'] == {'undo': False, 'redo': False, 'buttons': [False, False]}, r['fresh'])
+        check('undo: two strokes record two edits; Undo enabled, Redo disabled', r['labels'] == ['Add stroke', 'Add stroke'] and r['buttons'] == [True, False], r)
+        check('undo: the Undo button removes the second stroke from the model and the bitmap',
+              r['after']['ids'] == r['ids'][:1] and abs(r['after']['ink'] - r['after']['ink1']) < r['after']['ink1'] * 0.02 and r['after']['buttons'] == [True, True], r['after'])
+        check('undo: ... and autosave writes the page without it', r['disk'] == r['ids'][:1] and r['writes'] == 1, r)
+        check('undo: the saved page and the bitmap match the model', r['cons'] == {'disk': True, 'screen': 0}, r['cons'])
+        r = ev("""async () => {
+          const shown = commands['redo'].checkCallback(true);
+          commands['redo'].checkCallback(false);
+          const cons = await T.consistent();
+          const same = fs.get(U.path) === U.two;
+          const keys = [T.key(), T.key()];
+          const none = T.key();  // nothing left to undo: still taken, nothing happens
+          const zero = { ids: T.ids(), ink: T.ink(0) === U.ink, cons: await T.consistent(), disk: T.strokesOnDisk(U.path), buttons: T.buttons() };
+          const prevented = T.key(true, true);  // already handled (by the hotkey): ignored
+          const redoKeys = [T.key(true), T.key(true)];
+          const back = { cons: await T.consistent(), same: fs.get(U.path) === U.two, ids: T.ids() };
+          return { shown, cons, same, keys, none, zero, prevented, redoKeys, back,
+            hotkeys: [commands['undo'].hotkeys, commands['redo'].hotkeys], names: [commands['undo'].name, commands['redo'].name] };
+        }""")
+        check('undo: the Redo command brings the stroke back; the file is byte-identical to before the undo',
+              r['shown'] is True and r['same'] and r['cons'] == {'disk': True, 'screen': 0}, r)
+        check('undo: Ctrl+Z in the view undoes both strokes (handled once, default prevented)',
+              r['keys'] == [[True, True], [True, True]] and r['zero']['ids'] == [] and r['zero']['ink'] is True and r['zero']['disk'] == 0
+              and r['zero']['cons'] == {'disk': True, 'screen': 0} and r['zero']['buttons'] == [False, True], r)
+        check('undo: a keydown already handled by the hotkey is not undone again', r['prevented'] == [False, True], r['prevented'])
+        check('undo: Shift+Ctrl+Z redoes both; the file is byte-identical to the two-stroke page',
+              r['redoKeys'] == [[True, True], [True, True]] and r['back'] == {'cons': {'disk': True, 'screen': 0}, 'same': True, 'ids': ev("() => U.ids")}, r)
+        check('undo: commands "Undo" and "Redo" with default hotkeys Mod+Z and Mod+Shift+Z',
+              r['names'] == ['Undo', 'Redo'] and r['hotkeys'] == [[{'modifiers': ['Mod'], 'key': 'z'}], [{'modifiers': ['Mod', 'Shift'], 'key': 'z'}]], r)
+
+        # templates: one page, then all pages and the note default
+        r = ev("""async () => {
+          const note0 = fs.get('Undo.md');
+          const prev = view.setPageTemplate(0, { kind: 'grid', spacing: '5mm' });
+          await T.sleep(150);
+          const grid = { tpl: T.templates()[0], cons: await T.consistent(), text: fs.get(U.path) };
+          view.undo();
+          await T.sleep(150);
+          const undone = { tpl: T.templates()[0], cons: await T.consistent(), same: fs.get(U.path) === U.two };
+          view.redo();
+          await T.sleep(150);
+          const redone = { tpl: T.templates()[0], cons: await T.consistent(), same: fs.get(U.path) === grid.text };
+          const noop = view.history.labels.length;
+          view.setPageTemplate(0, { kind: 'grid', spacing: '5mm' });  // the same template: nothing to undo
+          const noopAfter = view.history.labels.length;
+          view.setAllTemplates({ kind: 'dots', spacing: '5mm' });
+          await T.sleep(150);
+          await view.save();
+          const all = { note: fs.get('Undo.md'), page: fs.get(U.path), tpl: T.templates()[0] };
+          view.undo();
+          await T.sleep(150);
+          const allUndone = { cons: await T.consistent(), note: fs.get('Undo.md') === note0, page: fs.get(U.path) === grid.text, tpl: T.templates()[0] };
+          view.redo();
+          await T.sleep(150);
+          const allRedone = { cons: await T.consistent(), note: fs.get('Undo.md') === all.note, page: fs.get(U.path) === all.page };
+          view.undo();
+          view.undo();
+          await T.sleep(150);
+          const both = { cons: await T.consistent(), note: fs.get('Undo.md') === note0, page: fs.get(U.path) === U.two, tpl: T.templates()[0] };
+          return { prev: prev && ink.templateName(prev), grid: { tpl: grid.tpl, cons: grid.cons }, undone, redone, noop: noopAfter - noop, allTpl: all.tpl, allUndone, allRedone, both,
+            noteTpl: ink.readNote(all.note, 'Undo').template };
+        }""")
+        print('undo: templates:', r)
+        ok = {'disk': True, 'screen': 0}
+        tpl0 = ev("() => U.tpl")  # the settings' default template (section 10 set it)
+        check('undo: a page template change undoes and redoes byte for byte',
+              r['prev'] == tpl0 and r['grid']['tpl'] == 'grid-5mm' and r['undone'] == {'tpl': tpl0, 'cons': ok, 'same': True}
+              and r['redone'] == {'tpl': 'grid-5mm', 'cons': ok, 'same': True}, r)
+        check('undo: setting the template a page already has records nothing', r['noop'] == 0, r['noop'])
+        check('undo: "all pages" undoes the pages and the note default, and redoes them, byte for byte',
+              r['allTpl'] == 'dots-5mm' and r['noteTpl'] == 'dots-5mm' and r['allUndone'] == {'cons': ok, 'note': True, 'page': True, 'tpl': 'grid-5mm'}
+              and r['allRedone'] == {'cons': ok, 'note': True, 'page': True} and r['both'] == {'cons': ok, 'note': True, 'page': True, 'tpl': tpl0}, r)
+
+        # erasing (the eraser, #7, calls view.eraseStrokes) and adding a page
+        r = ev("""async () => {
+          view.eraseStrokes(0, [U.ids[0], 'nope']);
+          const erased = { ids: T.ids(), cons: await T.consistent(), label: view.history.labels.slice(-1)[0] };
+          view.undo();
+          const undone = { ids: T.ids(), cons: await T.consistent(), same: fs.get(U.path) === U.two };
+          view.redo();
+          const redone = { ids: T.ids(), cons: await T.consistent() };
+          view.undo();
+          const n = view.history.labels.length;
+          view.eraseStrokes(0, ['nope']);
+          return { erased, undone, redone, nothing: view.history.labels.length - n };
+        }""")
+        check('undo: erased strokes come back in place on undo and go again on redo',
+              r['erased']['ids'] == ev("() => U.ids.slice(1)") and r['erased']['label'] == 'Erase' and r['undone']['same'] and r['undone']['cons'] == ok
+              and r['redone']['ids'] == r['erased']['ids'] and r['redone']['cons'] == ok, r)
+        check('undo: erasing nothing records nothing', r['nothing'] == 0, r['nothing'])
+        r = ev("""async () => {
+          const note1 = fs.get('Undo.md');
+          view.contentEl.querySelector('.nb-ink-add').click();
+          await T.sleep(2400);  // autosave writes the new page and the index
+          const id = view.store.slots[1].id, pagePath = `Undo/${id}.svg`, note2 = fs.get('Undo.md');
+          const added = { els: T.pages().length, embeds: ink.readNote(note2, 'Undo').pages.length, file: fs.has(pagePath) };
+          commands['undo'].checkCallback(false);
+          const undoneNow = { els: T.pages().length, slots: view.store.slots.length };
+          await view.save();
+          const undone = { embeds: ink.readNote(fs.get('Undo.md'), 'Undo').pages, same: fs.get('Undo.md') === note1, file: fs.has(pagePath) };
+          commands['redo'].checkCallback(false);
+          await T.sleep(100);
+          await view.save();
+          const redone = { els: T.pages().length, dom: T.pages().map(e => e.dataset.page), same: fs.get('Undo.md') === note2, notices: notices.length };
+          return { id, added, undoneNow, undone, redone, first: view.store.slots[0].id };
+        }""")
+        check('undo: "Add page" undone takes the page out of the index; its file stays on disk',
+              r['added'] == {'els': 2, 'embeds': 2, 'file': True} and r['undoneNow'] == {'els': 1, 'slots': 1}
+              and r['undone']['embeds'] == [r['first']] and r['undone']['same'] and r['undone']['file'], r)
+        check('undo: ... and redone puts it back: two embeds, the index byte-identical', r['redone']['els'] == 2 and r['redone']['dom'] == [r['first'], r['id']] and r['redone']['same'], r)
+
+        # two- and three-finger taps on the pages
+        r = ev("""async () => {
+          view.contentEl.querySelector('.nb-ink-scroll').scrollTop = 0;
+          await T.sleep(50);
+          await T.stroke(0, T.wave(100, 800));
+          const n = T.ids().length;
+          await T.fingers(2);
+          const two = T.ids().length;
+          await T.fingers(3);
+          const three = T.ids().length;
+          await T.fingers(2, 30);
+          const moved = T.ids().length;
+          await T.fingers(1);
+          const one = T.ids().length;
+          return { n, two, three, moved, one, cons: await T.consistent() };
+        }""")
+        check('undo: a two-finger tap undoes, a three-finger tap redoes', r['two'] == r['n'] - 1 and r['three'] == r['n'], r)
+        check('undo: two fingers that move 30 px (a scroll) and a one-finger tap do nothing', r['moved'] == r['n'] and r['one'] == r['n'] and r['cons'] == ok, r)
+
+        page.locator('#leaf').screenshot(path=os.path.join(OUT, 'undo_strip.png'))
+
+        # the history is per note and goes when it closes
+        r = ev("""async () => {
+          const before = view.canUndo;
+          await app.workspace.activeLeaf.detach();
+          await T.sleep(30);
+          const leaf = app.workspace.getLeaf('tab');
+          await leaf.openFile(app.vault.getFile('Undo.md'));
+          await T.sleep(100);
+          const reopened = { undo: view.canUndo, redo: view.canRedo, buttons: T.buttons(), undid: view.undo(), key: T.key() };
+          await T.stroke(0, T.wave(100, 900));
+          const wrote = view.canUndo;
+          await leaf.openFile(app.vault.getFile('Paper.md'));
+          await T.sleep(100);
+          const other = { undo: view.canUndo, buttons: T.buttons() };
+          await leaf.openFile(app.vault.getFile('Plain.md'));
+          const outside = [commands['undo'].checkCallback(true), commands['redo'].checkCallback(true)];
+          return { before, reopened, wrote, other, outside };
+        }""")
+        check('undo: closed and reopened, the note has no history', r['before'] and r['reopened'] == {'undo': False, 'redo': False, 'buttons': [False, False], 'undid': False, 'key': [False, True]}, r)
+        check('undo: loading another note in the view clears the history', r['wrote'] and r['other'] == {'undo': False, 'buttons': [False, False]}, r)
+        check('undo: the commands are unavailable outside an ink view (the editor keeps its own undo)', r['outside'] == [False, False], r['outside'])
+        # --- end of 13. Undo and redo (#8) -------------------------------------------------
+
         # --- unload removes the patch
         r = ev("""async () => {
           p.unload();

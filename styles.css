@@ -186,6 +186,12 @@
   box-shadow: 0 0 0 2px var(--background-primary, #fff), 0 0 0 4px var(--interactive-accent, #7b6cd9);
 }
 
+/* Undo and Redo (#8): greyed out when there's nothing to undo or redo. */
+.nb-ink-strip button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 .nb-ink-size-value {
   min-width: 44px;
   text-align: center;

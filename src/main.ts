@@ -1,4 +1,5 @@
 import { MarkdownView, Notice, Plugin, TFile, type WorkspaceLeaf } from 'obsidian';
+import type { Hotkey } from 'obsidian';
 import { Recorder } from './debug/recorder';
 import { DebugView, VIEW_TYPE_DEBUG } from './debug/view';
 import { LOG_PREFIX } from './debug/util';
@@ -48,6 +49,8 @@ export default class NotebookPlugin extends Plugin {
     this.addInkCommand('highlighter-next-color', 'Next highlighter colour', view => view.nextHighlighterColor());
     this.addInkCommand('highlighter-next-size', 'Next highlighter size', view => view.nextHighlighterSize());
     this.addInkCommand('toggle-ink-stats', 'Toggle ink stats overlay', view => view.toggleStats());
+    this.addHistoryCommand('undo', 'Undo', { modifiers: ['Mod'], key: 'z' }, view => view.undo());
+    this.addHistoryCommand('redo', 'Redo', { modifiers: ['Mod', 'Shift'], key: 'z' }, view => view.redo());
     this.registerEvent(this.app.workspace.on('file-menu', (menu, file, _source, leaf) => {
       if (!(file instanceof TFile) || !leaf || leaf.view.getViewType() !== 'markdown' || !cachedIsInk(this.app, file)) return;
       menu.addItem(item => item.setTitle('Open as ink note').setIcon('pencil').onClick(() => void this.openAsInk(file, leaf)));
@@ -79,6 +82,24 @@ export default class NotebookPlugin extends Plugin {
       checkCallback: checking => {
         const view = this.app.workspace.getActiveViewOfType(InkView);
         if (!view) return false;
+        if (!checking) run(view);
+        return true;
+      },
+    });
+  }
+
+  /**
+   * Undo or redo in an open ink note, with a default hotkey. Outside an ink view the command
+   * is unavailable, so the hotkey falls through to the markdown editor's own undo.
+   */
+  private addHistoryCommand(id: string, name: string, hotkey: Hotkey, run: (view: InkView) => void) {
+    this.addCommand({
+      id,
+      name,
+      hotkeys: [hotkey],
+      checkCallback: checking => {
+        const view = this.app.workspace.getActiveViewOfType(InkView);
+        if (!view || !view.store) return false;
         if (!checking) run(view);
         return true;
       },
