@@ -34,7 +34,7 @@ test('pages are read in body order; other text and unknown frontmatter are kept 
     '![Page one](lecture/p-cccccc.svg)',
     '',
     '![](lecture/p-aaaaaa.svg)',
-    '![](other/p-dddddd.svg)',
+    '![](https://example.com/other/p-dddddd.svg)',
     '![](lecture/p-bbbbbb.png)',
     '',
     '![[lecture/p-eeeeee.svg]]',
@@ -122,4 +122,32 @@ test('non-ink notes and bad indexes are rejected', () => {
   assert.throws(() => writeNote({ ...newNote('n'), pages: ['p-1'] }), /Invalid page id/);
   assert.throws(() => writeNote({ ...newNote('n'), pages: ['p-000001', 'p-000001'] }), /listed twice/);
   assert.ok(isInkNote(FRONT) && !isInkNote('---\ntitle: x\n---\nink: 1\n') && !isInkNote('text'));
+});
+
+test('the pages\' folder is read from the embeds; the default serializes as before', () => {
+  const note = newNote('lecture');
+  assert.equal(note.folder, 'lecture');
+  note.pages = ['p-000001'];
+  assert.equal(writeNote(note), FRONT + '![](lecture/p-000001.svg)\n');
+  assert.equal(readNote(FRONT + 'Text.\n', 'week1').folder, 'week1', 'no embeds: the basename');
+
+  const moved = FRONT + '![](lecture/p-000001.svg)\n\n![](lecture/p-000002.svg)\n';
+  const read = readNote(moved, 'week1');
+  assert.deepEqual([read.basename, read.folder, read.pages], ['week1', 'lecture', ['p-000001', 'p-000002']]);
+  assert.equal(writeNote(read), moved, 'written back to the same folder');
+  read.folder = 'week1';
+  assert.equal(writeNote(read), moved.replace(/lecture\//g, 'week1/'));
+
+  const deep = readNote(FRONT + '![](../School/My%20pages/p-000001.svg)\n', 'n');
+  assert.equal(deep.folder, '../School/My pages');
+  assert.equal(writeNote(deep), FRONT + '![](../School/My%20pages/p-000001.svg)\n');
+});
+
+test('pages embedded from more than one folder, or bad folders, are rejected', () => {
+  assert.throws(() => readNote(FRONT + '![](a/p-000001.svg)\n![](b/p-000002.svg)\n', 'a'), /more than one folder \("a" and "b"\)/);
+  assert.throws(() => writeNote({ ...newNote('n'), folder: '/abs', pages: ['p-000001'] }), /Invalid page folder/);
+  assert.throws(() => writeNote({ ...newNote('n'), folder: 'a//b', pages: ['p-000001'] }), /Invalid page folder/);
+  // Not page embeds (kept as text): a URL, an absolute path, a page next to the note.
+  const odd = FRONT + '![](https://x.org/a/p-000001.svg)\n![](/a/p-000002.svg)\n![](p-000003.svg)\n';
+  assert.deepEqual(readNote(odd, 'n').pages, []);
 });

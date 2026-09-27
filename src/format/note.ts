@@ -1,12 +1,19 @@
 // The note index: a markdown file (`lecture.md`) whose frontmatter marks it as an ink note and
 // whose body embeds each page in order with a standard markdown image link into the note's
-// folder: `![](lecture/p-7f3a0c.svg)`. Everything else in the file is kept verbatim.
+// folder: `![](lecture/p-7f3a0c.svg)`. Everything else in the file is kept verbatim. The pages'
+// folder is normally the note's basename, but any relative folder is read (a folder renamed by
+// hand, or one that couldn't follow a rename, #26), as long as every page is in the same one.
 import { isPageId } from './ids';
 import type { Paper } from './page';
 
 export interface NoteIndex {
-  /** The note's file name without `.md`; its pages live in the folder of the same name next to it. */
+  /** The note's file name without `.md`; its pages normally live in the folder of the same name next to it. */
   basename: string;
+  /**
+   * The folder holding the pages, relative to the note's own folder (`/`-separated, may start
+   * with `../`): the basename unless it was read otherwise.
+   */
+  folder: string;
   paper: Paper;
   /** Template kind name for new pages (`blank`; #19 adds more). */
   template: string;
@@ -34,11 +41,14 @@ export const PAPERS: readonly Paper[] = ['letter', 'a4'];
 
 /** A new, empty note. */
 export function newNote(basename: string, paper: Paper = 'letter', template = 'blank'): NoteIndex {
-  return { basename, paper, template, pages: [] };
+  return { basename, folder: basename, paper, template, pages: [] };
 }
 
-/** A page's path relative to the note's folder (unencoded), e.g. `lecture/p-7f3a0c.svg`. */
-export const pagePath = (basename: string, id: string) => `${basename}/${id}.svg`;
+/**
+ * A page's path relative to the note's folder (unencoded), e.g. `lecture/p-7f3a0c.svg`, given
+ * the pages' folder (the basename by default).
+ */
+export const pagePath = (folder: string, id: string) => `${folder}/${id}.svg`;
 
 /** The `---` line that opens and closes frontmatter. */
 const isFence = (line: string) => /^---[ \t]*$/.test(line);
@@ -65,25 +75,30 @@ function safeDecode(s: string): string {
   }
 }
 
-/** The page id if `line` is an embed of a page in `basename`'s folder. */
-function embedOf(line: string, basename: string): { page: string; alt: string } | null {
+/** Whether `folder` is a usable relative folder: no scheme, not absolute, no empty or `.` parts. */
+export function isRelativeFolder(folder: string): boolean {
+  if (!folder || /[\r\n:\\]/.test(folder) || folder.startsWith('/')) return false;
+  return folder.split('/').every(part => part !== '' && part !== '.');
+}
+
+/** The page id and its folder if `line` is an embed of a page (`<folder>/p-xxxxxx.svg`). */
+function embedOf(line: string): { page: string; alt: string; folder: string } | null {
   const m = /^!\[([^\]]*)\]\((.*)\)\s*$/.exec(line);
   if (!m) return null;
   let url = m[2];
   if (url.startsWith('<') && url.endsWith('>')) url = url.slice(1, -1);
-  const prefix = basename + '/';
-  for (const u of [url, safeDecode(url)]) {
-    if (u.startsWith(prefix) && u.endsWith('.svg')) {
-      const id = u.slice(prefix.length, -4);
-      if (isPageId(id)) return { page: id, alt: m[1] };
-    }
+  for (const u of [safeDecode(url), url]) {
+    const e = /^(.+)\/(p-[^/]*)\.svg$/.exec(u);
+    if (e && isPageId(e[2]) && isRelativeFolder(e[1])) return { page: e[2], alt: m[1], folder: e[1] };
   }
   return null;
 }
 
 /**
  * Reads a note index. `noteBasename` is the note's file name without `.md`. Throws if the file
- * isn't an ink note (no frontmatter with `ink: 1`) or a page is embedded twice.
+ * isn't an ink note (no frontmatter with `ink: 1`), a page is embedded twice, or pages are
+ * embedded from more than one folder. The pages' folder is the one the embeds use (the
+ * basename if there are none).
  */
 export function readNote(markdown: string, noteBasename: string): NoteIndex {
   const eol = markdown.includes('\r\n') ? '\r\n' : '\n';
@@ -112,15 +127,20 @@ export function readNote(markdown: string, noteBasename: string): NoteIndex {
   const template = values.template || 'blank';
 
   const pages: string[] = [];
+  let folder: string | null = null;
   const body: BodyLine[] = lines.slice(end + 1).map(line => {
-    const embed = embedOf(line, noteBasename);
+    const embed = embedOf(line);
     if (!embed) return line;
     if (pages.includes(embed.page)) throw new Error(`Page ${embed.page} is embedded twice in the note`);
+    if (folder !== null && embed.folder !== folder) {
+      throw new Error(`Pages are embedded from more than one folder ("${folder}" and "${embed.folder}")`);
+    }
+    folder = embed.folder;
     pages.push(embed.page);
-    return embed;
+    return { page: embed.page, alt: embed.alt };
   });
 
-  return { basename: noteBasename, paper, template, pages, source: { eol, front, body } };
+  return { basename: noteBasename, folder: folder ?? noteBasename, paper, template, pages, source: { eol, front, body } };
 }
 
 // ---- writing
@@ -129,8 +149,8 @@ export function readNote(markdown: string, noteBasename: string): NoteIndex {
 const encodePath = (path: string) =>
   path.replace(/[\s%()<>[\]#?^|\\]/g, c => c === '(' ? '%28' : c === ')' ? '%29' : encodeURIComponent(c));
 
-const embedLine = (basename: string, id: string, alt: string) =>
-  `![${alt}](${encodePath(pagePath(basename, id))})`;
+const embedLine = (folder: string, id: string, alt: string) =>
+  `![${alt}](${encodePath(pagePath(folder, id))})`;
 
 const isBlank = (l: BodyLine) => typeof l === 'string' && l.trim() === '';
 
@@ -144,8 +164,10 @@ const NEW_SOURCE: NoteSource = { eol: '\n', front: KEYS.map(key => ({ key })), b
  */
 export function writeNote(index: NoteIndex): string {
   const { basename, pages } = index;
+  const folder = index.folder ?? basename;
   if (!PAPERS.includes(index.paper)) throw new Error(`Unknown paper "${index.paper}"`);
   if (!basename || /[\r\n/]/.test(basename)) throw new Error(`Invalid note name "${basename}"`);
+  if (!isRelativeFolder(folder)) throw new Error(`Invalid page folder "${folder}"`);
   if (!index.template || /[\r\n]/.test(index.template)) throw new Error(`Invalid template "${index.template}"`);
   const seen = new Set<string>();
   for (const id of pages) {
@@ -170,7 +192,7 @@ export function writeNote(index: NoteIndex): string {
       if (!alts.has(l.page)) alts.set(l.page, l.alt);
     }
   });
-  const embed = (id: string) => embedLine(basename, id, alts.get(id) ?? '');
+  const embed = (id: string) => embedLine(folder, id, alts.get(id) ?? '');
 
   // Places left over when pages were removed, each with one adjacent blank line.
   const drop = new Set<number>();
