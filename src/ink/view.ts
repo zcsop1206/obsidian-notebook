@@ -248,6 +248,8 @@ export class InkView extends FileView {
       lassoTap: (target, point) => this.selectImageAt(target, point),
       rulerEdge: (target, point, reach) => this.rulerEdge(target, point, reach),
       rulerMeasure: (target, from, to) => this.rulerMeasure(target, from, to),
+      shapesOn: () => this.shapesOn,
+      commitShape: (target, shape, freehand) => this.commit(target, shape, freehand),
     }, (type, fn, options) => this.registerDomEvent(this.pagesEl, type, fn, options), this.stats.pen);
     // A Pencil drag anywhere in the view, on a page or not, never scrolls it (blockStylusTouch);
     // finger drags over the pages move it through the navigator, never natively, and never
@@ -699,7 +701,8 @@ export class InkView extends FileView {
     return { key: pv, el: pv.el, size: page.size };
   }
 
-  private commit(target: PageTarget, drawn: NewStroke) {
+  /** A finished stroke; with `freehand`, `drawn` is its straightened shape (#16, see recordStraighten). */
+  private commit(target: PageTarget, drawn: NewStroke, freehand?: NewStroke) {
     const pv = target.key as PageView;
     const store = this.store;
     if (!store || !this.pages.includes(pv)) return;
@@ -711,7 +714,14 @@ export class InkView extends FileView {
     if (pv.bitmap && pv.pending == null) pv.bitmap.addStroke(page, stroke, this.theme, this.template(pv, page));
     else this.renderPage(pv);
     this.updateStats();
-    this.recordStrokes('Add stroke', pv.slot.id, [{ index: page.strokes.length - 1, stroke }], true);
+    if (!freehand) {
+      this.recordStrokes('Add stroke', pv.slot.id, [{ index: page.strokes.length - 1, stroke }], true);
+      return;
+    }
+    // Undone, the stroke comes back freehand: redoing the add puts back the freehand stroke.
+    const free: Stroke = { ...stroke, points: freehand.points };
+    this.recordStrokes('Add stroke', pv.slot.id, [{ index: page.strokes.length - 1, stroke: free }], true);
+    this.recordStraighten(pv.slot.id, free, stroke);
   }
 
   // ---- pen settings
@@ -2330,6 +2340,41 @@ export class InkView extends FileView {
         if (this.store === store) apply();
       },
     });
+  }
+
+  // ---- shapes (#16)
+  // A stroke held still at its end is straightened (input.ts, shapes.ts) and committed as its
+  // shape: two undo steps, "Straighten" (back to the freehand stroke, same id and place) and the
+  // usual "Add stroke". The freehand points live only in the history, never in the file.
+  // Recognition is on by default; the "Toggle shape recognition" command turns it off for the
+  // view (not saved).
+
+  /** Whether held strokes are straightened. */
+  shapesOn = true;
+
+  toggleShapes() {
+    this.shapesOn = !this.shapesOn;
+    new Notice(this.shapesOn ? 'Shape recognition on' : 'Shape recognition off');
+  }
+
+  /** Records a straightened stroke: undo swaps in the freehand stroke, redo the shape. */
+  private recordStraighten(pageId: string, free: Stroke, shape: Stroke) {
+    const store = this.store;
+    if (!store) return;
+    const spatial = () => this.pages.find(p => p.slot.id === pageId)?.spatial;
+    const swap = (from: Stroke, to: Stroke) => () => {
+      if (this.store !== store) return;
+      const [was] = store.removeStrokes(pageId, [from.id]);
+      if (!was) return;
+      store.insertStrokes(pageId, [{ index: was.index, stroke: to }]);
+      const index = spatial();
+      if (index) {
+        index.remove(from.id);
+        index.add(to);
+      }
+      this.redrawPage(pageId);
+    };
+    this.history.push({ label: 'Straighten', undo: swap(shape, free), redo: swap(free, shape) });
   }
 
   // ---- the ruler (#20)

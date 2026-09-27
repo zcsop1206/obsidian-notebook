@@ -68,15 +68,32 @@
 // stroke's PageMap, and toPoint projects every sample (and the predicted tail) onto it before
 // rounding, so the live stroke and the stored one are the same straight line, with pressure and
 // times as sampled. While it's drawn the host is given its length once per frame (rulerMeasure).
+//
+// Shapes (#16): a pen or highlighter stroke (not a ruled one; not with the host's shapesOn
+// false) whose pointer stays within HOLD_SLOP CSS px for HOLD_MS, after at least HOLD_MIN_PATH
+// page px of path, is given to recognize (shapes.ts). The hold is timed by event timestamps
+// (WebKit keeps sending pointermoves at the same place while the Pencil is held) and by a timer
+// (for when no events come at all). A recognised shape replaces the live drawing (the head
+// canvas hidden, the shape drawn translucent on the tail canvas) until the pen lifts, when it
+// is given to the host's commitShape with the freehand stroke; moving more than HOLD_SLOP
+// again drops it and the freehand stroke is drawn again, its points continuing.
 import { strokePath } from '../format/outline';
 import { roundP, roundXY, type HighlighterStroke, type PenStroke, type Point, type Size } from '../format/page';
 import { fmt, median, yn } from '../debug/util';
 import type { EraserMode, EraserSettings, PenSettings } from './pen';
 import { EDGE_REACH, projectOnto, type Edge } from './ruler';
+import { recognize, type Shape, type ShapeKind } from './shapes';
 import { HIGHLIGHT_ALPHA, pixelRatio } from './renderer';
 
 /** A lasso gesture staying within this many CSS px of its start is a tap (#12). */
 export const LASSO_TAP_SLOP = 6;
+/** A pen held within this many CSS px for HOLD_MS is holding still (#16). */
+export const HOLD_SLOP = 3;
+export const HOLD_MS = 600;
+/** A stroke is only straightened after this much path, page px. */
+export const HOLD_MIN_PATH = 20;
+/** The live shape preview's opacity (the committed stroke is opaque). */
+export const SHAPE_PREVIEW_ALPHA = 0.7;
 /** Samples closer than this (page px) to the previous one are dropped. */
 export const MIN_STEP = 0.25;
 /** More live (unfrozen) points than this and the older ones are frozen onto the head canvas. */
@@ -147,6 +164,13 @@ export interface PenHost {
   rulerEdge?(target: PageTarget, point: { x: number; y: number }, reach: number): Edge | null;
   /** A ruled stroke is drawn from `from` to `to` (page px); null when it ended. Once per frame. */
   rulerMeasure?(target: PageTarget, from: Point | null, to: Point | null): void;
+  /** Shapes (#16): whether a held stroke is straightened (absent: yes). */
+  shapesOn?(): boolean;
+  /**
+   * A stroke straightened into `shape` (#16): commit `shape`, keeping `freehand` for undo.
+   * Absent: the shape is committed as an ordinary stroke.
+   */
+  commitShape?(target: PageTarget, shape: NewStroke, freehand: NewStroke, kind: ShapeKind): void;
 }
 
 /** What a pointer going down grabs with the lasso: the selection's box, its corner handle, or nothing. */
@@ -427,6 +451,13 @@ interface Live {
   tailBox: [number, number, number, number] | null;
   /** Anything on the head canvas. */
   head: boolean;
+  /** Where (client px) and when (event timestamp and clock) the pointer last moved past HOLD_SLOP (#16). */
+  hold: { x: number; y: number; stamp: number; clock: number; timer: number; tried: boolean } | null;
+  /** The path length so far, page px, over the first `lenCount` points. */
+  len: number;
+  lenCount: number;
+  /** The recognised shape shown instead of the stroke, or null. */
+  shape: Shape | null;
 }
 
 /** An erase gesture in progress. */
@@ -587,8 +618,10 @@ export class PenInput {
       pointerId: e.pointerId, pointerType: e.pointerType, target, map, pen,
       style, color: this.host.drawColor(style.color), trace: newTrace(), predicted: [], frozen: 0, pieces: 0,
       events: 0, handler: [], frames: [], maxPredicted: 0, tailBox: null, head: false,
+      hold: null, len: 0, lenCount: 1, shape: null,
     };
     addSamples(live.trace, [e], live.map);
+    this.holdMove(live, e);
     this.schedule();
   }
 
@@ -611,6 +644,7 @@ export class PenInput {
       live.predicted = predictedPoints(live.trace, e, live.map);
       live.maxPredicted = Math.max(live.maxPredicted, live.predicted.length);
     }
+    this.holdMove(live, e);
     this.schedule();
     live.handler.push(performance.now() - t0);
   }
@@ -627,6 +661,7 @@ export class PenInput {
     const live = this.live;
     if (!live || e.pointerId !== live.pointerId) return;
     this.live = null;
+    this.stopHold(live);
     this.untrack();
     cancelAnimationFrame(this.frame);
     this.frame = 0;
@@ -635,7 +670,13 @@ export class PenInput {
     this.record(live, cancelled);
     // A cancelled stroke (the system took the pointer) is kept, like a finished one.
     const { points } = live.trace;
-    if (points.length) this.host.commit(live.target, { ...live.style, points });
+    // A straightened stroke is committed as its shape on release (a cancelled one stays freehand).
+    this.lastShape = live.shape && !cancelled ? live.shape.kind : null;
+    if (live.shape && !cancelled) {
+      const shape = { ...live.style, points: live.shape.points }, freehand = { ...live.style, points };
+      if (this.host.commitShape) this.host.commitShape(live.target, shape, freehand, live.shape.kind);
+      else this.host.commit(live.target, shape);
+    } else if (points.length) this.host.commit(live.target, { ...live.style, points });
     this.clear();
     this.host.statsChanged();
   }
@@ -658,6 +699,11 @@ export class PenInput {
     const live = this.live;
     if (!live) return;
     const t0 = performance.now();
+    if (live.shape) {
+      this.drawShape(live);
+      live.frames.push(performance.now() - t0);
+      return;
+    }
     const pts = live.trace.points;
     const plan = livePlan(pts.length, live.frozen);
     if (plan.freeze) {
@@ -679,6 +725,81 @@ export class PenInput {
     live.tailBox = box(tail, live.style.size);
     if (live.map.edge && pts.length) this.host.rulerMeasure?.(live.target, pts[0], pts[pts.length - 1]);
     live.frames.push(performance.now() - t0);
+  }
+
+  // ---- shapes (#16)
+
+  /** The kind of shape the last stroke was committed as, or null (for tests and the stats). */
+  lastShape: ShapeKind | null = null;
+
+  /** The shape shown for the stroke in progress, or null. */
+  get previewShape(): ShapeKind | null {
+    return this.live?.shape?.kind ?? null;
+  }
+
+  /** A pointer event of the live stroke: restart the hold when it moved, or recognise after one. */
+  private holdMove(live: Live, e: PointerEvent) {
+    const pts = live.trace.points;
+    for (; live.lenCount < pts.length; live.lenCount++) {
+      const a = pts[live.lenCount - 1], b = pts[live.lenCount];
+      live.len += Math.hypot(b.x - a.x, b.y - a.y);
+    }
+    const h = live.hold;
+    if (!h || Math.hypot(e.clientX - h.x, e.clientY - h.y) > HOLD_SLOP) {
+      if (live.shape) this.dropShape(live);
+      this.stopHold(live);
+      const win = live.target.el.ownerDocument.defaultView ?? window;
+      const hold = live.hold = { x: e.clientX, y: e.clientY, stamp: e.timeStamp, clock: performance.now(), timer: 0, tried: false };
+      hold.timer = win.setTimeout(() => {
+        if (this.live === live && live.hold === hold && performance.now() - hold.clock >= HOLD_MS - 1) this.held(live);
+      }, HOLD_MS + 5);
+      return;
+    }
+    if (e.timeStamp - h.stamp >= HOLD_MS) this.held(live);
+  }
+
+  private stopHold(live: Live) {
+    if (live.hold) (live.target.el.ownerDocument.defaultView ?? window).clearTimeout(live.hold.timer);
+    live.hold = null;
+  }
+
+  /** The pen has held still: straighten the stroke if it's a shape. */
+  private held(live: Live) {
+    if (!live.hold || live.hold.tried || live.shape || live.map.edge || live.len < HOLD_MIN_PATH || this.host.shapesOn?.() === false) return;
+    live.hold.tried = true; // once per hold
+    const shape = recognize(live.trace.points);
+    if (!shape) return;
+    live.shape = shape;
+    this.head.style.visibility = 'hidden';
+    this.schedule();
+  }
+
+  /** The pen moved on after a shape was shown: back to the freehand stroke. */
+  private dropShape(live: Live) {
+    live.shape = null;
+    if (live.style.tool !== 'highlighter') this.head.style.visibility = '';
+    // The next frame redraws the whole tail canvas (the shape may have been anywhere on it).
+    live.tailBox = [0, 0, live.target.size.width, live.target.size.height];
+    this.schedule();
+  }
+
+  /** Draws the recognised shape, translucent, in place of the stroke. */
+  private drawShape(live: Live) {
+    const c = this.tail, ctx = this.tailCtx, shape = live.shape!;
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, c.width, c.height);
+    ctx.restore();
+    const d = strokePath({ ...live.style, points: shape.points }, true);
+    if (d) {
+      ctx.save();
+      ctx.globalAlpha = (live.style.tool === 'highlighter' ? HIGHLIGHT_ALPHA : 1) * SHAPE_PREVIEW_ALPHA;
+      ctx.fillStyle = live.color;
+      ctx.fill(new Path2D(d));
+      ctx.restore();
+    }
+    this.livePath = d;
+    live.tailBox = [0, 0, live.target.size.width, live.target.size.height];
   }
 
   /** Fills the outline of these points in the stroke's settings; returns the path `d`. */
@@ -807,6 +928,7 @@ export class PenInput {
   cancel() {
     this.untrack();
     if (this.live?.map.edge) this.host.rulerMeasure?.(this.live.target, null, null);
+    if (this.live) this.stopHold(this.live);
     this.live = null;
     this.erasing = null;
     const la = this.lassoing;
