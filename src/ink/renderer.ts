@@ -51,6 +51,21 @@ export function strokePath2D(stroke: Stroke): Path2D {
 }
 
 /**
+ * Computes the outlines of a page's strokes not yet computed, until `deadline`
+ * (performance.now() ms). Returns whether they are all done. Computing the outlines is most of
+ * the cost of drawing a page for the first time (about 45 ms for 300 strokes in Chromium on a
+ * desktop), so the view spreads it over frames ahead of drawing a page near the viewport (#9).
+ */
+export function warmOutlines(page: Page, deadline: number): boolean {
+  for (const s of page.strokes) {
+    if (outlines.has(s)) continue;
+    if (performance.now() >= deadline) return false;
+    strokePath2D(s);
+  }
+  return true;
+}
+
+/**
  * Template layers rasterised through an <img> of an SVG built from renderTemplate, so a new
  * template kind only needs template.ts. The SVG sets the `.t` line colour of Obsidian's theme
  * explicitly: inside an <img>, the page file's prefers-color-scheme follows the OS instead.
@@ -137,6 +152,15 @@ export class PageBitmap {
 
   /** Draws the whole page. `template` is the rasterised template layer, if any. */
   render(page: Page, theme: Theme, template: CanvasImageSource | null) {
+    this.renderBase(page, theme, template);
+    this.renderPen(page, theme, 0, Infinity);
+  }
+
+  /**
+   * Draws the page without its pen strokes: paper, template and highlighter layer. With
+   * renderPen, a page can be drawn over several frames (#9), each rasterising only part of it.
+   */
+  renderBase(page: Page, theme: Theme, template: CanvasImageSource | null) {
     const { ctx, canvas } = this;
     const w = canvas.width, h = canvas.height;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -158,8 +182,22 @@ export class PageBitmap {
       ctx.drawImage(scratch!, 0, 0);
       ctx.globalAlpha = 1;
     }
-    this.pageTransform(ctx, page.size);
-    for (const s of page.strokes) if (s.tool === 'pen') this.fill(s, theme);
+  }
+
+  /**
+   * Draws up to `count` pen strokes, in order, from stroke index `from`, over what's drawn.
+   * Returns the index to continue from (the number of strokes once all are drawn).
+   */
+  renderPen(page: Page, theme: Theme, from: number, count: number): number {
+    this.pageTransform(this.ctx, page.size);
+    const strokes = page.strokes;
+    let i = from;
+    for (let n = 0; i < strokes.length && n < count; i++) {
+      if (strokes[i].tool !== 'pen') continue;
+      this.fill(strokes[i], theme);
+      n++;
+    }
+    return i;
   }
 
   /**
