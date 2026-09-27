@@ -1,10 +1,13 @@
 name: Release
 
 # Push a tag equal to the manifest version (e.g. 0.0.3) to build the plugin and publish a
-# release that BRAT can install on the iPad.
+# release that BRAT can install on the iPad. Or run it by hand on a branch (workflow_dispatch):
+# it then releases that commit under the manifest version, creating the tag, for environments
+# whose git proxy refuses to push tags.
 on:
   push:
     tags: ['*']
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -23,8 +26,11 @@ jobs:
       - name: Build main.js
         run: npm run build
       - name: Check tag matches manifest version
+        if: github.event_name == 'push'
         run: test "$(jq -r .version manifest.json)" = "${GITHUB_REF_NAME}"
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" main.js manifest.json styles.css --title "$GITHUB_REF_NAME" --notes "Notebook plugin $GITHUB_REF_NAME"
+        run: |
+          version="$(jq -r .version manifest.json)"
+          gh release create "$version" main.js manifest.json styles.css --target "$GITHUB_SHA" --title "$version" --notes "Notebook plugin $version"
