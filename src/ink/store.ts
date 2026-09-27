@@ -197,11 +197,12 @@ export class NoteStore {
   /**
    * The note's default template for new pages and the size it comes in, if any: a built-in
    * name (a sized one such as `sticky-3in` has a size, #27), or a name the resolver knows
-   * (`pdf:<name>`, #21). Unknown names give blank with a warning.
+   * (`tpl:<name>`, a custom template, #54, or its older alias `pdf:<name>`, #21). Unknown names
+   * give blank with a warning.
    */
   defaultTemplate(): { template: Template; size: Size | null } {
     const name = this.index.template;
-    if (!/^pdf:/.test(name)) return { template: noteTemplate(name), size: templateSize(name) };
+    if (!/^(?:pdf|tpl):/.test(name)) return { template: noteTemplate(name), size: templateSize(name) };
     const r = this.options.resolveTemplate?.(name);
     if (r) return { template: parseTemplate(r.template), size: { ...r.size } };
     console.warn('[notebook]', `Unknown template "${name}"; using blank`);
@@ -320,9 +321,10 @@ export class NoteStore {
 
   /**
    * Sets the template of every page that can be read, and makes it the note's default for new
-   * pages. Returns what it replaced.
+   * pages (`name`, if given, is its `template:` name: a custom template's, #54). Returns what it
+   * replaced.
    */
-  setAllTemplates(template: Template, size?: Size): TemplatesBefore {
+  setAllTemplates(template: Template, size?: Size, name?: string): TemplatesBefore {
     const pages: TemplatesBefore['pages'] = [];
     for (const slot of this.slots) {
       if (!this.page(slot)) continue;
@@ -330,13 +332,16 @@ export class NoteStore {
       const before = this.setPageTemplate(slot.id, template, size);
       if (before) pages.push(size ? { id: slot.id, template: before, size: had } : { id: slot.id, template: before });
     }
-    return { note: this.setNoteTemplate(template), pages };
+    return { note: this.setNoteTemplate(template, name), pages };
   }
 
-  /** Sets the note's default template for new pages. Returns the `template:` name it had. */
-  setNoteTemplate(template: Template): string {
+  /**
+   * Sets the note's default template for new pages (`name`, if given, is its `template:` name).
+   * Returns the `template:` name it had.
+   */
+  setNoteTemplate(template: Template, given?: string): string {
     const before = this.index.template;
-    const name = this.options.nameTemplate?.(template) ?? templateName(template);
+    const name = given || (this.options.nameTemplate?.(template) ?? templateName(template));
     if (name !== before) {
       this.index.template = name;
       this.indexDirty = true;

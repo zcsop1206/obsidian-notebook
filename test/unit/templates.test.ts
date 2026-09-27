@@ -1,12 +1,14 @@
-// PDF templates (#21) and sized templates in the store (#27): the registry over a fake vault
-// folder, and the store's template resolver (`pdf:` defaults, size inheritance, the PDF copy).
+// Custom templates (#21, #54) and sized templates in the store (#27): the registry over a fake
+// vault folder (any page file without strokes, `tpl:` names with `pdf:` read as an alias; saving,
+// renaming and deleting), and the store's template resolver (custom defaults, size inheritance,
+// the PDF copy).
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { newNote, readNote, writeNote } from '../../src/format/note';
 import { newPage, readPage, writePage } from '../../src/format/page';
-import { parseTemplateName, type PdfTemplate } from '../../src/format/template';
+import { parseTemplateName, type ImageTemplate, type PdfTemplate } from '../../src/format/template';
 import { NoteStore, type NoteFiles } from '../../src/ink/store';
-import { cleanFolder, TemplateRegistry } from '../../src/ink/templates';
+import { canonicalName, cleanFolder, isCustomName, TemplateRegistry } from '../../src/ink/templates';
 
 const IMAGE = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJ+/8=';
 
@@ -28,8 +30,16 @@ function fakeVault() {
     getAbstractFileByPath: (p: string) => (files.has(p) || dirs.has(p) ? file(p) : null),
     cachedRead: async (f: { path: string }) => { vault.reads++; return files.get(f.path) as string; },
     readBinary: async (f: { path: string }) => files.get(f.path) as ArrayBuffer,
+    read: async (f: { path: string }) => files.get(f.path) as string,
     createFolder: async (p: string) => { dirs.add(p); },
     createBinary: async (p: string, d: ArrayBuffer) => { files.set(p, d); trigger('create', file(p)); },
+    create: async (p: string, d: string) => { if (files.has(p)) throw new Error('exists'); files.set(p, d); trigger('create', file(p)); },
+    modify: async (f: { path: string }, d: string) => { files.set(f.path, d); trigger('modify', file(f.path)); },
+    rename: async (f: { path: string }, to: string) => {
+      if (files.has(to)) throw new Error('exists');
+      files.set(to, files.get(f.path)!); files.delete(f.path); trigger('rename', file(to), f.path);
+    },
+    delete: async (f: { path: string }) => { files.delete(f.path); trigger('delete', file(f.path)); },
     on: (name: string, cb: (...a: unknown[]) => void) => { (handlers[name] ??= []).push(cb); return { name, cb }; },
     put: (p: string, d: string | ArrayBuffer, ev = 'create') => { files.set(p, d); trigger(ev, file(p)); },
     files,
@@ -41,6 +51,7 @@ function registryWith(folder = 'templates/ink') {
   const vault = fakeVault();
   const app = { vault } as never;
   const component = { registerEvent: () => {} } as never;
+  const written = writePage(newPage('p-000009', undefined, { kind: 'blank' }));
   const reg = new TemplateRegistry(app, () => folder);
   reg.watch(component);
   const tpl = (source: string, page = 1, size = { width: 816, height: 1056 }) =>
@@ -50,6 +61,8 @@ function registryWith(folder = 'templates/ink') {
   vault.files.set('templates/ink/Lab.svg', tpl('Lab.pdf'));
   vault.files.set('templates/ink/Lab.pdf', new Uint8Array([4]).buffer);
   vault.files.set('templates/ink/Lined.svg', writePage(newPage('p-000002', undefined, parseTemplateName('lined-college'))));
+  // A page with writing on it is not a template.
+  vault.files.set('templates/ink/Written.svg', written.replace('"strokes":[]', '"strokes":[{"id":"s-000001","tool":"pen","nib":"uniform","color":"#000000","size":2,"points":[[1,1,0.5,0],[5,5,0.5,8]]}]'));
   vault.files.set('templates/ink/notes.md', '# not a template');
   vault.files.set('templates/ink/broken.svg', '<svg/>');
   vault.files.set('templates/ink/sub/Deep.svg', tpl('Deep.pdf'));
@@ -57,15 +70,17 @@ function registryWith(folder = 'templates/ink') {
   return { vault, reg };
 }
 
-test('registry: lists the pdf-template pages directly in the folder, sorted, cached until the folder changes', async () => {
+test('registry: lists the page files without strokes directly in the folder, any kind, sorted, cached until the folder changes', async () => {
   const { vault, reg } = registryWith();
+  assert.ok(vault.files.get('templates/ink/Written.svg')!.toString().includes('s-000001'), 'the written page has a stroke');
   assert.deepEqual(reg.entries, []);
   const list = await reg.load();
-  assert.deepEqual(list.map(e => e.name), ['pdf:Engineering', 'pdf:Lab']);
+  assert.deepEqual(list.map(e => e.name), ['tpl:Engineering', 'tpl:Lab', 'tpl:Lined']);
   assert.deepEqual(list[0].size, { width: 612, height: 792 });
-  assert.equal(list[0].template.page, 2);
-  assert.equal(list[0].template.image, IMAGE);
-  assert.equal(reg.entries.length, 2);
+  assert.equal((list[0].template as PdfTemplate).page, 2);
+  assert.equal((list[0].template as PdfTemplate).image, IMAGE);
+  assert.deepEqual([list[2].template, list[2].size], [{ kind: 'lined', rule: 'college', margin: false }, { width: 816, height: 1056 }]);
+  assert.equal(reg.entries.length, 3);
   const reads = vault.reads;
   await reg.load();
   assert.equal(vault.reads, reads, 'cached');
@@ -75,8 +90,18 @@ test('registry: lists the pdf-template pages directly in the folder, sorted, cac
   await reg.load();
   assert.equal(reg.scans, 1);
   vault.put('templates/ink/Zeta.svg', writePage(newPage('p-000003', undefined, { kind: 'pdf', source: 'Zeta.pdf', page: 1, image: '' })));
-  assert.deepEqual((await reg.load()).map(e => e.name), ['pdf:Engineering', 'pdf:Lab', 'pdf:Zeta']);
+  assert.deepEqual((await reg.load()).map(e => e.name), ['tpl:Engineering', 'tpl:Lab', 'tpl:Lined', 'tpl:Zeta']);
   assert.equal(reg.scans, 2);
+});
+
+test('registry: tpl: names, with pdf: read as an alias of the same file', async () => {
+  const { reg } = registryWith();
+  await reg.load();
+  assert.deepEqual(reg.resolve('tpl:Engineering'), reg.resolve('pdf:Engineering'));
+  assert.equal(reg.get('pdf:Lined')!.name, 'tpl:Lined', 'any kind answers to either prefix');
+  assert.equal(canonicalName('pdf:Lab'), 'tpl:Lab');
+  assert.equal(canonicalName('lined-college'), 'lined-college');
+  assert.deepEqual(['tpl:x', 'pdf:x', 'tpl:', 'blank', 'fill-ffffff'].map(isCustomName), [true, true, false, false, false]);
 });
 
 test('registry: resolve, nameOf and a changed folder setting', async () => {
@@ -92,11 +117,12 @@ test('registry: resolve, nameOf and a changed folder setting', async () => {
   assert.equal(reg.resolve('pdf:Engineering')!.template.kind, 'pdf');
   assert.equal((reg.resolve('pdf:Engineering')!.template as PdfTemplate).page, 2);
   assert.equal(reg.resolve('pdf:Nope'), null);
-  assert.equal(reg.nameOf(reg.resolve('pdf:Lab')!.template), 'pdf:Lab');
+  assert.equal(reg.nameOf(reg.resolve('pdf:Lab')!.template), 'tpl:Lab');
+  assert.equal(reg.nameOf(reg.resolve('tpl:Lined')!.template), null, 'a lined template is named by whoever chose it');
   assert.equal(reg.nameOf({ kind: 'pdf', source: 'Lab.pdf', page: 1, image: '' }), null, 'an imported page with another image');
   assert.equal(reg.nameOf({ kind: 'blank' }), null);
   folder = 'elsewhere';
-  assert.deepEqual((await reg.load()).map(e => e.name), ['pdf:Other']);
+  assert.deepEqual((await reg.load()).map(e => e.name), ['tpl:Other']);
   assert.equal(cleanFolder('/a//b/'), 'a/b');
 });
 
@@ -159,7 +185,7 @@ test('store: a letter note whose default is a sized built-in gets pages of that 
   assert.deepEqual(store.addPage().size, { width: 480, height: 288 });
 });
 
-test('store: pdf:<name> defaults resolve through the resolver; unknown names fall back to blank', async () => {
+test('store: pdf:<name> and tpl:<name> defaults resolve through the resolver; unknown names fall back to blank', async () => {
   const { reg, vault } = registryWith();
   await reg.load();
   const used: string[] = [];
@@ -174,11 +200,18 @@ test('store: pdf:<name> defaults resolve through the resolver; unknown names fal
   assert.deepEqual(used, ['Engineering.pdf dir/lec']);
   await new Promise(r => setTimeout(r, 0));
   assert.ok(vault.files.has('dir/lec/Engineering.pdf'), 'the PDF copied into the page folder');
-  // Setting it as every page's template names it back as pdf:Engineering.
+  // Setting it as every page's template names it back, as tpl:Lab.
   store.setAllTemplates(reg.resolve('pdf:Lab')!.template);
-  assert.equal(store.index.template, 'pdf:Lab');
+  assert.equal(store.index.template, 'tpl:Lab');
   await store.flush();
-  assert.match(files.files.get('dir/lec.md')!, /template: pdf:Lab/);
+  assert.match(files.files.get('dir/lec.md')!, /template: tpl:Lab/);
+  // A tpl: default of another kind, at its own size; setAllTemplates takes the chooser's name.
+  const { store: s4 } = await openStore('letter', 'tpl:Lined', opts);
+  assert.deepEqual(s4.addPage().page!.template, { kind: 'lined', rule: 'college', margin: false });
+  s4.setAllTemplates({ kind: 'fill', color: '#fff59d' }, { width: 400, height: 400 }, 'tpl:Big sticky');
+  assert.equal(s4.index.template, 'tpl:Big sticky');
+  s4.setAllTemplates({ kind: 'fill', color: '#fff59d' }, { width: 288, height: 288 });
+  assert.equal(s4.index.template, 'sticky-3in', 'without a name: the built-in name');
   // Changing one pdf template for another is a change (not both named `pdf`).
   const before = store.setPageTemplate(slot.id, reg.resolve('pdf:Engineering')!.template);
   assert.equal((before as PdfTemplate).source, 'Lab.pdf');
@@ -190,12 +223,14 @@ test('store: pdf:<name> defaults resolve through the resolver; unknown names fal
   try {
     const { store: s2 } = await openStore('letter', 'pdf:Missing', opts);
     assert.deepEqual(s2.addPage().page!.template, { kind: 'blank' });
+    const { store: s5 } = await openStore('letter', 'tpl:Missing', opts);
+    assert.deepEqual(s5.addPage().page!.template, { kind: 'blank' });
     const { store: s3 } = await openStore('letter', 'pdf:Engineering');
     assert.deepEqual(s3.addPage().page!.template, { kind: 'blank' }, 'no resolver');
   } finally {
     console.warn = warn;
   }
-  assert.equal(warnings.length, 2);
+  assert.equal(warnings.length, 3);
 });
 
 test('store: changing a page\'s template to a sized one sets its size; the old size restores it', async () => {
@@ -219,4 +254,52 @@ test('store: changing a page\'s template to a sized one sets its size; the old s
   assert.ok(store.slots.every(s => s.size.width === 480 && s.size.height === 288));
   for (const p of all.pages) store.setPageTemplate(p.id, p.template, p.size);
   assert.ok(store.slots.every(s => s.size.width === 816));
+});
+
+test('registry: save writes a page file without strokes (a PDF beside it for a pdf template) and lists it', async () => {
+  const { vault, reg } = registryWith('templates/new');
+  const fill = await reg.save('Big sticky', { kind: 'fill', color: '#FFEE00' }, { width: 400, height: 300 });
+  assert.equal(fill, 'tpl:Big sticky');
+  const pg = readPage(vault.files.get('templates/new/Big sticky.svg') as string);
+  assert.deepEqual([pg.template, pg.size, pg.strokes.length], [{ kind: 'fill', color: '#ffee00' }, { width: 400, height: 300 }, 0]);
+  assert.deepEqual(reg.resolve(fill), { template: { kind: 'fill', color: '#ffee00' }, size: { width: 400, height: 300 } });
+  // Taken names get a number; unsafe characters are cleaned.
+  assert.equal(await reg.save('Big sticky', { kind: 'blank' }, { width: 100, height: 100 }), 'tpl:Big sticky 1');
+  assert.equal(await reg.save('a/b:c', { kind: 'blank' }, { width: 100, height: 100 }), 'tpl:a b c');
+  const pdf = await reg.save('Slide', { kind: 'pdf', source: 'lecture.pdf', page: 3, image: IMAGE }, { width: 612, height: 792 }, new Uint8Array([7, 7]).buffer);
+  const t = reg.resolve(pdf)!.template as PdfTemplate;
+  assert.deepEqual([t.source, t.page, t.image], ['Slide.pdf', 3, IMAGE]);
+  assert.deepEqual(new Uint8Array(vault.files.get('templates/new/Slide.pdf') as ArrayBuffer), new Uint8Array([7, 7]));
+  let refused = false;
+  await reg.save('No PDF', { kind: 'pdf', source: 'x.pdf', page: 1, image: '' }, { width: 1, height: 1 }).catch(() => { refused = true; });
+  assert.ok(refused && !vault.files.has('templates/new/No PDF.svg'), 'a pdf template without its PDF is refused');
+  const image: ImageTemplate = { kind: 'image', image: IMAGE };
+  const im = await reg.save('Photo', image, { width: 816, height: 612 });
+  assert.equal(reg.nameOf({ kind: 'image', image: IMAGE }), im, 'an image page made from it is named back');
+  assert.equal(reg.nameOf({ kind: 'image', image: IMAGE.replace('/9j', '/8j') }), null);
+});
+
+test('registry: rename and delete a template (and its own PDF); pages made from it are untouched', async () => {
+  const { vault, reg } = registryWith();
+  await reg.load();
+  // A note page made from Engineering keeps its copy.
+  const t = reg.resolve('tpl:Engineering')!.template;
+  await reg.ensureCopied(t, 'School/lecture');
+  const renamed = await reg.rename('pdf:Engineering', 'Eng/2');
+  assert.equal(renamed, 'tpl:Eng 2');
+  assert.ok(!vault.files.has('templates/ink/Engineering.svg') && !vault.files.has('templates/ink/Engineering.pdf'));
+  const pg = readPage(vault.files.get('templates/ink/Eng 2.svg') as string);
+  assert.equal((pg.template as PdfTemplate).source, 'Eng 2.pdf', 'the page refers to the renamed PDF');
+  assert.deepEqual(new Uint8Array(vault.files.get('templates/ink/Eng 2.pdf') as ArrayBuffer), new Uint8Array([1, 2, 3]));
+  assert.deepEqual(reg.entries.map(e => e.name), ['tpl:Eng 2', 'tpl:Lab', 'tpl:Lined']);
+  assert.ok(vault.files.has('School/lecture/Engineering.pdf'), 'the copy in the note stays');
+  // A rename onto a taken name is numbered; to its own name, nothing happens.
+  assert.equal(await reg.rename('tpl:Lined', 'Lab'), 'tpl:Lab 1');
+  assert.equal(await reg.rename('tpl:Lab 1', 'Lab 1'), 'tpl:Lab 1');
+  assert.equal(await reg.rename('tpl:Nope', 'x'), null);
+  assert.equal(await reg.delete('tpl:Eng 2'), true);
+  assert.ok(!vault.files.has('templates/ink/Eng 2.svg') && !vault.files.has('templates/ink/Eng 2.pdf'));
+  assert.equal(await reg.delete('tpl:Eng 2'), false);
+  assert.deepEqual(reg.entries.map(e => e.name), ['tpl:Lab', 'tpl:Lab 1']);
+  assert.ok(vault.files.has('School/lecture/Engineering.pdf'));
 });

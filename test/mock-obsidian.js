@@ -367,12 +367,16 @@
   }
   // Lists every item as a .suggestion-item (no filtering); clicking one closes the modal and
   // chooses it, as selecting a suggestion does in Obsidian.
+  // Each row is drawn by renderSuggestion ({ item, match }, el), whose default is the item's text,
+  // as Obsidian's is (without the match highlighting).
   class FuzzySuggestModal extends Modal {
     constructor(app) { super(app); this.placeholder = ''; }
     setPlaceholder(p) { this.placeholder = p; }
+    renderSuggestion(match, el) { el.setText(this.getItemText(match.item)); }
     onOpen() {
       for (const item of this.getItems()) {
-        const el = this.contentEl.createDiv({ cls: 'suggestion-item', text: this.getItemText(item) });
+        const el = this.contentEl.createDiv({ cls: 'suggestion-item' });
+        this.renderSuggestion({ item, match: { score: 0, matches: [] } }, el);
         el.addEventListener('click', evt => { this.close(); this.onChooseItem(item, evt); });
       }
     }
@@ -382,7 +386,16 @@
   class Setting {
     constructor(el) { this.settingEl = el.createDiv({ cls: 'setting-item' }); }
     setName(n) { this.settingEl.dataset.name = n; this.settingEl.createDiv({ cls: 'setting-item-name', text: n }); return this; }
-    setDesc(d) { this.settingEl.createDiv({ cls: 'setting-item-description', text: d }); return this; }
+    setDesc(d) { this.descEl.setText(d); return this; }
+    get descEl() { return this.settingEl.querySelector('.setting-item-description') || this.settingEl.createDiv({ cls: 'setting-item-description' }); }
+    setHeading() { this.settingEl.classList.add('setting-item-heading'); return this; }
+    setClass(c) { this.settingEl.classList.add(c); return this; }
+    addToggle(cb) {
+      const input = this.settingEl.createEl('input', { type: 'checkbox', cls: 'checkbox-container' });
+      const t = { toggleEl: input, setValue(v) { input.checked = !!v; return t; }, getValue() { return input.checked; }, onChange(f) { input.addEventListener('change', () => f(input.checked)); return t; } };
+      cb(t);
+      return this;
+    }
     addDropdown(cb) {
       const sel = this.settingEl.createEl('select');
       const d = { selectEl: sel, addOption(v, t) { const o = sel.createEl('option', { text: t }); o.value = v; return d; }, setValue(v) { sel.value = v; return d; }, getValue() { return sel.value; }, onChange(f) { sel.addEventListener('change', () => f(sel.value)); return d; } };

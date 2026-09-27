@@ -81,7 +81,7 @@ HELPERS = """() => {
     /** Picks the template with this label in the open chooser (the newest modal). */
     async choose(label) {
       const m = modals[modals.length - 1];
-      [...m.contentEl.querySelectorAll('.suggestion-item')].find(e => e.textContent === label).click();
+      [...m.contentEl.querySelectorAll('.suggestion-item')].find(e => (e.querySelector('.nb-tpl-label') || e).textContent === label).click();
       await sleep(150);  // the template image loads, then the page is redrawn
     },
     /** The template name of each page of the open note. */
@@ -488,7 +488,7 @@ try:
           const strokes = view.store.page(view.store.slots[0]).strokes.length;
           const shown = commands['change-page-template'].checkCallback(true);
           commands['change-page-template'].checkCallback(false);
-          const labels = [...modals[0].contentEl.querySelectorAll('.suggestion-item')].map(e => e.textContent);
+          const labels = [...modals[0].contentEl.querySelectorAll('.suggestion-item')].map(e => (e.querySelector('.nb-tpl-label') || e).textContent);
           await T.choose('Grid, 5 mm');
           const after = {{ strokes: view.store.page(view.store.slots[0]).strokes.length, tpl: T.templates()[0], grid: T.near(0, [0xc9, 0xc9, 0xc9], 6), pink: T.near(0, [0xe8, 0xa0, 0xa0], 12) }};
           await view.save();
@@ -2742,8 +2742,8 @@ try:
         print('toolbar:', {k: r[k] for k in ('groups', 'buttons', 'lasso', 'ruler', 'header')})
         check('toolbar: tools, presets and page actions in three groups; the provisional strip is gone',
               r['groups'] == ['nb-ink-tools', 'nb-ink-presets', 'nb-ink-page-actions'] and not r['strip'], r)
-        check('toolbar: 15 buttons, each a 40 px target; all but the five presets have an icon',
-              r['buttons'] == 15 and r['icons'] == 10 and all(w >= 40 and h >= 40 for w, h in r['size']), r)
+        check('toolbar: 16 buttons (Import, #54, among them), each a 40 px target; all but the five presets have an icon',
+              r['buttons'] == 16 and r['icons'] == 11 and all(w >= 40 and h >= 40 for w, h in r['size']), r)
         check('toolbar: the lasso is a tool (#11); the ruler is a toggle (#20)', r['lasso'] == [False, 'Lasso'] and r['ruler'] == [False, 'Ruler'], r)
         check('toolbar: every tool is one tap from every other', r['taps'] == [True] * 6, r['taps'])
         check('toolbar: "Open as markdown" stays the header action', r['header'] == ['Open as markdown'], r['header'])
@@ -3526,7 +3526,7 @@ try:
         r = ev("""async () => {
           await T.newNote('Mixed', 'blank', 'letter');
           view.chooseTemplate('add');
-          const labels = [...modals[modals.length - 1].contentEl.querySelectorAll('.suggestion-item')].map(e => e.textContent);
+          const labels = [...modals[modals.length - 1].contentEl.querySelectorAll('.suggestion-item')].map(e => (e.querySelector('.nb-tpl-label') || e).textContent);
           await T.choose('Sticky note 3 × 3 in');
           await T.pen(1, T.loops(40, 150, 200));
           await view.save();
@@ -3615,13 +3615,13 @@ try:
               r['name'] == 'engineering' and r['same'] and r['strokes'] == 0, r)
         check('pdf template: an ink page with the PDF page (source, page 2, JPEG) at its size',
               r['tpl'] == ['pdf', 'engineering.pdf', 2] and r['jpeg'] and r['size'] == {'width': 793.7, 'height': 1122.5}, r)
-        check('pdf template: the registry lists it as pdf:engineering, with a notice', r['entries'] == ['pdf:engineering'] and any('engineering' in n for n in r['notices']), r)
+        check('pdf template: the registry lists it as tpl:engineering, with a notice', r['entries'] == ['tpl:engineering'] and any('engineering' in n for n in r['notices']), r)
         check('pdf template: its page file renders the PDF page as an image at its size', r['img']['n'] > 2000 and r['img']['w'] == 794, r['img'])
 
         # A note started with it: every page gets the PDF page at its size, the PDF copied into the
         # page folder, and a sharp render at 200%.
         r = ev("""async () => {
-          const { options } = await T.newNote('Engineering log', 'pdf:engineering');
+          const { options } = await T.newNote('Engineering log', 'tpl:engineering');
           const path = view.file.path, dir = T.dirOf(path), note = ink.readNote(fs.get(path), 'Engineering log');
           view.addPage();
           view.insertPageAfter(0);
@@ -3644,9 +3644,9 @@ try:
             md: fs.get(path).slice(0, 80) };
         }""")
         print('pdf template note:', r)
-        check('pdf template note: the dialog offers pdf:engineering after the built-ins', r['options'][-1] == 'pdf:engineering', r['options'])
-        check('pdf template note: the note\'s template is pdf:engineering and its paper the PDF page\'s size',
-              r['tpl'] == 'pdf:engineering' and r['paper'] == '793.7x1122.5', r)
+        check('pdf template note: the dialog offers tpl:engineering after the built-ins', r['options'][-1] == 'tpl:engineering', r['options'])
+        check('pdf template note: the note\'s template is tpl:engineering and its paper the PDF page\'s size',
+              r['tpl'] == 'tpl:engineering' and r['paper'] == '793.7x1122.5', r)
         check('pdf template note: every page (first, added, inserted) has the PDF page as its background',
               len(r['pages']) == 3 and all(pg == [{'width': 793.7, 'height': 1122.5}, 'pdf', 'engineering.pdf', 2, True, 'pdf'] for pg in r['pages']), r['pages'])
         check('pdf template note: the PDF is copied into the page folder', r['copied'], r)
@@ -3684,7 +3684,7 @@ try:
           await app.workspace.getLeaf(false).setViewState({ type: 'notebook-ink', state: { file: '""" + sticky_file + """' }, active: true });
           await T.waitFor(() => view.store && view.file.path === '""" + sticky_file + """' && T.pages().length);
           commands['change-page-template'].checkCallback(false);
-          const labels = [...modals[modals.length - 1].contentEl.querySelectorAll('.suggestion-item')].map(e => e.textContent);
+          const labels = [...modals[modals.length - 1].contentEl.querySelectorAll('.suggestion-item')].map(e => (e.querySelector('.nb-tpl-label') || e).textContent);
           await T.choose('engineering (PDF)');
           await T.sleep(200);
           await view.save();

@@ -1,15 +1,16 @@
 // "New ink note": asks for a name, paper size and template, and creates `<folder>/<name>.md`
 // with one empty page in `<folder>/<name>/`. A sized template (#27: sticky note, index card) or
-// a PDF template (#21) sets the note's paper to its size, so pages added later have it too;
-// "Custom size…" in the paper list asks for a size in inches or mm.
+// a custom template (#21, #54: its page's size) sets the note's paper to its size, so pages added
+// later have it too; "Custom size…" in the paper list asks for a size in inches or mm. Favourite
+// templates (#54) come first in the list.
 import { Modal, normalizePath, Setting, TFolder, type App } from 'obsidian';
 import { newPageId } from '../format/ids';
 import { newNote, pagePath, PAPERS, writeNote } from '../format/note';
 import { newPage, paperSize, sizePaper, writePage, type NotePaper, type Paper } from '../format/page';
-import { BUILT_IN_TEMPLATES, isTemplateName, parseTemplateName, templateSize, type Template } from '../format/template';
+import { isTemplateName, parseTemplateName, templateSize, type Template } from '../format/template';
 import { cleanName, DEFAULT_NAME, uniqueName } from './names';
-import { SizeModal } from './template-chooser';
-import { PDF_PREFIX, templateRegistry } from './templates';
+import { SizeModal, templateItems } from './template-chooser';
+import { canonicalName, isCustomName, templateRegistry } from './templates';
 
 /** The folder for a new note: the active file's, else the vault root ('' ). */
 export function targetFolder(app: App): string {
@@ -19,13 +20,14 @@ export function targetFolder(app: App): string {
 
 /**
  * Creates the note and its first page; returns the note's path. `template` is a template name
- * (see BUILT_IN_TEMPLATES, or `pdf:<name>` for a PDF template, #21): the note's default for new
- * pages and its first page's template. A sized template's size replaces `paper` (#27). Throws on
- * an unknown name.
+ * (see BUILT_IN_TEMPLATES, or `tpl:<name>` for a custom template, #54, also read as the older
+ * `pdf:<name>`, #21): the note's default for new pages and its first page's template. A sized or
+ * custom template's size replaces `paper` (#27). Throws on an unknown name.
  */
 export async function createInkNote(app: App, folder: string, name: string, paper: NotePaper, template = 'blank'): Promise<string> {
   let first: Template;
-  if (template.startsWith(PDF_PREFIX)) {
+  template = canonicalName(template);
+  if (isCustomName(template)) {
     const registry = templateRegistry();
     await registry?.load();
     const r = registry?.resolve(template);
@@ -83,12 +85,13 @@ export class NewNoteModal extends Modal {
     const input = this.contentEl.createEl('input', { type: 'text', cls: 'nb-ink-name' });
     input.value = DEFAULT_NAME;
     let paper = this.defaults.paper;
-    const pdfs = templateRegistry()?.entries ?? [];
-    const known = (name: string) => isTemplateName(name) || pdfs.some(e => e.name === name);
-    let template = known(this.defaults.template) ? this.defaults.template : 'blank';
+    const registry = templateRegistry();
+    const entries = registry?.entries ?? [];
+    const known = (name: string) => isTemplateName(name) || entries.some(e => e.name === name);
+    let template = known(canonicalName(this.defaults.template)) ? canonicalName(this.defaults.template) : 'blank';
     new Setting(this.contentEl)
       .setName('Paper')
-      .setDesc('A sticky note, index card or PDF template brings its own size.')
+      .setDesc('A sticky note, index card or custom template brings its own size.')
       .addDropdown(d => {
         for (const p of PAPERS) d.addOption(p, PAPER_LABELS[p]);
         if (paper !== 'letter' && paper !== 'a4') d.addOption(paper, paperLabel(paper));
@@ -109,8 +112,8 @@ export class NewNoteModal extends Modal {
     new Setting(this.contentEl)
       .setName('Template')
       .addDropdown(d => {
-        for (const t of BUILT_IN_TEMPLATES) d.addOption(t.name, t.label);
-        for (const e of pdfs) d.addOption(e.name, `${e.label} (PDF)`);
+        const favourites = registry?.prefs?.favourites() ?? [];
+        for (const t of templateItems(entries, false, favourites)) d.addOption(t.name, favourites.includes(t.name) ? `★ ${t.label}` : t.label);
         d.setValue(template).onChange(v => { if (known(v)) template = v; });
       });
     const buttons = this.contentEl.createDiv({ cls: 'modal-button-container' });

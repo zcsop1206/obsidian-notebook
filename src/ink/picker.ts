@@ -1,7 +1,9 @@
 // The toolbar's popover (#10): the picker of the tool in use (pen: nib, colours, custom colour,
 // size in 0.5 px steps, a live preview and "Save as favourite"; highlighter: the same without
-// the nib; eraser: sizes and mode; lasso, #11: a hint and Paste) and the page settings menu
-// (with, #12, inserting and pasting images). A plain positioned div inside the
+// the nib; eraser: sizes and mode; lasso, #11: a hint and Paste), the page settings menu
+// (with, #12, inserting and pasting images; #54, saving the page's background as a template and
+// adding a page from a favourite template) and the Import menu (#54: PDFs and images, once or as
+// templates). A plain positioned div inside the
 // ink view, not a Modal, so the page stays visible; closed by a tap elsewhere (starting to
 // write included), Escape, or tapping its button again. Choosing an option leaves it open so
 // that colour, nib and size can all be set in one visit.
@@ -13,7 +15,20 @@ import {
 } from './pen';
 import { HIGHLIGHT_ALPHA, type Theme } from './renderer';
 
-export type PickerKind = ToolKind | 'page';
+export type PickerKind = ToolKind | 'page' | 'import';
+
+/** The Import menu's entries (#54). */
+export type ImportKind = 'pdf-pages' | 'pdf-template' | 'image-page' | 'image-template' | 'image-here' | 'paste-image';
+
+/** The Import menu (#54): each entry (also its class, `nb-ink-import-<entry>`) and its text. */
+export const IMPORT_ITEMS: readonly [ImportKind, string][] = [
+  ['pdf-pages', 'PDF as pages in this note…'],
+  ['pdf-template', 'PDF page as a template…'],
+  ['image-page', 'Image as a page…'],
+  ['image-template', 'Image as a template…'],
+  ['image-here', 'Image onto this page…'],
+  ['paste-image', 'Paste image'],
+];
 
 export interface PickerHost {
   pen(): Readonly<PenSettings>;
@@ -35,6 +50,13 @@ export interface PickerHost {
   pasteImage?(): void;
   /** Export the note as a PDF (#18). */
   exportPdf?(): void;
+  /** The Import menu's entries (#54). */
+  importAction?(kind: ImportKind): void;
+  /** Saves the current page's background as a template (#54). */
+  saveTemplate?(): void;
+  /** Favourite templates for "Add page" entries in the page menu (#54), and adding one. */
+  favouriteTemplates?(): { name: string; label: string }[];
+  addTemplatePage?(name: string): void;
   /** The ruler (#20), shown in the pen and highlighter pickers while it's on: angle and unit. */
   rulerOn?(): boolean;
   rulerAngle?(): number | null;
@@ -89,10 +111,11 @@ export class Picker {
     this.anchor = anchor;
     this.el.empty();
     this.el.dataset.kind = kind;
-    this.el.setAttribute('aria-label', kind === 'page' ? 'Page settings' : `${kind[0].toUpperCase()}${kind.slice(1)} settings`);
+    this.el.setAttribute('aria-label', kind === 'page' ? 'Page settings' : kind === 'import' ? 'Import' : `${kind[0].toUpperCase()}${kind.slice(1)} settings`);
     if (kind === 'pen' || kind === 'highlighter') this.buildInk(kind);
     else if (kind === 'eraser') this.buildEraser();
     else if (kind === 'lasso') this.buildLasso();
+    else if (kind === 'import') this.buildImport();
     else this.buildPage();
     this.el.show();
     anchor.setAttribute('aria-expanded', 'true');
@@ -123,7 +146,7 @@ export class Picker {
   /** Marks the chosen options and redraws the preview. */
   render() {
     const kind = this.openFor;
-    if (!kind || kind === 'page' || kind === 'lasso') return;
+    if (!kind || kind === 'page' || kind === 'lasso' || kind === 'import') return;
     const h = this.host, pen = h.pen(), hl = h.highlighter(), er = h.eraser();
     const mark = (sel: string, on: (el: HTMLElement) => boolean) => this.el.querySelectorAll<HTMLElement>(sel).forEach(el => {
       const active = on(el);
@@ -251,6 +274,7 @@ export class Picker {
     item('nb-ink-menu-page-template', 'Template of this page…', () => h.chooseTemplate('page'));
     item('nb-ink-menu-all-templates', 'Template of all pages…', () => h.chooseTemplate('all'));
     item('nb-ink-menu-add-with', 'Add page with template…', () => h.chooseTemplate('add'));
+    this.buildTemplateEntries();
     if (h.insertImage) {
       item('nb-ink-menu-insert-image', 'Insert image…', () => h.insertImage!(false));
       item('nb-ink-menu-insert-image-page', 'Insert image as page…', () => h.insertImage!(true));
@@ -259,6 +283,31 @@ export class Picker {
     if (h.exportPdf) item('nb-ink-menu-export-pdf', 'Export as PDF…', () => h.exportPdf!());
     const paper = h.paperLabel();
     this.el.createDiv({ cls: 'nb-ink-control nb-ink-paper', text: `Paper size: ${paper ?? 'unknown'}` });
+  }
+
+  /** The page menu's template entries (#54): a page from each favourite template, and saving this page's background. */
+  private buildTemplateEntries() {
+    const h = this.host;
+    const item = (cls: string, text: string, label: string, fn: () => void) => this.option(this.el, `nb-ink-menu-item ${cls}`, text, label, () => {
+      this.close();
+      fn();
+    });
+    for (const f of h.favouriteTemplates?.() ?? []) {
+      item('nb-ink-menu-add-favourite', `Add page: ★ ${f.label}`, `Add a page with the favourite template ${f.label}`, () => h.addTemplatePage?.(f.name))
+        .dataset.template = f.name;
+    }
+    if (h.saveTemplate) item('nb-ink-menu-save-template', "Save this page's background as a template…", "Save this page's background as a template", () => h.saveTemplate!());
+  }
+
+  /** The Import menu (#54): each entry asks for its source (vault or device) next. */
+  private buildImport() {
+    const h = this.host;
+    for (const [kind, text] of IMPORT_ITEMS) {
+      this.option(this.el, `nb-ink-menu-item nb-ink-import-${kind}`, text, text, () => {
+        this.close();
+        h.importAction?.(kind);
+      }).dataset.import = kind;
+    }
   }
 
   /** Saves into the first free slot, or asks which to replace when all are taken. */
