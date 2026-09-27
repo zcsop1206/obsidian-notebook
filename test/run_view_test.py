@@ -2227,14 +2227,16 @@ try:
               view.input.cancel();
               const s = view.store.slots[0].page.strokes;
               const st = s[s.length - 1];
-              return {{ added: s.length - n, drawing, points: st && st.points.length, maxX: st && Math.max(...st.points.map(q => q.x)),
+              await view.save();
+              const saved = ink.readPage(fs.get(view.store.slots[0].path)).strokes.slice(-1)[0];
+              return {{ diskMaxX: saved && Math.max(...saved.points.map(q => q.x)), added: s.length - n, drawing, points: st && st.points.length, maxX: st && Math.max(...st.points.map(q => q.x)),
                 ends: st && [st.points[0].x, st.points[0].y, st.points[st.points.length - 1].x, st.points[st.points.length - 1].y],
                 xs: st && st.points.slice(45, 56).map(q => q.x), ink: T.darkIn ? T.darkIn(0, 690, 140, 816, 165) : T.ink(0) }};
             }}""")
             check(f'edges ({off}): a pen stroke off the right edge and back is one stroke, ended by pointerup',
                   r['added'] == 1 and not r['drawing'] and r['points'] == 101, r)
             check(f'edges ({off}): off-page points are stored as they are (x up to 900), start and end on the page',
-                  r['maxX'] == 900 and r['ends'] == [700, 150, 700, 154], r)
+                  r['maxX'] == 900 and r['diskMaxX'] == 900 and r['ends'] == [700, 150, 700, 154], r)
         r = ev("() => ({ ink: T.ink(0), live: T.liveInk() })")
         check('edges: the strokes are drawn on the page (clipped), the overlays cleared', r['ink'] > 500 and r['live'] == 0, r)
 

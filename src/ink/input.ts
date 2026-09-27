@@ -2,8 +2,24 @@
 // input measurements.
 //
 // Who draws: pen and mouse (button 0) pointers that go down on a page. Touches never draw
-// (palm rejection); pen hover is ignored. The pointer is captured, so a stroke continues when
-// it runs off the page's edge.
+// (palm rejection); pen hover is ignored.
+//
+// A gesture belongs to the page it started on (#35): the page is looked up once, at
+// pointerdown, and the gesture samples until its pointer goes up or is cancelled, wherever the
+// pointer is, on the page, in the gap between pages, over the scroller's margin or outside
+// the view. Points off the page are kept as they are (not clamped; see format/page.ts); the
+// overlays and the page bitmap are page-sized, so drawing is clipped to the page. Only
+// pointerdown is listened for on the pages layer. While a gesture is live, pointermove,
+// pointerup and pointercancel are listened for on the pages layer's window, in the capture
+// phase, for the gesture's pointerId, and those listeners are removed when it ends. The pointer
+// is also captured, but that alone isn't relied on: once the pointer left the pages layer (16
+// px beyond the pages at 100%) a stroke lost its moves and its pointerup whenever capture
+// wasn't in effect (WebKit and the Pencil, or a capture call that throws), and the Pencil had
+// to be lifted to write again. A window listener sees every event of the pointer whatever its
+// target, and stylus touchmoves anywhere in the window are prevented meanwhile, so nothing
+// outside the view scrolls under the Pencil or cancels its pointer. Fingers are unaffected: the
+// listeners ignore other pointerIds and finger touches. A gesture that starts off the pages
+// (in the gap) does nothing.
 //
 // Sampling: every coalesced sample of each pointermove (about 4 per event on the iPad), in
 // page px, rounded as the file stores them, so the live stroke and the saved one are computed
@@ -410,9 +426,31 @@ export class PenInput {
     [this.head, this.headCtx] = overlay('nb-ink-live-head');
     [this.tail, this.tailCtx] = overlay('nb-ink-live-tail');
     listen('pointerdown', e => this.down(e));
-    listen('pointermove', e => this.move(e));
-    listen('pointerup', e => this.up(e));
-    listen('pointercancel', e => this.up(e));
+  }
+
+  /** The window listeners of the gesture in progress, or null. */
+  private tracking: { win: Window; move: (e: PointerEvent) => void; up: (e: PointerEvent) => void; touch: (e: TouchEvent) => void } | null = null;
+
+  /** Follows the gesture's pointer everywhere until it ends (see the header, #35). */
+  private track(el: HTMLElement) {
+    this.untrack();
+    const win = el.ownerDocument.defaultView ?? window;
+    const t = this.tracking = { win, move: (e: PointerEvent) => this.move(e), up: (e: PointerEvent) => this.up(e), touch: (e: TouchEvent) => void blockStylusTouch(e) };
+    win.addEventListener('pointermove', t.move, true);
+    // The view blocks stylus touchmoves inside it; outside it too while the gesture lasts.
+    win.addEventListener('touchmove', t.touch, { capture: true, passive: false });
+    win.addEventListener('pointerup', t.up, true);
+    win.addEventListener('pointercancel', t.up, true);
+  }
+
+  private untrack() {
+    const t = this.tracking;
+    if (!t) return;
+    this.tracking = null;
+    t.win.removeEventListener('pointermove', t.move, true);
+    t.win.removeEventListener('pointerup', t.up, true);
+    t.win.removeEventListener('pointercancel', t.up, true);
+    t.win.removeEventListener('touchmove', t.touch, true);
   }
 
   get drawing(): boolean {
@@ -435,6 +473,7 @@ export class PenInput {
     } catch (err) {
       // synthetic events have no active pointer to capture
     }
+    this.track(target.el);
     const rect = target.el.getBoundingClientRect();
     this.place(target, rect);
     if (this.host.pen().tool === 'eraser') {
@@ -483,6 +522,7 @@ export class PenInput {
     const live = this.live;
     if (!live || e.pointerId !== live.pointerId) return;
     this.live = null;
+    this.untrack();
     cancelAnimationFrame(this.frame);
     this.frame = 0;
     const cancelled = e.type === 'pointercancel';
@@ -652,6 +692,7 @@ export class PenInput {
 
   /** Abandons a stroke in progress (the page it was on went away). */
   cancel() {
+    this.untrack();
     this.live = null;
     this.erasing = null;
     cancelAnimationFrame(this.frame);
@@ -685,6 +726,7 @@ export class PenInput {
     const er = this.erasing!;
     if (e.pointerId !== er.pointerId) return;
     this.erasing = null;
+    this.untrack();
     cancelAnimationFrame(this.frame);
     this.frame = 0;
     this.eraseStep(er); // samples since the last frame
