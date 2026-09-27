@@ -8,7 +8,8 @@
 # eraser, and zoom and finger navigation (#9: pans with momentum, pinches, zoom commands and
 # Ctrl+wheel, strokes at 50-400%, the pen during finger gestures, touch rules, frame times on
 # the 20-page note, bitmap memory at 400%), renaming or moving notes and page folders (#26), and PDF import (#14:
-# pages, the copied PDF, the embedded JPEG, sharp renders at 200%, writing on PDF pages). Run by `npm test`; screenshots land in test/out/.
+# pages, the copied PDF, the embedded JPEG, sharp renders at 200%, writing on PDF pages), and images on pages (#12).
+# Run by `npm test`; screenshots land in test/out/.
 # Exits non-zero if any check fails.
 import os, subprocess, sys, time
 from playwright.sync_api import sync_playwright
@@ -2822,7 +2823,7 @@ try:
         check('picker: switching tool closes the other tool\'s picker; the eraser\'s has sizes and mode',
               r['hlClosed'] is None and r['er'] == {'size': 14, 'mode': 'stroke', 'open': 'eraser'}, r)
         check('picker: page settings lists the template choices and the paper size', r['menu']['kind'] == 'page'
-              and r['menu']['items'] == ['Template of this page…', 'Template of all pages…', 'Add page with template…']
+              and r['menu']['items'][:3] == ['Template of this page…', 'Template of all pages…', 'Add page with template…']
               and r['menu']['paper'] == 'Paper size: Letter, 8.5 × 11 in', r['menu'])
 
         # Add page from the toolbar, and page settings' template change.
@@ -3435,7 +3436,7 @@ try:
         ev("() => { view.clearSelection(); view.setTool('pen'); }")
         # ======== end of 22. The lasso (#11) ========
 
-        # ======== 23. Sized templates and page embeds (#27), PDF templates (#21) ========
+        # ======== 23. Sized templates and page embeds (#27), PDF templates (#21) =
         # Section 21 loaded and unloaded other plugin instances, whose commands and view factory the
         # mock kept; reload the plugin so this section drives one instance (and its registry).
         ev("""async () => { p.unload(); window.p = await loadPlugin(); }""")
@@ -3880,6 +3881,355 @@ try:
         check('virtual page: a sized default template (sticky note) gives it that size, and the page it becomes too',
               r['w'] == r['lw'] and r['h'] == r['lh'] and r['size'] == {'width': 288, 'height': 288} and r['tpl'] == 'sticky-3in', r)
         # ======== end of 24. The virtual page (#28) ========
+
+        # ======== 25. Images on pages (#12) ========
+        # Insert a synthetic photo (a file, as the picker gives it) onto a note's page, paste one,
+        # write on it, select it with a lasso tap, move and resize it with its ink, delete it
+        # (keeping or deleting the ink, and cancelling), undo and redo each step, insert one as a
+        # whole page, time a 12-megapixel photo, and read everything back after reopening.
+        r = ev("""async () => {
+          await p.createInkNote('Photos', '', 'letter', 'blank');
+          await T.sleep(150);
+          T.P = i => view.store.slots[i].page;
+          T.path = i => view.store.slots[i].path;
+          /** A synthetic photo: quadrants red, green, blue, yellow; as a File of `type`. */
+          T.photo = async (w, h, type = 'image/jpeg', alpha = false) => {
+            const c = document.createElement('canvas'); c.width = w; c.height = h;
+            const g = c.getContext('2d');
+            if (!alpha) { g.fillStyle = '#d02020'; g.fillRect(0, 0, w / 2, h / 2); g.fillStyle = '#20a040'; g.fillRect(w / 2, 0, w / 2, h / 2);
+              g.fillStyle = '#2040d0'; g.fillRect(0, h / 2, w / 2, h / 2); g.fillStyle = '#e0c020'; g.fillRect(w / 2, h / 2, w / 2, h / 2); }
+            else { g.fillStyle = 'rgba(200, 0, 0, 0.5)'; g.fillRect(0, 0, w / 2, h); }
+            const blob = await new Promise(res => c.toBlob(res, type, 0.92));
+            return new File([blob], 'photo', { type });
+          };
+          T.disk = async i => { await view.save(); return fs.get(T.path(i)); };
+          view.setTool('pen');
+          const file = await T.photo(1600, 1200);
+          const ok = await view.insertImageFile(file);
+          await T.sleep(150);  // the image decodes, the page is redrawn
+          const pg = T.P(0), im = pg.images && pg.images[0];
+          const svg = await T.disk(0);
+          const meta = /<metadata><!\\[CDATA\\[([\\s\\S]*?)\\]\\]>/.exec(svg)[1];
+          const cx = im.x + im.width / 2, cy = im.y + im.height / 2;
+          return { ok, n: pg.images.length, id: im.id, box: [im.x, im.y, im.width, im.height], jpeg: im.data.startsWith('data:image/jpeg;base64,'),
+            stats: view.imageStats, sel: view.selection, tool: view.pen.tool, menu: view.selectionMenuOpen,
+            once: svg.split(im.data).length - 1, metaBytes: meta.includes('data:'), metaImage: JSON.parse(meta).images,
+            red: T.pixel(0, im.x + im.width / 4, im.y + im.height / 4), yellow: T.pixel(0, cx + im.width / 4, cy + im.height / 4),
+            paper: T.pixel(0, 50, 50), cmd: [commands['insert-image'].checkCallback(true), commands['insert-image-page'].checkCallback(true)] };
+        }""")
+        page.locator('#leaf').screenshot(path=os.path.join(OUT, 'images_inserted.png'))
+        near = lambda a, b, tol=40: all(abs(x - y) <= tol for x, y in zip(a, b))
+        print(f"image insert (1600 x 1200): {r['stats']}")
+        check('images: an inserted photo lands on the page at its own resolution, fitted to half the page width, centred in view',
+              r['ok'] and r['n'] == 1 and r['jpeg'] and r['stats']['width'] == 1600 and r['stats']['height'] == 1200 and r['box'][2] == 408 and r['box'][3] == 306
+              and abs(r['box'][0] - 204) < 1, r)
+        check('images: the inserted image is selected with the lasso, its menu open', r['sel'] and r['sel']['images'] == [r['id']] and r['sel']['ids'] == [] and r['tool'] == 'lasso' and r['menu'], r['sel'])
+        check('images: the bytes are saved once, in the SVG, not in the metadata (which holds the box)',
+              r['once'] == 1 and not r['metaBytes'] and r['metaImage'] == [{'id': r['id'], 'x': r['box'][0], 'y': r['box'][1], 'width': 408, 'height': 306}], r)
+        check('images: the photo is drawn on the page bitmap', near(r['red'], (0xd0, 0x20, 0x20)) and near(r['yellow'], (0xe0, 0xc0, 0x20)) and near(r['paper'], (255, 255, 255), 4), r)
+        check('images: "Insert image" and "Insert image as a whole page" commands are available', r['cmd'] == [True, True], r['cmd'])
+
+        # Big, transparent and broken files; undo and redo of an insert.
+        r = ev("""async () => {
+          const big = await T.photo(6000, 1500);
+          await view.insertImageFile(big);
+          const bigStats = view.imageStats, bigBox = T.P(0).images[1];
+          view.undo();
+          const afterUndo = T.P(0).images.length;
+          view.redo();
+          const afterRedo = T.P(0).images.length;
+          view.undo();
+          await view.insertImageFile(await T.photo(300, 200, 'image/png', true));
+          const png = T.P(0).images[1].data.startsWith('data:image/png;base64,');
+          view.undo();
+          const n0 = notices.length;
+          const bad = await view.insertImageFile(new File(['not an image'], 'x.jpg', { type: 'image/jpeg' }));
+          return { bigStats, bigBox: [bigBox.width, bigBox.height], afterUndo, afterRedo, png, bad, notice: notices.slice(n0), n: T.P(0).images.length };
+        }""")
+        check('images: a 6000 px photo is stored at 4096 px on its long edge', r['bigStats']['width'] == 4096 and r['bigStats']['height'] == 1024 and r['bigBox'] == [408, 102], r)
+        check('images: an insert is one undo step (undo removes it, redo puts it back)', r['afterUndo'] == 1 and r['afterRedo'] == 2, r)
+        check('images: a transparent image is stored as PNG', r['png'], r)
+        check("images: a file that isn't an image inserts nothing, with a notice", r['bad'] is False and r['n'] == 1 and any("Couldn't insert the image" in n for n in r['notice']), r)
+
+        # Paste: an image file on the clipboard, pasted into the view.
+        r = ev("""async () => {
+          const dt = new DataTransfer();
+          dt.items.add(await T.photo(400, 400));
+          const e = new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true });
+          view.contentEl.querySelector('.nb-ink-page').dispatchEvent(e);
+          for (let i = 0; i < 50 && T.P(0).images.length < 2; i++) await T.sleep(20);
+          const out = { n: T.P(0).images.length, prevented: e.defaultPrevented, sel: view.selection.images, box: [T.P(0).images[1].width, T.P(0).images[1].height] };
+          const txt = new DataTransfer();
+          txt.setData('text/plain', 'hello');
+          view.contentEl.querySelector('.nb-ink-page').dispatchEvent(new ClipboardEvent('paste', { clipboardData: txt, bubbles: true, cancelable: true }));
+          await T.sleep(100);
+          out.afterText = T.P(0).images.length;
+          view.undo();
+          out.afterUndo = T.P(0).images.length;
+          return out;
+        }""")
+        check('images: pasting an image inserts it, selected; pasting text inserts nothing', r['n'] == 2 and r['prevented'] and len(r['sel']) == 1 and r['box'] == [408, 408] and r['afterText'] == 2 and r['afterUndo'] == 1, r)
+
+        # Write on the photo: a stroke starting on it belongs to it; one starting beside it doesn't.
+        r = ev("""async () => {
+          view.clearSelection();
+          view.setTool('pen');
+          const im = T.P(0).images[0];
+          T.im = () => T.P(0).images[0];
+          await T.pen(0, Array.from({ length: 30 }, (_, j) => [im.x + 40 + j * 6, im.y + 150 + 10 * Math.sin(j / 3), 0.4]), { predict: 0 });
+          await T.pen(0, Array.from({ length: 30 }, (_, j) => [im.x + 60 + j * 4, im.y + 60, 0.4]), { predict: 0, id: 12 });
+          await T.pen(0, Array.from({ length: 30 }, (_, j) => [100 + j * 4, 900, 0.4]), { predict: 0, id: 13 });
+          const s = T.P(0).strokes;
+          T.onIds = s.filter(q => q.on === im.id).map(q => q.id);
+          const disk = ink.readPage(await T.disk(0));
+          return { on: s.map(q => q.on || null), id: im.id, diskOn: disk.strokes.map(q => q.on || null), ink: T.pixel(0, im.x + 40 + 60, im.y + 150 + 10 * Math.sin(10 / 3)) };
+        }""")
+        page.locator('#leaf').screenshot(path=os.path.join(OUT, 'images_annotated.png'))
+        check('images: ink written on the photo belongs to it (on), ink beside it not; saved so',
+              r['on'] == [r['id'], r['id'], None] and r['diskOn'] == r['on'], r)
+        check('images: the ink is drawn over the photo', r['ink'][0] < 80 and r['ink'][1] < 80 and r['ink'][2] < 80, r['ink'])
+
+        # A lasso tap on the photo selects it (no loop); a tap off it selects nothing.
+        r = ev("""async () => {
+          view.setTool('lasso');
+          const im = T.im();
+          await T.pen(0, [[im.x + 20, im.y + im.height - 20, 0.3]], { id: 41, predict: 0 });
+          await T.sleep(20);
+          const sel = view.selection;
+          await T.pen(0, [[700, 1000, 0.3]], { id: 42, predict: 0 });
+          const off = view.selection;
+          await T.pen(0, [[im.x + 20, im.y + im.height - 20, 0.3], [im.x + 21, im.y + im.height - 19, 0.3]], { id: 43, predict: 0 });
+          return { sel, off, again: view.selection && view.selection.images, id: im.id, box: T.imBox = [im.x, im.y, im.x + im.width, im.y + im.height] };
+        }""")
+        page.locator('#leaf').screenshot(path=os.path.join(OUT, 'images_selected.png'))
+        check('images: a lasso tap on the photo selects it (and its ink goes in the box); a tap elsewhere deselects',
+              r['sel'] and r['sel']['images'] == [r['id']] and r['sel']['ids'] == [] and r['off'] is None and r['again'] == [r['id']], r)
+
+        # A lasso loop around the photo's centre selects it with the strokes inside.
+        r = ev("""async () => {
+          view.clearSelection();
+          const [x0, y0, x1, y1] = T.imBox;
+          await T.pen(0, T.loop([x0 - 10, y0 - 10, x1 + 10, y1 + 10]), { id: 44, predict: 0 });
+          const loop = view.selection;
+          view.clearSelection();
+          await T.pen(0, T.loop([x0 + 5, y0 + 5, x0 + 40, y0 + 40]), { id: 45, predict: 0 });  // not around its centre
+          return { loop, small: view.selection };
+        }""")
+        check('images: a lasso loop around the photo selects it and the ink inside; a loop not around its centre does not',
+              r['loop'] and len(r['loop']['images']) == 1 and len(r['loop']['ids']) == 2 and (r['small'] is None or r['small']['images'] == []), r)
+
+        # Move and resize carry the ink written on it, even when only the photo is selected.
+        r = ev("""async () => {
+          view.clearSelection();
+          const im0 = { ...T.im() }, ink0 = T.P(0).strokes.filter(s => T.onIds.includes(s.id)).map(s => s.points[0]);
+          view.select(0, [], [im0.id]);
+          const cx = im0.x + im0.width / 2, cy = im0.y + im0.height / 2;
+          await T.drag(0, [cx, cy], [cx + 50, cy + 60], { n: 20 });
+          await T.sleep(20);
+          const im1 = { ...T.im() }, ink1 = T.P(0).strokes.filter(s => T.onIds.includes(s.id)).map(s => s.points[0]);
+          const other = T.P(0).strokes[2].points[0];
+          const b = view.selection.box;
+          await T.drag(0, [b[2], b[3]], [b[2] + 102, b[3] + 76.5], { n: 20 });
+          await T.sleep(20);
+          const im2 = { ...T.im() }, ink2 = T.P(0).strokes.filter(s => T.onIds.includes(s.id)).map(s => s.points[0]);
+          const rel = (p, im) => [(p.x - im.x) / im.width, (p.y - im.y) / im.height];
+          const disk = ink.readPage(await T.disk(0));
+          const out = { im0, im1, im2, rel0: ink0.map(p => rel(p, im0)), rel1: ink1.map(p => rel(p, im1)), rel2: ink2.map(p => rel(p, im2)),
+            other: [other.x, other.y], sel: view.selection, diskIm: disk.images[0], diskOn: disk.strokes.map(s => s.on || null) };
+          view.undo();
+          out.undo1 = { ...T.im() };
+          out.undoInk1 = T.P(0).strokes.filter(s => T.onIds.includes(s.id)).map(s => s.points[0]);
+          view.undo();
+          out.undo2 = { ...T.im() };
+          out.undoInk2 = T.P(0).strokes.filter(s => T.onIds.includes(s.id)).map(s => s.points[0]);
+          out.ink0 = ink0;
+          view.redo(); view.redo();
+          out.redo = { ...T.im() };
+          await T.sleep(100);
+          return out;
+        }""")
+        page.locator('#leaf').screenshot(path=os.path.join(OUT, 'images_moved.png'))
+        close = lambda a, b, tol=0.01: all(abs(x - y) <= tol for pa, pb in zip(a, b) for x, y in zip(pa, pb))
+        del_im = lambda im: {k: v for k, v in im.items() if k != 'data'}
+        print('image move/resize:', del_im(r['im0']), '->', del_im(r['im1']), '->', del_im(r['im2']))
+        check('images: moving the photo moves the ink written on it; the ink stays at the same place on the photo',
+              r['im1']['x'] == r['im0']['x'] + 50 and r['im1']['y'] == r['im0']['y'] + 60 and r['im1']['width'] == r['im0']['width'] and close(r['rel0'], r['rel1']), r)
+        check('images: resizing the photo scales it (aspect kept) and its ink with it',
+              abs(r['im2']['width'] / r['im1']['width'] - 1.25) < 0.02 and abs(r['im2']['height'] / r['im2']['width'] - 0.75) < 0.01 and close(r['rel1'], r['rel2']), r)
+        check('images: ink not on the photo stays put; the moved photo and its ink are saved', abs(r['other'][0] - 100) < 0.5 and abs(r['other'][1] - 900) < 0.5 and del_im(r['diskIm']) == del_im(r['im2']) and r['diskOn'][:2] == [r['im2']['id']] * 2, r)
+        check('images: move and resize are one undo step each, photo and ink together; redo repeats them',
+              del_im(r['undo1']) == del_im(r['im1']) and del_im(r['undo2']) == del_im(r['im0']) and close([[p['x'], p['y']] for p in r['undoInk2']], [[p['x'], p['y']] for p in r['ink0']], 0.11)
+              and del_im(r['redo']) == del_im(r['im2']), r)
+
+        # Delete asks whether to keep the ink: cancel, keep (undo, redo), delete the ink too (undo).
+        r = ev("""async () => {
+          const id = T.im().id, n0 = T.P(0).strokes.length;
+          view.select(0, [], [id]);
+          view.contentEl.querySelector('.nb-ink-sel-delete').click();
+          const m = modals[modals.length - 1];
+          const asked = { open: modals.length > 0, title: m && m.titleEl.textContent };
+          m.contentEl.querySelector('.nb-cancel-delete').click();
+          const cancelled = { images: T.P(0).images.length, strokes: T.P(0).strokes.length, modals: modals.length };
+          view.select(0, [], [id]);
+          view.deleteSelection();
+          modals[modals.length - 1].contentEl.querySelector('.nb-keep-ink').click();
+          const keep = { images: T.P(0).images.length, strokes: T.P(0).strokes.length, on: T.P(0).strokes.map(s => s.on || null) };
+          const disk = ink.readPage(await T.disk(0));
+          keep.disk = { images: (disk.images || []).length, on: disk.strokes.map(s => s.on || null) };
+          view.undo();
+          const undoKeep = { images: T.P(0).images.length, on: T.P(0).strokes.map(s => s.on || null) };
+          view.redo();
+          const redoKeep = { images: T.P(0).images.length, on: T.P(0).strokes.map(s => s.on || null) };
+          view.undo();
+          view.select(0, [], [id]);
+          view.deleteSelection();
+          modals[modals.length - 1].contentEl.querySelector('.nb-delete-ink').click();
+          const del = { images: T.P(0).images.length, strokes: T.P(0).strokes.length };
+          view.undo();
+          const undoDel = { images: T.P(0).images.length, strokes: T.P(0).strokes.length, on: T.P(0).strokes.map(s => s.on || null) };
+          // Image and all its ink selected: nothing to ask.
+          view.select(0, T.onIds, [id]);
+          const m0 = modals.length;
+          view.deleteSelection();
+          const noAsk = { modals: modals.length - m0, images: T.P(0).images.length, strokes: T.P(0).strokes.length };
+          view.undo();
+          return { id, n0, asked, cancelled, keep, undoKeep, redoKeep, del, undoDel, noAsk };
+        }""")
+        id_ = r['id']
+        check('images: deleting a photo with ink on it asks "Keep the ink written on it?"; Cancel deletes nothing',
+              r['asked'] == {'open': True, 'title': 'Keep the ink written on it?'} and r['cancelled'] == {'images': 1, 'strokes': 3, 'modals': 0}, r)
+        check('images: "Keep the ink" deletes the photo and keeps its ink, no longer on it (saved so); undo and redo',
+              r['keep']['images'] == 0 and r['keep']['strokes'] == 3 and r['keep']['on'] == [None] * 3 and r['keep']['disk'] == {'images': 0, 'on': [None] * 3}
+              and r['undoKeep'] == {'images': 1, 'on': [id_, id_, None]} and r['redoKeep'] == {'images': 0, 'on': [None] * 3}, r)
+        check('images: "Delete the ink too" deletes the photo and its ink; undo puts both back',
+              r['del'] == {'images': 0, 'strokes': 1} and r['undoDel'] == {'images': 1, 'strokes': 3, 'on': [id_, id_, None]}, r)
+        check('images: deleting a photo selected with all its ink asks nothing', r['noAsk'] == {'modals': 0, 'images': 0, 'strokes': 1}, r)
+
+        # Copy, paste and duplicate take the photo and its ink; the copies' ink is on the copy.
+        r = ev("""async () => {
+          const id = T.im().id;
+          view.select(0, [], [id]);
+          view.duplicateSelection();
+          const dup = { images: T.P(0).images.map(i => i.id), sel: view.selection.images, on: T.P(0).strokes.map(s => s.on || null) };
+          view.undo();
+          view.select(0, [], [id]);
+          view.copySelection();
+          view.clearSelection();
+          const pasted = view.pasteStrokes();
+          const pst = { images: T.P(0).images.length, strokes: T.P(0).strokes.length, on: T.P(0).strokes.slice(3).map(s => s.on || null), sel: view.selection.images };
+          view.undo();
+          return { id, dup, pasted, pst, after: T.P(0).images.length };
+        }""")
+        d = r['dup']
+        check('images: duplicate copies the photo with a new id and its ink onto the copy; paste too; each one undo step',
+              len(d['images']) == 2 and d['sel'] == [d['images'][1]] and d['on'][3:] == [d['images'][1]] * 2 and r['pasted']
+              and r['pst']['images'] == 2 and len(r['pst']['sel']) == 1 and r['pst']['on'] == r['pst']['sel'] * 2 and r['after'] == 1, r)
+
+        # Insert as a whole page: a page after the current one, the paper's width and the photo's aspect.
+        r = ev("""async () => {
+          view.clearSelection();
+          const n0 = view.store.slots.length;
+          await view.insertImageFile(await T.photo(1600, 1200), true);
+          await T.sleep(200);
+          const i = view.store.slots.length - 1, pg = T.P(1);
+          const out = { n0, n: view.store.slots.length, size: pg.size, kind: pg.template.kind, idx: view.currentPageIndex() };
+          view.setTool('pen');
+          await T.pen(1, Array.from({ length: 30 }, (_, j) => [100 + j * 10, 300, 0.4]), { predict: 0, id: 14 });
+          out.red = T.pixel(1, 200, 150);
+          out.yellow = T.pixel(1, 600, 450);
+          out.ink = T.pixel(1, 200, 300);
+          const svg = await T.disk(1);
+          out.once = svg.split(pg.template.image).length - 1;
+          out.meta = /"template":\\{"kind":"image"\\}/.test(svg);
+          document.body.classList.add('theme-dark'); app.workspace.trigger('css-change');
+          await T.sleep(100);
+          out.darkInk = T.pixel(1, 200, 300);
+          document.body.classList.remove('theme-dark'); app.workspace.trigger('css-change');
+          view.undo();
+          out.undoStroke = T.P(1).strokes.length;
+          view.undo();
+          out.undoPage = view.store.slots.length;
+          view.redo();
+          out.redoPage = view.store.slots.length;
+          await T.sleep(100);
+          return out;
+        }""")
+        page.locator('#leaf').screenshot(path=os.path.join(OUT, 'images_page.png'))
+        check('images: "Insert as a whole page" adds a page after the current one, at the paper width and the photo aspect, with an image template',
+              r['n'] == r['n0'] + 1 and r['size'] == {'width': 816, 'height': 612} and r['kind'] == 'image' and r['idx'] == 1, r)
+        check('images: the image page shows the photo, ink written on it, dark ink in dark mode; its bytes saved once',
+              near(r['red'], (0xd0, 0x20, 0x20)) and near(r['yellow'], (0xe0, 0xc0, 0x20)) and max(r['ink']) < 80 and max(r['darkInk']) < 80
+              and r['once'] == 1 and r['meta'], r)
+        check('images: the image page is one undo step', r['undoStroke'] == 0 and r['undoPage'] == r['n0'] and r['redoPage'] == r['n'], r)
+
+        # A 12-megapixel photo (4000 x 3000, noisy like a real one) decodes and encodes in about a second.
+        r = ev("""async () => {
+          const w = 4000, h = 3000, c = document.createElement('canvas'); c.width = w; c.height = h;
+          const g = c.getContext('2d');
+          const grad = g.createLinearGradient(0, 0, w, h);
+          grad.addColorStop(0, '#305080'); grad.addColorStop(0.5, '#c0a070'); grad.addColorStop(1, '#204020');
+          g.fillStyle = grad; g.fillRect(0, 0, w, h);
+          const tile = g.createImageData(500, 500);
+          for (let k = 0; k < tile.data.length; k++) tile.data[k] = (k & 3) === 3 ? 60 : (Math.random() * 255) | 0;
+          const t = document.createElement('canvas'); t.width = t.height = 500; t.getContext('2d').putImageData(tile, 0, 0);
+          for (let x = 0; x < w; x += 500) for (let y = 0; y < h; y += 500) g.drawImage(t, x, y);
+          const blob = await new Promise(res => c.toBlob(res, 'image/jpeg', 0.92));
+          c.width = c.height = 0;
+          const file = new File([blob], 'IMG_0001.jpg', { type: 'image/jpeg' });
+          view.scrollToPage(0);
+          await T.sleep(50);
+          const t0 = performance.now();
+          const ok = await view.insertImageFile(file);
+          const ms = performance.now() - t0;
+          await T.sleep(300);
+          const out = { ok, ms, fileMB: file.size / 1e6, stats: view.imageStats, n: T.P(0).images.length };
+          view.undo();
+          return out;
+        }""")
+        s = r['stats']
+        print(f"12 MP photo ({r['fileMB']:.1f} MB JPEG): insert {r['ms']:.0f} ms (decode {s['decodeMs']:.0f} ms, scale and encode {s['encodeMs']:.0f} ms), stored {s['width']} x {s['height']}, {s['bytes'] / 1e6:.1f} MB data URL")
+        check('images: a 12-megapixel photo is inserted at full resolution in under 2 s in Chromium', r['ok'] and s['width'] == 4000 and s['height'] == 3000 and r['ms'] < 2000, r)
+
+        # Reopen: the photo, its ink and the image page read back and render.
+        r = ev("""async () => {
+          await app.workspace.activeLeaf.detach();
+          await T.sleep(30);
+          const leaf = app.workspace.getLeaf('tab');
+          await leaf.openFile(app.vault.getFile('Photos.md'));
+          await T.sleep(300);
+          const pg = view.store.page(view.store.slots[0]), p2 = view.store.page(view.store.slots[1]);
+          const im = pg.images[0];
+          return { images: pg.images.length, data: im.data.startsWith('data:image/jpeg;base64,'), on: pg.strokes.map(s => s.on || null), id: im.id,
+            kind: p2.template.kind, p2img: p2.template.image.length > 1000,
+            red: T.pixel(0, im.x + im.width / 4, im.y + im.height / 4) };
+        }""")
+        page.locator('#leaf').screenshot(path=os.path.join(OUT, 'images_reopened.png'))
+        check('images: after reopening, the photo, the ink on it and the image page are read back and drawn',
+              r['images'] == 1 and r['data'] and r['on'] == [r['id'], r['id'], None] and r['kind'] == 'image' and r['p2img'] and near(r['red'], (0xd0, 0x20, 0x20)), r)
+
+        # The page menu's entries; picking a file through the file input inserts it.
+        r = ev("""async () => {
+          view.contentEl.querySelector('.nb-ink-page-settings').click();
+          const picker = view.contentEl.querySelector('.nb-ink-picker');
+          const items = ['.nb-ink-menu-insert-image', '.nb-ink-menu-insert-image-page', '.nb-ink-menu-paste-image'].map(c => !!picker.querySelector(c));
+          const n0 = T.P(0).images.length;
+          picker.querySelector('.nb-ink-menu-insert-image').click();
+          const input = document.querySelector('input.nb-image-file-input');
+          const accept = input && input.accept;
+          const dt = new DataTransfer();
+          dt.items.add(await T.photo(200, 100));
+          input.files = dt.files;
+          input.dispatchEvent(new Event('change'));
+          for (let i = 0; i < 50 && T.P(0).images.length === n0; i++) await T.sleep(20);
+          const out = { items, accept, n0, n: T.P(0).images.length, gone: !document.querySelector('input.nb-image-file-input') };
+          view.undo();
+          view.clearSelection();
+          view.setTool('pen');
+          return out;
+        }""")
+        check('images: the page menu offers Insert image, Insert image as page and Paste image; the file input (image/*) inserts the chosen file',
+              r['items'] == [True, True, True] and r['accept'] == 'image/*' and r['n'] == r['n0'] + 1 and r['gone'], r)
+        # ======== end of 25. Images on pages (#12) ========
 
         # --- unload removes the patch
         r = ev("""async () => {
