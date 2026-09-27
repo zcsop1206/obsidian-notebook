@@ -110,6 +110,21 @@ class PageBuilder {
   }
 }
 
+/**
+ * A Letter page densely covered in handwriting: `count` strokes of cursive words (and i dots)
+ * in the default ink, row after row. For the ink view's large-note test.
+ */
+export function densePage(r: Seeded, id: string, count: number): Page {
+  const b = new PageBuilder(r, id);
+  for (let pass = 0; b.page.strokes.length < count; pass++) {
+    for (let base = 60 + pass * 11; base < LETTER.height - 30 && b.page.strokes.length < count; base += 34) {
+      b.write(pass % 2 ? 'pressure' : 'uniform', DEFAULT_INK, 48 + pass * 7, 768, base);
+    }
+  }
+  b.page.strokes.length = count;
+  return b.page;
+}
+
 /** The fixture's files, keyed by path relative to test/fixtures/. */
 export function buildFixture(): Map<string, string> {
   const r = seeded(20260926);
