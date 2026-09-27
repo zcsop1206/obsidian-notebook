@@ -80,9 +80,18 @@ A throwaway plugin, id `notebook-spike`, to measure whether the plugin approach 
 
 ### Verified so far
 
-**On the iPad (owner, 2026-09-26):** the test protocol ran and the basic functions all work inside Obsidian's iOS web view: Pencil drawing, saving a page and audio recording. The plugin approach holds up, so the go/no-go in Next steps step 1 is a go. The measured numbers (`_spike/_results.md`, `_log.md`) haven't been recorded here yet; add them when available, especially:
-- real Pencil sample rate and delay;
-- whether `getCoalescedEvents` exists in Obsidian's web view;
+**On the iPad (owner, 2026-09-26):** the test protocol ran and the basic functions all work inside Obsidian's iOS web view: Pencil drawing, saving a page and audio recording. The plugin approach holds up, so the go/no-go in Next steps step 1 is a go.
+
+Ink numbers, from `_spike/_results.md` (one page, 2026-09-26 2:56 PM, synced to the laptop through the sync plugin):
+- 69 strokes, 14,345 points, 582 kB SVG; the canvas was 1180 × 537 CSS px (landscape).
+- Median over 81 strokes: **120 move events/s, 471 samples/s**, handler delay **4.0 ms**. So each move event carries about 4 coalesced samples: coalesced events are essential, not optional.
+- `getCoalescedEvents` **yes**; `getPredictedEvents` **yes**, up to 4 points ahead. Predicted points could be drawn as a throwaway tail to hide latency.
+- Pressure is reported per sample (for example 0.08 at the start of the first stroke).
+- 0 cancelled strokes. The 1 finger touch was ignored as intended. 1,055 pen hover events arrived, so hover works (possible cursor preview).
+- The user agent reports as desktop Safari (`Macintosh; Intel Mac OS X 10_15_7 … Mobile/15E148 obsidian`), as iPadOS does. Don't detect the iPad from the user agent; use Obsidian's `Platform`.
+- Size: about 40 bytes per point (582 kB / 14,345), since every point is stored twice: in the path outline and raw in `<metadata>`. Worth trimming (fewer decimals, delta-encoded timestamps, or dropping samples closer than a threshold) before real use.
+
+Still not recorded: the audio results. `_results.md` has no audio section, so no recording was stopped cleanly in that vault. Still unknown:
 - whether Safari's MediaRecorder honours the timeslice;
 - whether a truncated mp4 plays after recovery;
 - what happens to the mic on screen lock and app switch;
