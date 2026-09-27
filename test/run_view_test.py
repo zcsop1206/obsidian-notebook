@@ -118,7 +118,7 @@ HELPERS = """() => {
     }),
     /** The outline's vertical extent near page x, for a stroke along x. */
     widthAt(d, x) {
-      const ys = [], re = /[ML](-?[\d.]+) (-?[\d.]+)/g;
+      const ys = [], re = /(-?[\d.]+) (-?[\d.]+)/g;  // every point and control point (M, L, Q)
       for (let m = re.exec(d); m; m = re.exec(d)) if (Math.abs(Number(m[1]) - x) < 1.5) ys.push(Number(m[2]));
       return Math.max(...ys) - Math.min(...ys);
     },
@@ -2686,6 +2686,7 @@ try:
         check('pdf pages: duplicate copies the PDF template; deleting pages leaves the PDF file',
               r['dup'] == ['pdf', 1, True] and r['kept'], r)
         # ======== end of 20. Import a PDF and write on it (#14) ========
+
 
         # --- unload removes the patch
         r = ev("""async () => {

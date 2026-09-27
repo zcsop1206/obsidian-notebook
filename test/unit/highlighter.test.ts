@@ -56,7 +56,7 @@ const line = (x0: number, x1: number, y: number, n: number): Point[] =>
 
 /** The outline's vertices. */
 function xs(d: string): number[][] {
-  const out: number[][] = [], re = /[ML](-?[\d.]+) (-?[\d.]+)/g;
+  const out: number[][] = [], re = /(-?[\d.]+) (-?[\d.]+)/g;  // every point and control point (M, L, Q)
   for (let m = re.exec(d); m; m = re.exec(d)) out.push([Number(m[1]), Number(m[2])]);
   return out;
 }

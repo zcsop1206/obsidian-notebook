@@ -172,7 +172,7 @@ test('live: the live outline of finished points is the saved stroke\'s outline',
 /** The outline's vertical extent near x, for a stroke running along x. */
 function widthAt(d: string, x: number): number {
   const ys: number[] = [];
-  const re = /[ML](-?[\d.]+) (-?[\d.]+)/g;
+  const re = /(-?[\d.]+) (-?[\d.]+)/g;
   for (let m = re.exec(d); m; m = re.exec(d)) if (Math.abs(Number(m[1]) - x) < 1.5) ys.push(Number(m[2]));
   return Math.max(...ys) - Math.min(...ys);
 }
