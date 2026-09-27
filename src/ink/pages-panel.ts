@@ -1,8 +1,9 @@
 // The Pages panel (#17): a narrow column of page thumbnails beside the pages of the ink view.
 // A tap on a thumbnail scrolls to its page; the current page's thumbnail is highlighted and has
 // small buttons to insert a page after it, duplicate it or delete it; a long press (or, with a
-// mouse, a drag) picks a thumbnail up and dragging it reorders the pages. Fingers scroll the
-// panel natively until a thumbnail is picked up.
+// mouse, a drag) picks a thumbnail up and dragging it reorders the pages. Fingers and the Pencil
+// scroll the panel natively until a thumbnail is picked up (#53: the view's stylus blocker is on
+// the pages scroller only, so the panel sees the Pencil as a finger).
 //
 // Thumbnails must not slow the editor: they are drawn only while the panel is open, only when
 // in view (IntersectionObserver), at most THUMBS_PER_FRAME per frame, copied from the page's
@@ -106,7 +107,7 @@ export class PagesPanel {
   private cleanup: (() => void)[] = [];
 
   constructor(parent: HTMLElement, private host: PagesHost) {
-    this.el = parent.createDiv({ cls: 'nb-pages-panel', attr: { 'aria-label': 'Pages' } });
+    this.el = parent.createDiv({ cls: 'nb-ink-control nb-pages-panel', attr: { 'aria-label': 'Pages' } });
     this.el.hide();
     this.list = this.el.createDiv({ cls: 'nb-pages-list' });
     this.dropLine = this.list.createDiv({ cls: 'nb-pages-drop' });
@@ -223,7 +224,7 @@ export class PagesPanel {
   // ---- thumbnails
 
   private makeThumb(id: string): Thumb {
-    const el = createDiv({ cls: 'nb-pages-thumb' });
+    const el = createDiv({ cls: 'nb-ink-control nb-pages-thumb' });
     el.dataset.page = id;
     const frame = el.createDiv({ cls: 'nb-pages-frame' });
     const num = el.createDiv({ cls: 'nb-pages-num' });

@@ -56,7 +56,8 @@
  * finger to the view's navigator (src/ink/navigate.ts), which pans and pinch-zooms from pointer
  * events; finger touchmoves are also prevented (blockFingerTouch), so Obsidian never sees a
  * swipe and doesn't open its sidebars. Pencil touches are stopped by preventDefault on
- * touchstart/touchmove (blockStylusTouch). Mouse wheels and trackpads scroll natively. Above
+ * touchstart/touchmove here (blockStylusTouch, on this element only, #53), except on controls
+ * (buttons, inputs, .nb-ink-control). Mouse wheels and trackpads scroll natively. Above
  * 100% zoom the pages are wider than the view and it scrolls sideways too.
  */
 .nb-ink-scroll {

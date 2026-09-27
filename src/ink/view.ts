@@ -253,11 +253,12 @@ export class InkView extends FileView {
       shapesOn: () => this.shapesOn,
       commitShape: (target, shape, freehand) => this.commit(target, shape, freehand),
     }, (type, fn, options) => this.registerDomEvent(this.pagesEl, type, fn, options), this.stats.pen);
-    // A Pencil drag anywhere in the view, on a page or not, never scrolls it (blockStylusTouch);
-    // finger drags over the pages move it through the navigator, never natively, and never
-    // reach Obsidian's sidebar swipes (blockFingerTouch).
-    this.registerDomEvent(root, 'touchstart', e => blockStylusTouch(e), { passive: false });
-    this.registerDomEvent(root, 'touchmove', e => blockStylusTouch(e) || blockFingerTouch(e, this.scroller), { passive: false });
+    // A Pencil drag over the pages never scrolls them (blockStylusTouch); finger drags over the
+    // pages move them through the navigator, never natively, and never reach Obsidian's sidebar
+    // swipes (blockFingerTouch). Only on the scroller (#53): the toolbar, pickers, Pages panel
+    // and selection menu are outside it and take Pencil taps and drags as they take a finger's.
+    this.registerDomEvent(this.scroller, 'touchstart', e => blockStylusTouch(e), { passive: false });
+    this.registerDomEvent(this.scroller, 'touchmove', e => blockStylusTouch(e) || blockFingerTouch(e, this.scroller), { passive: false });
     // Two fingers tapped undo, three redo (a tap never pans: see NAV_SLOP in navigate.ts).
     listenForUndoTaps((type, fn, options) => this.registerDomEvent(this.pagesEl, type, fn, options), () => this.undo(), () => this.redo());
     // One or two fingers pan with momentum, two pinch-zoom; Ctrl/Cmd+wheel zooms.

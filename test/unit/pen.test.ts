@@ -192,7 +192,7 @@ test('outline: the uniform nib ignores pressure; the pressure nib follows it; si
   assert.ok(pressureCurve(0.08) > 0.08 * 2 && pressureCurve(1) > 0.5);
 });
 
-test('stylus touches: prevented anywhere but a touchstart on a control; fingers never', () => {
+test('stylus touches: prevented anywhere but on a control (#53: touchstart and touchmove); fingers never', () => {
   const run = (type: string, touchType: string, onControl: boolean) => {
     let prevented = false, stopped = false;
     const target = { closest: (sel: string) => (onControl && sel.includes('.nb-ink-control') ? {} : null) };
@@ -204,7 +204,7 @@ test('stylus touches: prevented anywhere but a touchstart on a control; fingers 
   };
   assert.deepEqual(run('touchstart', 'stylus', false), [true, true, true]);
   assert.deepEqual(run('touchstart', 'stylus', true), [false, false, false]);
-  assert.deepEqual(run('touchmove', 'stylus', true), [true, true, true]);
+  assert.deepEqual(run('touchmove', 'stylus', true), [false, false, false]);
   assert.deepEqual(run('touchstart', 'direct', false), [false, false, false]);
   assert.deepEqual(run('touchmove', 'direct', false), [false, false, false]);
 });

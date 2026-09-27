@@ -650,7 +650,7 @@ try:
         check('pen: touches never draw and are counted', r['touch'] == 0 and r['ignored'] == 1, r)
         check('pen: a stroke that runs off the page continues', r['off'] == 1 and r['maxX'] > 816, r)
 
-        # (5) stylus touches never scroll: prevented anywhere in the view, except a touchstart on a control
+        # (5) stylus touches never scroll: prevented anywhere over the pages, except on a control (#53: touchstart and touchmove)
         r = ev("""() => {
           const sc = view.contentEl.querySelector('.nb-ink-scroll'), pagesEl = view.contentEl.querySelector('.nb-ink-pages');
           const add = view.contentEl.querySelector('.nb-ink-add'), swatch = view.contentEl.querySelector('.nb-ink-toolbar .nb-ink-tool');
@@ -665,7 +665,7 @@ try:
         check('pen: a stylus touch outside any page is prevented (touchstart and touchmove)', r['offPage'] == [True, True] and r['scroller'] == [True, True], r)
         check('pen: a stylus touch on a page is prevented', r['onPage'] == [True, True], r)
         check('pen: a finger touchstart is not prevented; a finger touchmove over the pages is (#9: the view pans itself)', r['finger'] == [False, True], r)
-        check('pen: a stylus touchstart on a control is not prevented (taps work); touchmove is', r['control'] == [False, False, True], r)
+        check('pen: a stylus touchstart or touchmove on a control is not prevented (taps work, #53)', r['control'] == [False, False, False], r)
 
         # (7) the toolbar's pen picker and the commands set the next stroke's nib, colour and size
         r = ev(f"""async () => {{
@@ -2998,8 +2998,8 @@ try:
           view.toolbar.closePicker();
           return { n: els.length, prevented: starts.filter(Boolean).length, moves };
         }""")
-        check('toolbar: Pencil touchstarts on toolbar and picker controls are not prevented (taps work); touchmove is',
-              r['n'] > 10 and r['prevented'] == 0 and r['moves'] == [True], r)
+        check('toolbar: Pencil touchstarts and touchmoves on toolbar and picker controls are not prevented (taps work, #53)',
+              r['n'] > 10 and r['prevented'] == 0 and r['moves'] == [False], r)
         # ======== end of 21. The toolbar and pen presets (#10) ========
 
         # ======== 21. Pen polish (#32): smooth edges and the settled stroke ========
@@ -4730,6 +4730,283 @@ try:
         check('dense save: writePage after one new stroke on a 1,000-stroke page takes under 16 ms', r['saveMs'] < 16, r)
         check('dense save: no frame over 32 ms while the autosave runs', r['maxFrame'] <= 32, r)
         # ======== end of 28. Autosave on a dense page (#37) ========
+
+        # ======== 29. The Pencil on every control (#53) ========
+        # On the iPad a Pencil tap sends pen pointer events and stylus touch events; WebKit clicks
+        # (and focuses) the element only if the touchstart wasn't prevented, and scrolls or selects
+        # only if the touchmoves weren't. T.pencilTap sends both, then clicks and focuses as WebKit
+        # would when the touchstart went through. The stylus blockers now listen on the pages
+        # scroller only; inside it, controls (the ruler's label and input, "Add page") are exempt.
+        r = ev("""async () => {
+          T.CONTROL = 'button, select, input, textarea, a, .nb-ink-control';
+          /** A Pencil tap on el; returns [touchstart prevented, touchmove prevented]. */
+          T.pencilTap = (el, { click = true } = {}) => {
+            const r = el.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2;
+            const pe = type => el.dispatchEvent(new PointerEvent(type, { pointerId: 91, pointerType: 'pen', isPrimary: true, pressure: type === 'pointerup' ? 0 : 0.3,
+              clientX: x, clientY: y, bubbles: true, cancelable: true, button: 0, buttons: type === 'pointerup' ? 0 : 1 }));
+            pe('pointerdown');
+            const start = T.touch(el, 'touchstart', 'stylus'), move = T.touch(el, 'touchmove', 'stylus');
+            pe('pointerup');
+            T.touch(el, 'touchend', 'stylus');
+            if (!start && click) {
+              if (el.matches('input, select, textarea')) el.focus();
+              el.click();
+            }
+            return [start, move];
+          };
+          /** Stylus touchstart and touchmove on each element: the ones prevented, or not a control, as [text, why]. */
+          T.audit = els => els.flatMap(el => {
+            const name = el.className && typeof el.className === 'string' ? el.className.split(' ').filter(c => c !== 'nb-ink-control').join('.') : el.tagName.toLowerCase();
+            const bad = [];
+            if (T.touch(el, 'touchstart', 'stylus')) bad.push([name, 'touchstart prevented']);
+            if (T.touch(el, 'touchmove', 'stylus')) bad.push([name, 'touchmove prevented']);
+            if (!el.closest(T.CONTROL)) bad.push([name, 'not marked as a control']);
+            return bad;
+          });
+          T.interactive = root => [...root.querySelectorAll('button, input, select, textarea, a, label, canvas.nb-ink-preview, .nb-pages-thumb, .suggestion-item')];
+          T.strokeCount = () => view.store.slots.reduce((n, s) => n + view.store.page(s).strokes.length, 0);
+          await p.createInkNote('Controls', '', 'letter', 'blank');
+          await T.sleep(150);
+          view.addPage();
+          view.addPage();
+          view.scrollToPage(0);
+          view.setTool('pen');
+          await T.sleep(100);
+          await T.pen(0, Array.from({ length: 40 }, (_, j) => [120 + j * 5, 200 + 6 * Math.sin(j / 4), 0.3]), { predict: 0 });
+          view.togglePagesPanel(true);
+          if (!view.rulerOn) commands['toggle-ruler'].checkCallback(false);
+          await T.sleep(300);
+          return { pages: view.store.slots.length, open: view.pagesPanelOpen, ruler: view.rulerOn, strokes: T.strokeCount() };
+        }""")
+        check('controls setup: a 3-page note with a stroke, the Pages panel open, the ruler on', r == {'pages': 3, 'open': True, 'ruler': True, 'strokes': 1}, r)
+
+        # (1) where the blockers listen: the scroller, not the view
+        r = ev("""() => {
+          const sc = T.sc(), pagesEl = view.contentEl.querySelector('.nb-ink-pages'), ghost = view.contentEl.querySelector('.nb-ink-ghost');
+          const list = view.contentEl.querySelector('.nb-pages-list'), thumb = T.thumbs()[1];
+          return {
+            pencilOverPages: [T.pages()[0], ghost, pagesEl, sc].flatMap(el => [T.touch(el, 'touchstart', 'stylus'), T.touch(el, 'touchmove', 'stylus')]),
+            fingerOverPages: [T.touch(T.pages()[0], 'touchmove', 'direct'), T.touch(sc, 'touchmove', 'direct'), T.touch(T.pages()[0], 'touchstart', 'direct')],
+            pencilElsewhere: [view.contentEl, T.bar(), list, thumb, T.panel()].flatMap(el => [T.touch(el, 'touchstart', 'stylus'), T.touch(el, 'touchmove', 'stylus')]),
+            fingerOnPanel: [T.touch(thumb, 'touchmove', 'direct'), T.touch(list, 'touchmove', 'direct')],
+            listScrolls: getComputedStyle(list).touchAction,
+          };
+        }""")
+        check('controls: a Pencil touchstart and touchmove over the pages (page, virtual page, gap, margin) are still prevented',
+              r['pencilOverPages'] == [True] * 8, r['pencilOverPages'])
+        check('controls: a finger touchmove over the pages is still prevented (the navigator pans), a finger touchstart is not',
+              r['fingerOverPages'] == [True, True, False], r['fingerOverPages'])
+        check('controls: outside the scroller (view, toolbar, Pages panel) the Pencil is never prevented: the blockers listen on the scroller only',
+              r['pencilElsewhere'] == [False] * 10, r['pencilElsewhere'])
+        check('controls: fingers and the Pencil scroll the Pages panel natively (touch-action pan-y, touchmove not prevented)',
+              r['fingerOnPanel'] == [False, False] and r['listScrolls'] == 'pan-y', r)
+
+        # (2) the audit: every interactive element the view creates, in each state, takes the Pencil
+        r = ev("""async () => {
+          const out = {};
+          const base = T.interactive(view.contentEl).filter(el => el.offsetParent !== null);
+          out.base = { n: base.length, bad: T.audit(base),
+            kinds: { toolbar: base.filter(el => T.bar().contains(el)).length, panel: base.filter(el => T.panel().contains(el)).length,
+              footer: base.filter(el => el.closest('.nb-ink-footer')).length, ruler: base.filter(el => el.closest('.nb-ink-ruler-layer')).length } };
+          const pickers = {};
+          for (const [tool, open] of [['pen', 'pen'], ['highlighter', 'highlighter'], ['eraser', 'eraser'], ['lasso', 'lasso'], ['pen', 'page']]) {
+            view.setTool(tool);
+            if (open === 'page') T.tb('.nb-ink-page-settings').click(); else T.picker();
+            const picker = view.contentEl.querySelector('.nb-ink-picker'), els = T.interactive(picker);
+            pickers[open] = { n: els.length, bad: T.audit([picker, ...els]), kind: view.toolbar.pickerOpen };
+            view.toolbar.closePicker();
+          }
+          out.pickers = pickers;
+          // The selection menu: lasso the stroke on page 1.
+          view.setTool('lasso');
+          await T.lasso([90, 160, 400, 240]);
+          await T.sleep(50);
+          const menu = view.contentEl.querySelector('.nb-ink-selmenu');
+          out.selmenu = { shown: menu.style.display !== 'none', inScroller: T.sc().contains(menu), n: T.interactive(menu).length, bad: T.audit([menu, ...T.interactive(menu)]) };
+          // The ruler's label, and its input once the label is tapped.
+          view.setTool('pen');
+          const label = view.contentEl.querySelector('.nb-ink-ruler-angle');
+          const n0 = T.strokeCount();
+          const tap = T.pencilTap(label);
+          await T.sleep(20);
+          const input = view.contentEl.querySelector('.nb-ink-ruler-input');
+          out.ruler = { tap, input: !!input, focused: !!input && document.activeElement === input, inScroller: T.sc().contains(label),
+            bad: T.audit([label, ...(input ? [input] : [])]), strokes: T.strokeCount() - n0 };
+          if (input) input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          return out;
+        }""")
+        print('controls audit:', {'base': r['base']['n'], 'kinds': r['base']['kinds'], 'pickers': {k: v['n'] for k, v in r['pickers'].items()}, 'selmenu': r['selmenu']['n']})
+        check('controls audit: toolbar, preset slots, Pages panel thumbnails and buttons, footer and ruler label: Pencil never prevented, all marked',
+              r['base']['n'] >= 24 and r['base']['bad'] == [] and r['base']['kinds']['toolbar'] == 15 and r['base']['kinds']['panel'] >= 6
+              and r['base']['kinds']['footer'] == 2 and r['base']['kinds']['ruler'] == 1, r['base'])
+        check('controls audit: every picker (pen with the ruler row, highlighter, eraser, lasso, page settings): Pencil never prevented, all marked',
+              all(v['bad'] == [] and v['n'] >= 1 and v['kind'] == k for k, v in r['pickers'].items()) and r['pickers']['pen']['n'] >= 20, r['pickers'])
+        check('controls audit: the selection menu (outside the scroller): Pencil never prevented, all marked',
+              r['selmenu']['shown'] and not r['selmenu']['inScroller'] and r['selmenu']['n'] >= 12 and r['selmenu']['bad'] == [], r['selmenu'])
+        check('controls audit: the ruler label (inside the scroller) opens its input on a Pencil tap and the input takes focus; no stroke',
+              r['ruler']['tap'] == [False, False] and r['ruler']['input'] and r['ruler']['focused'] and r['ruler']['inScroller']
+              and r['ruler']['bad'] == [] and r['ruler']['strokes'] == 0, r['ruler'])
+
+        # (3) Pencil taps do what a finger's do: toolbar, pickers, selection menu, footer, Pages panel
+        r = ev("""async () => {
+          const out = {}, taps = [];
+          const tap = el => { const t = T.pencilTap(el); taps.push(t[0] || t[1]); return t; };
+          view.toolbar.closePicker();
+          view.setTool('pen');
+          tap(T.tool('highlighter'));
+          out.tool = view.pen.tool;
+          tap(T.tool('highlighter'));
+          out.picker = view.toolbar.pickerOpen;
+          const picker = view.contentEl.querySelector('.nb-ink-picker');
+          const size0 = view.highlighter.size;
+          tap(picker.querySelector('.nb-ink-hl-swatch[data-color]:not(.is-active)'));
+          out.hlColor = view.highlighter.color !== undefined && picker.querySelector('.nb-ink-hl-swatch.is-active') !== null;
+          tap(picker.querySelector('.nb-ink-step[data-step="1"]'));
+          out.stepped = view.highlighter.size > size0;
+          tap(T.tool('pen'));
+          tap(T.tool('pen'));
+          const pp = view.contentEl.querySelector('.nb-ink-picker');
+          tap(pp.querySelector('[data-nib="pressure"]'));
+          out.nib = view.pen.nib;
+          tap(pp.querySelector('[data-color="#e0301e"]'));
+          out.color = view.pen.color;
+          const angle = pp.querySelector('.nb-ink-ruler-angle-input');
+          tap(angle);
+          out.angleFocused = document.activeElement === angle;
+          tap(pp.querySelector('.nb-ink-custom-color'));
+          out.customFocused = document.activeElement === pp.querySelector('.nb-ink-custom-color');
+          view.toolbar.closePicker();
+          view.setPen({ nib: 'uniform', color: '#000000' });
+          // A preset slot: tap saves the pen into an empty slot or applies a saved one.
+          const presets0 = JSON.stringify(view.presets ?? null);
+          tap(T.slot(4));
+          out.slot = T.slot(4).classList.contains('is-active') || JSON.stringify(view.presets ?? null) !== presets0;
+          // Selection menu: recolour, from the Pencil.
+          view.setTool('lasso');
+          await T.lasso([90, 160, 400, 240]);
+          await T.sleep(50);
+          const menu = view.contentEl.querySelector('.nb-ink-selmenu');
+          out.menuOpen = menu.style.display !== 'none';
+          tap(menu.querySelector('.nb-ink-swatch[data-color="#1f9d55"]'));
+          out.recoloured = view.store.page(view.store.slots[0]).strokes[0].color;
+          view.clearSelection();
+          view.setTool('pen');
+          // Footer: "Add page".
+          const n0 = view.store.slots.length, s0 = T.strokeCount();
+          const add = view.contentEl.querySelector('.nb-ink-add');
+          add.scrollIntoView();
+          await T.sleep(50);
+          tap(add);
+          out.added = view.store.slots.length - n0;
+          out.noStroke = T.strokeCount() === s0;
+          view.undo();
+          await T.sleep(50);
+          // Undo/redo from the toolbar.
+          out.undoEnabled = !T.tb('.nb-ink-undo').disabled;
+          view.scrollToPage(0);
+          await T.sleep(150);
+          out.taps = taps;
+          return out;
+        }""")
+        check('controls: Pencil taps switch tools, open the picker and set colour, size, nib, the ruler angle field and the custom colour',
+              r['tool'] == 'highlighter' and r['picker'] == 'highlighter' and r['hlColor'] and r['stepped'] and r['nib'] == 'pressure'
+              and r['color'] == '#e0301e' and r['angleFocused'] and r['customFocused'], r)
+        check('controls: a Pencil tap on a favourite slot saves or applies it', r['slot'], r)
+        check('controls: a Pencil tap on the selection menu recolours the selection', r['menuOpen'] and r['recoloured'] == '#1f9d55', r)
+        check('controls: a Pencil tap on "Add page" (inside the scroller) adds a page and draws nothing', r['added'] == 1 and r['noStroke'], r)
+        check('controls: none of those Pencil touches was prevented', r['taps'] and not any(r['taps']), r['taps'])
+
+        # (5) a stroke in progress: the window blocker stops stylus touchmoves anywhere, until the pen lifts
+        r = ev("""async () => {
+          const s0 = T.strokeCount();
+          await T.pen(0, Array.from({ length: 20 }, (_, j) => [120 + j * 5, 500, 0.3]), { up: false, predict: 0 });
+          const during = [T.touch(document.body, 'touchmove', 'stylus'), T.touch(T.pages()[0], 'touchmove', 'stylus')];
+          T.penUp(0, [215, 500]);
+          await T.sleep(30);
+          const after = T.touch(document.body, 'touchmove', 'stylus');
+          const n = T.strokeCount() - s0;
+          view.undo();
+          return { during, after, n };
+        }""")
+        check('controls: during a stroke a stylus touchmove anywhere in the window is prevented; after it, not', r['during'] == [True, True] and r['after'] is False and r['n'] == 1, r)
+
+        # (6) the plugin's dialogs and the settings tab: Pencil taps focus fields, open dropdowns, choose rows
+        r = ev("""async () => {
+          const out = {};
+          const modal = () => modals[modals.length - 1];
+          const fields = m => [...m.modalEl.querySelectorAll('input, select, textarea, button, .suggestion-item')];
+          const focusTest = els => els.filter(el => el.matches('input, select')).map(el => { document.body.focus(); T.pencilTap(el, { click: false }); el.focus(); return document.activeElement === el; });
+          // New ink note: name, paper, template, Create.
+          commands['new-ink-note'].callback();
+          await T.sleep(20);
+          let m = modal(), els = fields(m);
+          out.newNote = { n: els.length, selects: els.filter(e => e.tagName === 'SELECT').length, bad: T.audit(els).filter(b => b[1] !== 'not marked as a control'), focus: focusTest(els) };
+          m.close();
+          // Template chooser (Add page with template…) from the page settings menu, with the Pencil; then Custom size.
+          view.scrollToPage(0);
+          await T.sleep(100);
+          T.pencilTap(T.tb('.nb-ink-page-settings'));
+          const item = view.contentEl.querySelector('.nb-ink-menu-add-with');
+          T.pencilTap(item);
+          await T.sleep(20);
+          m = modal();
+          const rows = [...m.contentEl.querySelectorAll('.suggestion-item')];
+          out.chooser = { rows: rows.length, bad: T.audit(rows).filter(b => b[1] !== 'not marked as a control') };
+          rows.find(e => /custom size/i.test(e.textContent)).click();
+          await T.sleep(20);
+          m = modal();
+          els = fields(m);
+          out.size = { title: m.titleEl.textContent, n: els.length, bad: T.audit(els).filter(b => b[1] !== 'not marked as a control'), focus: focusTest(els) };
+          m.close();
+          // A Pencil tap on a chooser row picks it.
+          const n0 = view.store.slots.length;
+          view.chooseTemplate('add');
+          await T.sleep(20);
+          const blank = [...modal().contentEl.querySelectorAll('.suggestion-item')][0];
+          out.rowTap = T.pencilTap(blank);
+          await T.sleep(150);
+          out.rowAdded = view.store.slots.length - n0;
+          if (out.rowAdded) view.undo();
+          // PDF import: the source chooser's rows and the name dialog.
+          fs.set('Audit/a.pdf', new Uint8Array(fakePdf([[612, 792]])));
+          dirs.add('Audit');
+          commands['import-pdf'].callback();
+          await T.sleep(20);
+          m = modal();
+          const src = [...m.contentEl.querySelectorAll('.suggestion-item')];
+          out.pdfRows = { n: src.length, bad: T.audit(src).filter(b => b[1] !== 'not marked as a control') };
+          T.pencilTap(src.find(e => e.textContent === 'Audit/a.pdf'));
+          await T.waitFor(() => modals.length && modal().titleEl.textContent === 'Import PDF as ink note');
+          m = modal();
+          els = fields(m);
+          out.pdfName = { n: els.length, bad: T.audit(els).filter(b => b[1] !== 'not marked as a control'), focus: focusTest(els) };
+          m.close();
+          fs.delete('Audit/a.pdf');
+          // The settings tab.
+          const tab = p.settingTabs[0];
+          tab.display();
+          document.body.appendChild(tab.containerEl);
+          els = [...tab.containerEl.querySelectorAll('input, select, textarea, button')];
+          out.settings = { n: els.length, bad: T.audit(els).filter(b => b[1] !== 'not marked as a control'), focus: focusTest(els) };
+          tab.containerEl.remove();
+          out.modals = modals.length;
+          return out;
+        }""")
+        print('dialogs:', {k: (v['n'] if isinstance(v, dict) and 'n' in v else v) for k, v in r.items()})
+        check('dialogs: New ink note: the name field, the paper and template dropdowns and Create take Pencil taps; the fields focus',
+              r['newNote']['n'] >= 4 and r['newNote']['selects'] >= 2 and r['newNote']['bad'] == [] and all(r['newNote']['focus']), r['newNote'])
+        check('dialogs: the template chooser, opened from the page settings menu with the Pencil, lists rows that take Pencil taps',
+              r['chooser']['rows'] >= 5 and r['chooser']['bad'] == [], r['chooser'])
+        check('dialogs: Custom page size: width, height, unit and OK take Pencil taps; the fields focus',
+              r['size']['title'] == 'Custom page size' and r['size']['n'] >= 4 and r['size']['bad'] == [] and all(r['size']['focus']), r['size'])
+        check('dialogs: a Pencil tap on a chooser row picks it (a page is added)', r['rowTap'] == [False, False] and r['rowAdded'] == 1, r)
+        check('dialogs: PDF import: the source rows and the name dialog take Pencil taps; the name field focuses',
+              r['pdfRows']['n'] >= 2 and r['pdfRows']['bad'] == [] and r['pdfName']['n'] >= 2 and r['pdfName']['bad'] == [] and all(r['pdfName']['focus']), r)
+        check("dialogs: the settings tab's dropdowns take Pencil taps and focus", r['settings']['n'] >= 2 and r['settings']['bad'] == [] and all(r['settings']['focus']), r['settings'])
+        check('dialogs: all closed', r['modals'] == 0, r['modals'])
+
+        ev("async () => { view.togglePagesPanel(false); if (view.rulerOn) commands['toggle-ruler'].checkCallback(false); await T.sleep(50); }")
+        # ======== end of 29. The Pencil on every control (#53) ========
 
         # --- unload removes the patch
         r = ev("""async () => {
