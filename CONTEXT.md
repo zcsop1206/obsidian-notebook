@@ -56,9 +56,25 @@ The end state: every device (iPad and laptop now, others later) holds a copy of 
 - **Links:** Obsidian wikilinks turned off, standard markdown links used, so the site needs no link-rewriting step.
 - **Where the vault lives:** not decided. The Working Copy link assumption (vault = repo root) no longer applies. With API sync, the plugin could sync a vault to any repo and path. The goal of each device holding the portfolio and updating it points toward syncing with the portfolio repo itself (the whole repo, or a notebook folder inside it) rather than a separate notebook repo the site pulls in at build time, but this isn't settled.
 
-## What exists now (the spike, kept as Notebook's ink debug view)
+## What exists now (0.4.0: the ink editor, M1 in progress)
 
-The plugin is now **Notebook**, id `notebook`: a TypeScript project under `src/`, built to `main.js` by esbuild (see Repo mechanics). Up to 0.0.2 it shipped as the throwaway spike, id `notebook-spike` ("Notebook spike"), which measured whether the plugin approach holds up on the iPad. There is no editor yet. The spike's view and recorder moved over unchanged as the **ink debug view**, described below. It still writes only under `_spike/` in the vault.
+The plugin is **Notebook**, id `notebook`: a TypeScript project under `src/`, built to `main.js` by esbuild (see Repo mechanics). Up to 0.0.2 it shipped as the throwaway spike, id `notebook-spike`, which measured whether the plugin approach holds up on the iPad; the spike's view and recorder live on as the **ink debug view** (described further down).
+
+### The ink editor (issues #3, #4, #19, #5, #6, #7, #8 merged)
+
+- **Notes:** a markdown index with `ink: 1`, `paper`, `template` frontmatter plus one standard image embed per page, and a folder of page SVGs (`p-` + 6 hex). Format `notebook-ink/1` in `src/format/` (see issue #3 and the module headers). Pages render in Obsidian reading view, on GitHub and in browsers without the plugin (owner-verified on the iPad, 0.2.0).
+- **Ink view** (`src/ink/`): markdown files with `ink:` frontmatter open in it through a reversible patch of `WorkspaceLeaf.prototype.setViewState`; "Open as markdown" switches back. "New ink note" (ribbon pencil, command) asks for a name, paper and template. Pages stack centred at fitted width; one bitmap per page, only pages near the viewport rendered, page metadata parsed lazily (a 20-page, 6,000-stroke note opens in about 120 ms in Chromium). Autosave 2 s after the last change, at once on close or hide, through the vault API; changes on disk reload the file or keep unsaved work with a notice.
+- **Templates:** blank, lined (college/wide, optional margin), grid (5 mm, ¼ in), dots (5 mm), per page, changeable for one page or all; default template and paper in settings.
+- **Pen:** uniform nib (default, pressure-independent) and pressure nib (square-root curve), same perfect-freehand outline live and saved, predicted tail, once-per-frame drawing with a bounded per-frame cost. WebKit repeats already-delivered samples in `getCoalescedEvents()`; the pen drops samples older than the last one taken. Stylus drags never scroll the view; fingers scroll natively.
+- **Highlighter:** constant width, flat ends, own colours (5) and sizes (2), drawn under the ink, composited once at 0.4 so crossings don't darken.
+- **Stroke eraser:** whole strokes, 2 sizes, a 32 px grid spatial index per page (built lazily), one drag = one undo step.
+- **Undo/redo:** per-note history of strokes, erasing, template changes and added pages; strip buttons, commands with Mod+Z / Mod+Shift+Z, two-finger tap undo and three-finger tap redo.
+- **Provisional strip** (tool, nib, colours, sizes, undo/redo) until the toolbar (#10). Stats: `view.stats` and the command "Toggle ink stats overlay".
+- **Known gaps, filed:** #26 renaming a note orphans its page folder; #32 pen polish (rough edges, post-stroke refit, strokes that run off the page break); #9 zoom and finger scrolling and #10 toolbar are next in M1.
+
+### The ink debug view (the spike)
+
+Command "Open ink debug view". It still writes only under `_spike/` in the vault.
 
 - **View:** command "Open ink debug view" (the ribbon icon and the "Open pen and audio test" command are gone). The command "Start or stop test recording" is kept.
   - Graph-paper canvas with Clear, Save page and Record buttons, and an on-screen readout.
@@ -113,6 +129,10 @@ Backgrounding (protocol steps 4–6, 2026-09-26 8:20 PM; the lock and switch wer
 - **Force quit** (`rec-20260926-202140`): recovery ran on the next launch. The log was marked "recovered after unclean exit: audio was appended live, nothing to rebuild". The owner reports the file **plays**, roughly like the others, so appending chunks live survives a force quit with no rebuild step needed.
 - **Implication:** in Obsidian's web view, recording only works while Obsidian is in front and the screen is on. The wake lock stops auto-lock, but a manual lock or an app switch drops audio for as long as it lasts. Background recording would need a native app, which is out given the constraints. So either live with foreground-only recording (make it obvious that it's paused while hidden, restart on return, and log the gaps), or record long sessions in Voice Memos and import the file.
 
+**Editor releases on the iPad (owner):**
+- **0.2.0 (2026-09-26):** create, write, close and reopen work; reading view with the plugin disabled shows the pages; a force quit 3 s after writing loses nothing; Pencil drags on a page don't scroll and fingers scroll. Bug: a stroke running off the page's right edge scrolled (fixed in 0.3.0).
+- **0.3.0 (2026-09-27):** pen "acceptable but not quite at Notability's level": edges slightly rough, Notability applies a subtle refit as the stroke settles, and a stroke that goes too far off the page breaks (has to lift and put down again). All tracked in #32. The edge-scroll fix works. The stats overlay is reached through the command palette ("Toggle ink stats overlay").
+
 In headless Chromium, through `test/run_spike_test.py`:
 - Synthetic pen strokes, a finger touch, a tap and a real mouse stroke all draw.
 - The saved SVG renders in light and dark, and stroke end caps round outward (checked zoomed in).
@@ -135,9 +155,9 @@ In headless Chromium, through `test/run_spike_test.py`:
 1. **Read the iPad results.** Done: the basics work, so building continues. Ink and foreground audio numbers are recorded (see Verified so far); screen lock, app switching and force-quit recovery still need testing on the iPad (protocol steps 4–6).
 2. **GitHub API sync, as its own plugin and repo:** the first real feature, because everything else depends on it. It lives in `zcsop1206/obsidian-github-sync` (locally `Documents/obsidian-github-sync`), whose `CONTEXT.md` holds the design and status. It only needs to run on mobile, since the laptop uses plain git.
 3. **Ink editor, meant to replace Notability on the iPad.** The GitHub issues are the spec; each has Goal, Scope, Out of scope, Acceptance criteria and Depends on. Build exactly what an issue scopes; file or edit an issue before building anything else. Milestone order (owner, 2026-09-26):
-   - **M1 Editor foundation:** #2 build setup and rename (done), #3 file format, #19 page templates, #4 ink view, #5 pen, #6 highlighter, #7 stroke eraser, #8 undo/redo, #9 pinch zoom and finger scrolling, #10 toolbar and presets. Order from the dependencies: #2 → #3 → #4 and #19 → #5 → #6, #7, #8 (parallel) → #9 → #10.
-   - **M2 Lasso** (#11), then **M3 Images** (#12), then **M4 PDF** (#14 import and write on a PDF, #21 PDF page templates), then **M5 Ruler** (#20).
-   - **Backlog, not started:** #1 audio stitching, #15 partial eraser, #16 shape recognition, #17 page management, #18 PDF export. **Not wanted:** #13 text boxes (closed), audio synced to ink.
+   - **M1 Editor foundation:** done: #2 build setup, #3 file format, #4 ink view, #19 templates, #5 pen, #6 highlighter, #7 stroke eraser, #8 undo/redo. Next: #9 pinch zoom and finger scrolling → #10 toolbar and presets → #26 rename keeps pages → #32 pen polish (owner: low priority). Released 0.1.0 (#2), 0.2.0 (#4), 0.3.0 (#19, #5), 0.4.0 (#6, #7, #8).
+   - **M2 Lasso** (#11), then **M3 Images** (#12), then **M4 PDF** (#14 import and write on a PDF, #17 page management, #21 PDF page templates, #27 sized templates such as sticky notes with a copy-embed command), then **M5 Ruler** (#20).
+   - **Backlog, not started:** #1 audio stitching, #15 partial eraser, #16 shape recognition, #18 PDF export, #23 more pen and highlighter types, #28 always a blank page after the last. **Not wanted:** #13 text boxes (closed), audio synced to ink.
    - Releases go out for iPad checks after #4 and #5 and at the end of each milestone; an issue closes only when its iPad criteria are met too.
 4. **Audio:** turn the spike recorder into a feature, shaped by what the iPad test shows about backgrounding: recording is foreground-only; a lock or app switch splits it into segments.
    - `meta.json` now records each segment's `startMs` and, when known, `audioEndMs`, so segments can be placed on one timeline.
