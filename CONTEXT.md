@@ -56,11 +56,11 @@ The end state: every device (iPad and laptop now, others later) holds a copy of 
 - **Links:** Obsidian wikilinks turned off, standard markdown links used, so the site needs no link-rewriting step.
 - **Where the vault lives:** not decided. The Working Copy link assumption (vault = repo root) no longer applies. With API sync, the plugin could sync a vault to any repo and path. The goal of each device holding the portfolio and updating it points toward syncing with the portfolio repo itself (the whole repo, or a notebook folder inside it) rather than a separate notebook repo the site pulls in at build time, but this isn't settled.
 
-## What exists now (0.0.2, the spike)
+## What exists now (the spike, kept as Notebook's ink debug view)
 
-A throwaway plugin, id `notebook-spike`, to measure whether the plugin approach holds up on the iPad before building the real thing. Plain CommonJS in `main.js`, no build step. It writes only under `_spike/` in the vault.
+The plugin is now **Notebook**, id `notebook`: a TypeScript project under `src/`, built to `main.js` by esbuild (see Repo mechanics). Up to 0.0.2 it shipped as the throwaway spike, id `notebook-spike` ("Notebook spike"), which measured whether the plugin approach holds up on the iPad. There is no editor yet. The spike's view and recorder moved over unchanged as the **ink debug view**, described below. It still writes only under `_spike/` in the vault.
 
-- **View:** ribbon pencil icon or command "Open pen and audio test".
+- **View:** command "Open ink debug view" (the ribbon icon and the "Open pen and audio test" command are gone). The command "Start or stop test recording" is kept.
   - Graph-paper canvas with Clear, Save page and Record buttons, and an on-screen readout.
   - The readout shows: last pointer type, pressure, tilt, altitude and azimuth; median move events/s and samples/s over the last 10 strokes; median handler delay; whether coalesced and predicted events exist; cancelled strokes, ignored finger touches and pen hover events.
   - Handler delay is `performance.now() - event.timeStamp`: the OS-to-JavaScript part only, not pen-to-glass latency.
@@ -117,7 +117,7 @@ In headless Chromium, through `test/run_spike_test.py`:
 
 ### iPad test protocol (owner ran this; rerun after changes that affect ink or audio)
 
-1. Install via BRAT (`zcsop1206/obsidian-notebook`), enable Notebook spike.
+1. Install via BRAT (`zcsop1206/obsidian-notebook`), enable Notebook. (Up to 0.0.2 this was "Notebook spike"; the new id installs as a separate plugin, so remove Notebook spike.) The pen and audio test is now the ink debug view: command "Open ink debug view".
 2. Write a paragraph fast; write with the palm resting on the screen; Save page.
 3. Record 2 min, stop, play back.
 4. Record, lock the screen 30 s, unlock, stop.
@@ -144,7 +144,13 @@ In headless Chromium, through `test/run_spike_test.py`:
 
 ## Repo mechanics
 
-- **Files:** `main.js`, `manifest.json`, `styles.css`, `versions.json` at the root. No build step yet; add esbuild + TypeScript when the code outgrows one file. Typings: `https://raw.githubusercontent.com/obsidianmd/obsidian-api/master/obsidian.d.ts`.
-- **Release:** bump `version` in `manifest.json` and add it to `versions.json`, commit, then push a tag equal to the version. `.github/workflows/release.yml` checks the tag matches the manifest and attaches the three files to a release. BRAT picks it up.
-- **Test:** `python test/run_spike_test.py` needs Python Playwright with its bundled Chromium. It serves the repo root on port 8765 and loads `test/harness.html`. The harness provides a mock `obsidian` module: `Plugin`, `ItemView`, `Notice`, an in-memory `vault.adapter` with the `appendBinary` path, and Obsidian's DOM helpers. Chromium runs with a fake mic. Screenshots and the exported SVG go to `test/out/` (gitignored). The mock covers only the API surface the spike uses; extend it as the plugin grows.
+- **Files:** TypeScript source under `src/`; `manifest.json` (id `notebook`, name "Notebook"), `styles.css` and `versions.json` at the root. `main.js` is a build output: gitignored, attached to releases.
+  - `src/main.ts`: the plugin class `NotebookPlugin` (`export default`). Registers the debug view, the commands "Open ink debug view" (`open-debug-view`) and "Start or stop test recording" (`toggle-recording`), and recording recovery on layout ready. Exposes `recorder` and `openDebugView()`, which the test drives.
+  - `src/debug/view.ts`: the ink debug view (`DebugView`, view type `notebook-debug`, `nbspike-*` CSS classes).
+  - `src/debug/recorder.ts`: the test recorder. `src/debug/ink-svg.ts`: the SVG ink writer (`outline`, `toSvg`, format `notebook-ink/0`). `src/debug/util.ts`: shared helpers and the write queue.
+- **Build:** `npm install`, then `npm run build` (runs `tsc -noEmit -skipLibCheck`, then `esbuild.config.mjs production`) or `npm run dev` (watches, inline source map). esbuild bundles `src/main.ts` to `main.js` at the root: cjs, target es2018, not minified. `obsidian`, `electron`, `@codemirror/*` and `@lezer/*` are external. Node built-ins are deliberately not external, so importing one fails the build: the plugin runs in the iOS web view.
+  - TypeScript is strict. Types come from the `obsidian` npm package. `skipLibCheck` is needed because `obsidian.d.ts` itself fails to type-check (Menu, Modal and PopoverSuggest don't implement `onHistoryBack` from HistoryHandler).
+  - Dependencies are limited to `obsidian`, `typescript`, `esbuild` and `perfect-freehand` (MIT, for stroke outlines). Ask before adding anything else. `package-lock.json` is committed.
+- **Release:** bump `version` in `manifest.json` and add it to `versions.json`, commit, then push a tag equal to the version. `.github/workflows/release.yml` runs `npm ci` and `npm run build`, checks the tag matches the manifest, and attaches `main.js`, `manifest.json` and `styles.css` to a release. BRAT picks it up.
+- **Test:** `npm test` builds, then runs `python test/run_spike_test.py`, which needs Python Playwright with its bundled Chromium. It serves the repo root on port 8765 and loads the built `main.js` into `test/harness.html`, taking the plugin class from `module.exports.default`. The harness provides a mock `obsidian` module: `Plugin`, `ItemView`, `Notice`, an in-memory `vault.adapter` with the `appendBinary` path, and Obsidian's DOM helpers. Chromium runs with a fake mic. Each check prints PASS or FAIL, and any failure exits 1: typed ink strokes, the SVG parsing with its metadata, audio A (two decodable segments), audio C (return and watchdog restarts), audio B (recovery), and no page errors. Screenshots and the exported SVG go to `test/out/` (gitignored). The mock covers only the API surface the plugin uses; extend it as the plugin grows.
 - **Obsidian API notes:** `DataAdapter.appendBinary` exists only from 1.12.3, so feature-detect it. Views use `ItemView`, opened with `workspace.getLeaf('tab').setViewState(...)`. On mobile, `Platform.isIosApp` and friends are available.
