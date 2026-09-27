@@ -1,3 +1,6 @@
 node_modules/
 .DS_Store
 test/out/
+
+# Built by npm run build
+main.js

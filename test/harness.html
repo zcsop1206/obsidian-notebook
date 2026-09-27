@@ -63,7 +63,8 @@ window.loadPlugin = async () => {
   const code = await (await fetch('../main.js?' + Date.now())).text();
   const module = { exports: {} };
   new Function('module', 'exports', 'require', code)(module, module.exports, m => { if (m !== 'obsidian') throw new Error(m); return window.obsidian; });
-  const P = module.exports;
+  // esbuild's cjs output puts `export default` on module.exports.default, as Obsidian expects.
+  const P = module.exports.default ?? module.exports;
   const p = new P();
   await p.onload();
   return p;
