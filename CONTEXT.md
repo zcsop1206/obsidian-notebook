@@ -115,7 +115,7 @@ In headless Chromium, through `test/run_spike_test.py`:
 
 ## Next steps
 
-1. **Read the iPad results.** Done: the basics work, so building continues. Still record the measured numbers (see Verified so far), since they shape the ink and audio work.
+1. **Read the iPad results.** Done: the basics work, so building continues. Ink numbers are recorded (see Verified so far); the audio results still need a recording stopped cleanly on the iPad.
 2. **GitHub API sync, as its own plugin and repo:** the first real feature, because everything else depends on it. It lives in `zcsop1206/obsidian-github-sync` (locally `Documents/obsidian-github-sync`), whose `CONTEXT.md` holds the design and status. It only needs to run on mobile, since the laptop uses plain git.
 3. **Ink:**
    - The real page view: continuous vertical scroll, fixed page width, paper templates.
