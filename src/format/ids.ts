@@ -47,3 +47,13 @@ export function newPageId(taken: Iterable<string>, random: RandomSource = crypto
 export function newStrokeId(taken: Iterable<string>, random: RandomSource = cryptoRandom): string {
   return unique(() => randomHex(8, random), taken);
 }
+
+/** An image's id on its page (#12): `i-` and 6 lowercase hex characters, e.g. `i-3b9f0e`. */
+export const IMAGE_ID_RE = /^i-[0-9a-f]{6}$/;
+
+export const isImageId = (s: string) => IMAGE_ID_RE.test(s);
+
+/** A new image id that isn't in `taken` (the ids of the page's other images). */
+export function newImageId(taken: Iterable<string>, random: RandomSource = cryptoRandom): string {
+  return unique(() => 'i-' + randomHex(6, random), taken);
+}

@@ -15,7 +15,7 @@
 //
 // The `fill` kind (#27) is a solid background of a fixed colour, the same in light and dark mode
 // (a sticky note's pale yellow). Like a pdf page, its paper doesn't follow dark mode, so default
-// ink on it stays dark in both modes (`fixedPaper`). Built-in entries may carry a page `size`
+// ink on it stays dark in both modes (`fixedPaper`, which also covers the `image` kind of #12, see ImageTemplate). Built-in entries may carry a page `size`
 // (the sticky note, the index card): a note or page made from one gets that size.
 //
 // Every template has a reversible name (`lined-college-margin`), used by the note's
@@ -73,10 +73,21 @@ export interface FillTemplate {
   color: string;
 }
 
+/**
+ * An image inserted as a whole page (#12): like a pdf page, the image is the paper (white in
+ * dark mode too) and its bytes are stored once, in the drawing's template layer; the metadata
+ * holds only the kind. No reversible name (templateName gives `image`).
+ */
+export interface ImageTemplate {
+  kind: 'image';
+  /** `data:image/jpeg;base64,…` (or png), or '' if it's missing. */
+  image: string;
+}
+
 /** A page's template, discriminated by `kind`. Extend this union with new kinds. */
-export type Template = BlankTemplate | LinedTemplate | GridTemplate | DotsTemplate | PdfTemplate | FillTemplate;
-/** The kinds with a default (not `pdf` or `fill`, which are chosen through named templates). */
-export type TemplateKind = Exclude<Template['kind'], 'pdf' | 'fill'>;
+export type Template = BlankTemplate | LinedTemplate | GridTemplate | DotsTemplate | PdfTemplate | FillTemplate | ImageTemplate;
+/** The kinds with a default (not `pdf`, `fill` or `image`, which are chosen otherwise). */
+export type TemplateKind = Exclude<Template['kind'], 'pdf' | 'fill' | 'image'>;
 
 export const TEMPLATE_KINDS: readonly TemplateKind[] = ['blank', 'lined', 'grid', 'dots'];
 
@@ -155,6 +166,13 @@ export function parseTemplate(value: unknown): Template {
       }
       return { kind: 'pdf', source: v.source, page: v.page, image };
     }
+    case 'image': {
+      const image = v.image === undefined ? '' : v.image;
+      if (typeof image !== 'string' || (image !== '' && !IMAGE_RE.test(image))) {
+        throw new Error(`Invalid page template: image (expected a base64 JPEG or PNG data URL, or '')`);
+      }
+      return { kind: 'image', image };
+    }
   }
   return unknownKind(v.kind);
 }
@@ -165,7 +183,7 @@ const FILL_RE = /^#[0-9a-f]{6}$/;
  * Whether the template draws its own paper, the same in both modes (pdf and fill): default ink
  * on such a page is dark in dark mode too, in the file and in the editor.
  */
-export const fixedPaper = (template: Template): boolean => template.kind === 'pdf' || template.kind === 'fill';
+export const fixedPaper = (template: Template): boolean => template.kind === 'pdf' || template.kind === 'fill' || template.kind === 'image';
 
 /** Whether two templates are the same (pdf templates by source and page; the image isn't compared). */
 export const sameTemplate = (a: Template, b: Template): boolean =>
@@ -184,7 +202,8 @@ function isPdfSource(s: unknown): s is string {
  * The template as the page's metadata stores it: a pdf template without its image (which is
  * stored once, in the drawing). Other kinds unchanged.
  */
-export function metadataTemplate(template: Template): Omit<PdfTemplate, 'image'> | Exclude<Template, PdfTemplate> {
+export function metadataTemplate(template: Template): Omit<PdfTemplate, 'image'> | Omit<ImageTemplate, 'image'> | Exclude<Template, PdfTemplate | ImageTemplate> {
+  if (template.kind === 'image') return { kind: 'image' };
   if (template.kind !== 'pdf') return template;
   return { kind: 'pdf', source: template.source, page: template.page };
 }
@@ -226,6 +245,9 @@ export const BUILT_IN_TEMPLATES: readonly BuiltInTemplate[] = Object.freeze([
 /** The fixed name of every pdf template. Not reversible: parseTemplateName rejects it. */
 export const PDF_TEMPLATE_NAME = 'pdf';
 
+/** The fixed name of every image template (#12). Not reversible, like PDF_TEMPLATE_NAME. */
+export const IMAGE_TEMPLATE_NAME = 'image';
+
 /**
  * The name of a template, e.g. `grid-quarter-inch`. The inverse of parseTemplateName, except
  * for pdf templates, which all have the name `pdf` (PDF_TEMPLATE_NAME) and can't be parsed back.
@@ -234,6 +256,7 @@ export function templateName(template: Template): string {
   const t = parseTemplate(template);
   switch (t.kind) {
     case 'pdf': return PDF_TEMPLATE_NAME;
+    case 'image': return IMAGE_TEMPLATE_NAME;
     case 'blank': return 'blank';
     case 'lined': return `lined-${t.rule}${t.margin ? '-margin' : ''}`;
     case 'grid': return t.spacing === '5mm' ? 'grid-5mm' : 'grid-quarter-inch';
@@ -268,6 +291,7 @@ export function parseTemplateName(name: string): Template {
 /** The menu label of a template, e.g. "Grid, 5 mm". */
 export function templateLabel(template: Template): string {
   if (template.kind === 'pdf') return `PDF page ${template.page}`;
+  if (template.kind === 'image') return 'Image';
   const name = templateName(template);
   return BUILT_IN_TEMPLATES.find(b => b.name === name)?.label ?? `Colour ${(template as FillTemplate).color}`;
 }
@@ -333,6 +357,12 @@ export function renderTemplate(template: Template, size: Size): string[] {
       // The page image, stretched to the page (its pixel size rounds a little differently).
       if (!template.image) return [];
       if (!IMAGE_RE.test(template.image)) throw new Error('Invalid page template: pdf image is not a base64 data URL');
+      return [`<image x="0" y="0" width="${w}" height="${h}" preserveAspectRatio="none" href="${template.image}"/>`];
+    }
+    case 'image': {
+      // The image fills the page, which was sized to its aspect (#12).
+      if (!template.image) return [];
+      if (!IMAGE_RE.test(template.image)) throw new Error('Invalid page template: image is not a base64 data URL');
       return [`<image x="0" y="0" width="${w}" height="${h}" preserveAspectRatio="none" href="${template.image}"/>`];
     }
   }
