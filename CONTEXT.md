@@ -98,9 +98,12 @@ Audio numbers, from `_spike/rec-20260926-201500/` (a 15 s recording in the foreg
 - Mic "iPad Microphone" at 48 kHz, echo cancellation on. Channel count, noise suppression and auto gain aren't reported.
 - Screen wake lock: allowed, held while recording and released on stop.
 
-Still unknown, because this recording stayed in the foreground (protocol steps 4–6):
-- what happens to the mic on screen lock and app switch;
-- whether a recording cut off by a force quit plays after recovery.
+Backgrounding (protocol steps 4–6, 2026-09-26 8:20 PM; the lock and switch were short, 3 s and 9 s, not 30 s):
+- **iOS cuts the mic whenever Obsidian isn't visible.** On both screen lock (`rec-20260926-202056`) and app switch (`rec-20260926-202120`), the app went hidden and the mic track was muted at the same moment. The recorder stayed in the "recording" state with no error, but delivered no chunks until the app came back. The gaps were 5.7 s and 12.1 s.
+- **Coming back resumes by itself.** The mic unmuted, the page resumed and the wake lock was reacquired, all within the same second. The same segment carried on, with no reopen or new segment needed.
+- **Audio is lost while hidden:** 83 kB for 14 s and 36 kB for 16 s, against 181 kB for 15 s in the foreground. Still unknown: whether the file has silence in the gap or simply skips it, which changes where timestamps land. That needs the `.m4a` files, which the sync plugin ignores by default.
+- **Force quit** (`rec-20260926-202140`): recovery ran on the next launch. The log was marked "recovered after unclean exit: audio was appended live, nothing to rebuild". Still unknown: whether that truncated `.m4a` plays. An MP4 whose index (`moov`) is written only at the end won't play; a fragmented one plays up to the last fragment.
+- **Implication:** in Obsidian's web view, recording only works while Obsidian is in front and the screen is on. The wake lock stops auto-lock, but a manual lock or an app switch drops audio for as long as it lasts. Background recording would need a native app, which is out given the constraints. So either live with foreground-only recording (show that it's paused while hidden, and log the gaps), or record long sessions in Voice Memos and import the file.
 
 In headless Chromium, through `test/run_spike_test.py`:
 - Synthetic pen strokes, a finger touch, a tap and a real mouse stroke all draw.
