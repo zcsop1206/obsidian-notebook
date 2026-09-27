@@ -20,7 +20,7 @@ import {
 import { DEFAULT_ERASER, ERASER_SIZES, nextEraserSize, withEraser, type EraserSettings } from './pen';
 import { layoutPages, MARGIN, mostVisiblePage, pageAtY, pagesInBand, type Layout } from './layout';
 import { anchorAt, clampZoom, navStatsLines, Navigator, newNavStats, scrollToKeep, zoomStep, type NavStats } from './navigate';
-import { currentTheme, PageBitmap, releaseScratch, strokeColor, TemplateImages, type Theme } from './renderer';
+import { currentTheme, PageBitmap, releaseScratch, strokeColor, TemplateImages, warmOutlines, type Theme } from './renderer';
 import { SpatialIndex } from './spatial';
 import { NoteStore, type NoteFiles, type PageSlot, type TemplatesBefore } from './store';
 import { VIEW_TYPE_INK } from './takeover';
@@ -28,6 +28,10 @@ import { TemplateChooser } from './template-chooser';
 
 /** How long the view waits after a resize before redrawing bitmaps at the new size. */
 const RESIZE_DELAY = 150;
+/** Time per frame for computing the outlines of a page about to be drawn, in ms. */
+const PUMP_BUDGET = 4;
+/** Pen strokes the pump draws into a bitmap per frame. */
+const PUMP_STROKES = 100;
 
 /** Counters for tests and debugging. */
 export interface InkStats {
@@ -53,6 +57,11 @@ interface PageView {
   bitmap: PageBitmap | null;
   /** The page's strokes for the eraser: built when the eraser first touches the page (#7). */
   spatial?: SpatialIndex | null;
+  /**
+   * While the pump draws the bitmap over several frames (#9): the index of the next stroke to
+   * draw. Null or absent when the bitmap is complete.
+   */
+  pending?: number | null;
 }
 
 /** NoteStore's file access through the vault API, so Obsidian's embeds and caches follow. */
@@ -466,26 +475,66 @@ export class InkView extends FileView {
     this.pages.forEach((pv, i) => {
       if (!near.has(i)) this.dropBitmap(pv);
     });
-    for (const i of visible) if (!this.pages[i].bitmap) this.renderPage(this.pages[i]);
+    for (const i of visible) {
+      const pv = this.pages[i];
+      if (!pv.bitmap || pv.pending != null) this.renderPage(pv);
+    }
     this.updateStats();
     this.pump();
   }
 
+  /**
+   * Draws the pages near the viewport, nearest first. So that a page coming into view during a
+   * pan doesn't cost a long frame (#9), the work is spread over frames: a page not yet parsed is
+   * parsed in a frame of its own, then its stroke outlines are computed PUMP_BUDGET ms per
+   * frame, then it's drawn PUMP_STROKES strokes per frame (each frame then rasterises only
+   * those). A page that comes into view before it's done is finished at once by update().
+   */
   private pump() {
     if (this.pumpFrame) return;
     this.pumpFrame = requestAnimationFrame(() => {
+      const t0 = performance.now();
       this.pumpFrame = 0;
       if (!this.store || !this.layout || this.nav.previewing) return;
       const { near, visible } = this.band();
       const mid = visible.length ? (visible[0] + visible[visible.length - 1]) / 2 : 0;
       const next = [...near]
-        .filter(i => !this.pages[i].bitmap && !this.pages[i].slot.error)
+        .filter(i => (!this.pages[i].bitmap || this.pages[i].pending != null) && !this.pages[i].slot.error)
         .sort((a, b) => Math.abs(a - mid) - Math.abs(b - mid))[0];
       if (next === undefined) return;
-      this.renderPage(this.pages[next]);
+      const pv = this.pages[next], parsed = !!pv.slot.page, page = this.store.page(pv.slot);
+      if (page && (!parsed || !warmOutlines(page, t0 + PUMP_BUDGET))) {
+        this.pump(); // the rest of the outlines next frame
+        return;
+      }
+      if (page) this.renderStep(pv, page);
+      else this.renderPage(pv); // shows the error
       this.updateStats();
       this.pump();
     });
+  }
+
+  /** Draws the next PUMP_STROKES strokes of a page's bitmap, starting it if needed. */
+  private renderStep(pv: PageView, page: Page) {
+    if (pv.pending == null || !pv.bitmap) {
+      if (!this.bitmapFor(pv)) return;
+      pv.bitmap!.renderBase(page, this.theme, this.template(pv, page));
+      pv.pending = 0;
+    }
+    const next = pv.bitmap!.renderPen(page, this.theme, pv.pending!, PUMP_STROKES);
+    pv.pending = next < page.strokes.length ? next : null;
+  }
+
+  /** Gives the page a bitmap of its current size (keeping one that has it); false if it has no box. */
+  private bitmapFor(pv: PageView): boolean {
+    const box = this.layout?.pages[this.pages.indexOf(pv)];
+    if (!box) return false;
+    if (pv.bitmap && (pv.bitmap.cssWidth !== box.width || pv.bitmap.cssHeight !== box.height)) this.dropBitmap(pv);
+    if (!pv.bitmap) {
+      pv.bitmap = new PageBitmap(box.width, box.height);
+      pv.el.insertBefore(pv.bitmap.canvas, pv.el.firstChild);
+    }
+    return true;
   }
 
   /** Draws a page's bitmap from scratch, creating it at the page's current size if needed. */
@@ -497,15 +546,10 @@ export class InkView extends FileView {
       this.showError(pv);
       return;
     }
-    const box = layout.pages[this.pages.indexOf(pv)];
-    if (!box) return;
-    if (pv.bitmap && (pv.bitmap.cssWidth !== box.width || pv.bitmap.cssHeight !== box.height)) this.dropBitmap(pv);
-    if (!pv.bitmap) {
-      pv.bitmap = new PageBitmap(box.width, box.height);
-      pv.el.insertBefore(pv.bitmap.canvas, pv.el.firstChild);
-    }
+    if (!this.bitmapFor(pv)) return;
     const t0 = performance.now();
-    pv.bitmap.render(page, this.theme, this.template(pv, page));
+    pv.bitmap!.render(page, this.theme, this.template(pv, page));
+    pv.pending = null;
     this.stats.lastRenderMs = performance.now() - t0;
   }
 
@@ -518,6 +562,7 @@ export class InkView extends FileView {
   }
 
   private dropBitmap(pv: PageView) {
+    pv.pending = null;
     if (!pv.bitmap) return;
     pv.bitmap.release();
     pv.bitmap = null;
@@ -556,7 +601,7 @@ export class InkView extends FileView {
     const stroke = { id: newStrokeId(page.strokes.map(s => s.id)), ...drawn };
     store.addStroke(pv.slot, stroke);
     pv.spatial?.add(stroke);
-    if (pv.bitmap) pv.bitmap.addStroke(page, stroke, this.theme, this.template(pv, page));
+    if (pv.bitmap && pv.pending == null) pv.bitmap.addStroke(page, stroke, this.theme, this.template(pv, page));
     else this.renderPage(pv);
     this.updateStats();
     this.recordStrokes('Add stroke', pv.slot.id, [{ index: page.strokes.length - 1, stroke }], true);
