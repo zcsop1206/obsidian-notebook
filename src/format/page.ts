@@ -10,7 +10,7 @@
 // its true shape, and the drawing is clipped by the page (the SVG's viewBox, the view's canvases).
 import { isPageId, isStrokeId } from './ids';
 import { fmt1, strokePath } from './outline';
-import { IMAGE_RE, metadataTemplate, parseTemplate, renderTemplate, type Size, type Template } from './template';
+import { fixedPaper, IMAGE_RE, metadataTemplate, parseTemplate, renderTemplate, type Size, type Template } from './template';
 
 export type { Size } from './template';
 
@@ -22,6 +22,43 @@ export const A4: Readonly<Size> = Object.freeze({ width: 794, height: 1123 });
 
 export type Paper = 'letter' | 'a4';
 export const PAPER_SIZES: Readonly<Record<Paper, Readonly<Size>>> = { letter: LETTER, a4: A4 };
+
+/**
+ * A note's paper (#27): Letter, A4, or a custom size `<width>x<height>` in CSS px to 0.1 px
+ * (a sticky note is `288x288`), as the index's `paper:` stores it.
+ */
+export type NotePaper = Paper | `${number}x${number}`;
+
+/** The largest side of a custom paper, in px (about 200 in). */
+export const MAX_PAPER_SIDE = 20000;
+
+/** A custom paper from a size: `288x288`, sides rounded to 0.1 px. */
+export function sizePaper(size: Size): NotePaper {
+  return `${fmt1(roundXY(size.width))}x${fmt1(roundXY(size.height))}` as NotePaper;
+}
+
+/**
+ * The paper a `paper:` value names, in canonical form (lowercase, custom sizes to 0.1 px), or
+ * null if it's not letter, a4 or `<width>x<height>` with sides from 0.1 to MAX_PAPER_SIDE px.
+ */
+export function parsePaper(value: string): NotePaper | null {
+  const v = value.trim().toLowerCase();
+  if (v === 'letter' || v === 'a4') return v;
+  const m = /^(\d+(?:\.\d+)?)x(\d+(?:\.\d+)?)$/.exec(v);
+  if (!m) return null;
+  const width = roundXY(Number(m[1])), height = roundXY(Number(m[2]));
+  if (!(width > 0 && height > 0 && width <= MAX_PAPER_SIDE && height <= MAX_PAPER_SIDE)) return null;
+  return sizePaper({ width, height });
+}
+
+/** A paper's page size (a fresh object). Throws on an invalid paper. */
+export function paperSize(paper: NotePaper): Size {
+  if (paper === 'letter' || paper === 'a4') return { ...PAPER_SIZES[paper] };
+  const p = parsePaper(paper);
+  if (!p || p === 'letter' || p === 'a4') throw new Error(`Unknown paper "${paper}"`);
+  const [w, h] = p.split('x').map(Number);
+  return { width: w, height: h };
+}
 
 /** The default ink colour. It's drawn near-black in light mode and near-white in dark mode. */
 export const DEFAULT_INK = '#000000';
@@ -170,7 +207,10 @@ const STYLE =
   '<style>.i{fill:#1f1f1f}.t{stroke:#c9c9c9}' +
   '@media (prefers-color-scheme:dark){.i{fill:#e6e3de}.t{stroke:#3c3c3c}}</style>';
 
-/** For pdf pages (#14): the paper is the PDF's own, white in both modes, so the ink doesn't flip. */
+/**
+ * For pdf pages (#14) and fill pages (#27): the paper is the PDF's own or a fixed colour, the
+ * same in both modes, so the ink doesn't flip.
+ */
 const PDF_STYLE = '<style>.i{fill:#1f1f1f}.t{stroke:#c9c9c9}</style>';
 
 function layer(id: string, attrs: string, items: string[]): string {
@@ -212,7 +252,7 @@ export function writePage(page: Page): string {
   const w = fmt1(size.width), h = fmt1(size.height);
   return [
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">`,
-    template.kind === 'pdf' ? PDF_STYLE : STYLE,
+    fixedPaper(template) ? PDF_STYLE : STYLE,
     // `]]>` could only occur inside a JSON string, where `>` may be escaped instead.
     `<metadata><![CDATA[${meta.replace(/]]>/g, ']]\\u003e')}]]></metadata>`,
     layer('template', '', renderTemplate(template, size)),

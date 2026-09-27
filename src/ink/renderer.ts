@@ -5,7 +5,7 @@
 // strokes are removed.
 import { DEFAULT_INK, type Page, type Size, type Stroke } from '../format/page';
 import { strokePath } from '../format/outline';
-import { renderTemplate, type PdfTemplate, type Template } from '../format/template';
+import { fixedPaper, renderTemplate, type PdfTemplate, type Template } from '../format/template';
 
 export interface Theme {
   dark: boolean;
@@ -29,7 +29,7 @@ export function currentTheme(): Theme {
  * default ink stays the light theme's near-black in dark mode too, as in its SVG file (#14).
  */
 export function pageTheme(page: Pick<Page, 'template'> | null | undefined, theme: Theme): Theme {
-  return page?.template.kind === 'pdf' && theme.ink !== LIGHT.ink ? { ...theme, ink: LIGHT.ink } : theme;
+  return page && fixedPaper(page.template) && theme.ink !== LIGHT.ink ? { ...theme, ink: LIGHT.ink } : theme; // pdf, fill (#27)
 }
 
 export const strokeColor = (s: Pick<Stroke, 'color'>, theme: Theme) => (s.color === DEFAULT_INK ? theme.ink : s.color);

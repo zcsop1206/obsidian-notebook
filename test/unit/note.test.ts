@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { isInkNote, newNote, readNote, writeNote } from '../../src/format/note';
+import { isInkNote, markdownEmbed, newNote, readNote, writeNote } from '../../src/format/note';
+import { A4, paperSize, parsePaper, sizePaper } from '../../src/format/page';
 
 const FRONT = '---\nink: 1\npaper: letter\ntemplate: blank\n---\n';
 
@@ -153,4 +154,37 @@ test('page embeds from a second folder are text; bad folders are rejected', () =
   // Not page embeds (kept as text): a URL, an absolute path, a page next to the note.
   const odd = FRONT + '![](https://x.org/a/p-000001.svg)\n![](/a/p-000002.svg)\n![](p-000003.svg)\n';
   assert.deepEqual(readNote(odd, 'n').pages, []);
+});
+
+// ---- custom paper (#27)
+
+test('custom paper: <width>x<height> in px reads, writes and round-trips; letter and a4 unchanged', () => {
+  const md = '---\nink: 1\npaper: 288x288\ntemplate: sticky-3in\n---\n![](n/p-000001.svg)\n';
+  const note = readNote(md, 'n');
+  assert.equal(note.paper, '288x288');
+  assert.equal(writeNote(note), md);
+  assert.equal(readNote(md.replace('288x288', '480.0X288.04'), 'n').paper, '480x288');
+  assert.equal(readNote(md.replace('288x288', '377.95x377.95'), 'n').paper, '378x378');
+  assert.equal(readNote(md.replace('288x288', 'Letter'), 'n').paper, 'letter');
+  const n = newNote('n', '288x288', 'sticky-3in');
+  n.pages = ['p-000001'];
+  assert.equal(writeNote(n), md);
+  assert.equal(parsePaper('288x288'), '288x288');
+  assert.deepEqual(paperSize('480x288'), { width: 480, height: 288 });
+  assert.deepEqual(paperSize('a4'), A4);
+  assert.equal(sizePaper({ width: 377.95, height: 288 }), '378x288');
+});
+
+test('custom paper: invalid values are rejected', () => {
+  for (const bad of ['0x288', '288', '288x', 'x288', '-1x5', '288x288x1', '1e3x5', '99999x10', '288 x 288']) {
+    assert.equal(parsePaper(bad), null, bad);
+    assert.throws(() => readNote(`---\nink: 1\npaper: ${bad}\n---\n`, 'n'), /Unknown paper/, bad);
+  }
+  assert.throws(() => writeNote({ ...newNote('n'), paper: '288.0x288' as never }), /Unknown paper/);
+  assert.throws(() => writeNote({ ...newNote('n'), paper: 'legal' as never }), /Unknown paper/);
+});
+
+test('markdownEmbed: a vault path as a standard embed, link characters encoded', () => {
+  assert.equal(markdownEmbed('School/lecture/p-abc123.svg'), '![](School/lecture/p-abc123.svg)');
+  assert.equal(markdownEmbed('My notes/Week (3)/p-abc123.svg'), '![](My%20notes/Week%20%283%29/p-abc123.svg)');
 });

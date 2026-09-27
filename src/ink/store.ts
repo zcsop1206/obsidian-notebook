@@ -7,8 +7,8 @@
 import { newPageId } from '../format/ids';
 import { readNote, writeNote, type NoteIndex } from '../format/note';
 import { dirOf, nameOf, rebase, relative, resolve, within } from './paths';
-import { newPage, PAPER_SIZES, readPage, writePage, type Page, type Size, type Stroke } from '../format/page';
-import { parseTemplate, parseTemplateName, templateName, type Template } from '../format/template';
+import { newPage, paperSize, readPage, writePage, type Page, type Size, type Stroke } from '../format/page';
+import { parseTemplate, parseTemplateName, sameTemplate, templateName, templateSize, type Template } from '../format/template';
 
 const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -62,6 +62,18 @@ export interface StoreOptions {
   maxDelay?: number;
   /** Page ids for new pages; defaults to random ones. */
   newId?: (taken: Set<string>) => string;
+  /**
+   * Resolves a `template:` name that isn't built in, such as `pdf:<name>` (#21, a PDF template
+   * from the templates folder): its template and page size, or null if unknown (then blank).
+   */
+  resolveTemplate?: (name: string) => { template: Template; size: Size } | null;
+  /** The `template:` name of a template that has no built-in name (a PDF template), or null. */
+  nameTemplate?: (template: Template) => string | null;
+  /**
+   * Called when a page gets a pdf template (added or changed), with the vault path of the page
+   * folder, so the PDF it refers to can be copied there (#21).
+   */
+  templateUsed?: (template: Template, pageFolder: string) => void;
 }
 
 /** A page's size read from the start of its metadata without parsing the strokes. */
@@ -119,6 +131,7 @@ export class NoteStore {
   private delay: number;
   private maxDelay: number;
   private newId: (taken: Set<string>) => string;
+  private options: StoreOptions;
   /** Pages taken out of the index by removePageFromIndex, for insertPageInIndex (undo, #8). */
   private detached = new Map<string, { slot: PageSlot; dirty: boolean }>();
   /** The pages' folder as a vault path, once loaded (#26: it needn't be next to the note). */
@@ -135,6 +148,7 @@ export class NoteStore {
     this.delay = options.delay ?? SAVE_DELAY;
     this.maxDelay = options.maxDelay ?? MAX_SAVE_DELAY;
     this.newId = options.newId ?? (taken => newPageId(taken));
+    this.options = options;
   }
 
   /** The note's folder with a trailing slash, or '' at the vault root. */
@@ -149,7 +163,21 @@ export class NoteStore {
   }
 
   get paperSize(): Size {
-    return PAPER_SIZES[this.index.paper];
+    return paperSize(this.index.paper);
+  }
+
+  /**
+   * The note's default template for new pages and the size it comes in, if any: a built-in
+   * name (a sized one such as `sticky-3in` has a size, #27), or a name the resolver knows
+   * (`pdf:<name>`, #21). Unknown names give blank with a warning.
+   */
+  defaultTemplate(): { template: Template; size: Size | null } {
+    const name = this.index.template;
+    if (!/^pdf:/.test(name)) return { template: noteTemplate(name), size: templateSize(name) };
+    const r = this.options.resolveTemplate?.(name);
+    if (r) return { template: parseTemplate(r.template), size: { ...r.size } };
+    console.warn('[notebook]', `Unknown template "${name}"; using blank`);
+    return { template: { kind: 'blank' }, size: null };
   }
 
   pagePath(id: string): string {
@@ -245,9 +273,10 @@ export class NoteStore {
     if (!slot || !page) return null;
     const before = page.template;
     const next = parseTemplate(template);
-    if (templateName(next) !== templateName(before)) {
+    if (!sameTemplate(next, before)) {
       page.template = next;
       this.changed(slot);
+      if (next.kind === 'pdf') this.options.templateUsed?.(next, this.folder);
     }
     return before;
   }
@@ -269,7 +298,7 @@ export class NoteStore {
   /** Sets the note's default template for new pages. Returns the `template:` name it had. */
   setNoteTemplate(template: Template): string {
     const before = this.index.template;
-    const name = templateName(template);
+    const name = this.options.nameTemplate?.(template) ?? templateName(template);
     if (name !== before) {
       this.index.template = name;
       this.indexDirty = true;
@@ -279,8 +308,8 @@ export class NoteStore {
   }
 
   /** Appends a page with the note's paper size and the given template, or the note's default. */
-  addPage(template?: Template): PageSlot {
-    return this.insertPage(this.slots.length, template);
+  addPage(template?: Template, size?: Size): PageSlot {
+    return this.insertPage(this.slots.length, template, size);
   }
 
   // ---- changes for undo and redo (#8)
@@ -679,11 +708,15 @@ export class NoteStore {
 
   /**
    * Inserts a new page at `index` (clamped to 0..pages) with the note's paper size and the given
-   * template, or the note's default.
+   * template, or the note's default. `size` overrides the size (#27: a sized template chosen
+   * for this page); the note's default template brings its own size if it has one.
    */
-  insertPage(index: number, template?: Template): PageSlot {
+  insertPage(index: number, template?: Template, size?: Size): PageSlot {
     const id = this.freshId();
-    const page = newPage(id, this.paperSize, template ? parseTemplate(template) : noteTemplate(this.index.template));
+    const def = template ? null : this.defaultTemplate();
+    const t = template ? parseTemplate(template) : def!.template;
+    const page = newPage(id, size ?? def?.size ?? this.paperSize, t);
+    if (t.kind === 'pdf') this.options.templateUsed?.(t, this.folder);
     const slot: PageSlot = { id, path: this.pagePath(id), size: page.size, page, text: null, error: null };
     this.placeSlot(slot, index);
     return slot;
