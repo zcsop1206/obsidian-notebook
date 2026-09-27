@@ -4690,6 +4690,47 @@ try:
         check('shapes: saved as ordinary strokes (the file reads back and writes identically)', r['same'] and r['n'] == r['n1'], r)
         # ======== end of 27. Shapes (#16) ========
 
+        # ======== 27. Autosave on a dense page (#37) ========
+        # A 1,000-stroke page: write one stroke, then record every frame until the autosave has
+        # written the page. The save only outlines and encodes the new stroke (the rest are
+        # cached from drawing the page), so it takes a few ms and no frame around it is long.
+        r = ev("""async () => {
+          const files = ink.largeNote('Dense', 'Page', 1, 1000);
+          dirs.add('Dense'); dirs.add('Dense/Page');
+          for (const [k, v] of Object.entries(files)) fs.set(k, v);
+          await app.workspace.getLeaf(false).openFile(app.vault.getFile('Dense/Page.md'));
+          await T.sleep(800);
+          const path = view.store.slots[0].path, before = fs.get(path);
+          // For comparison, an uncached write of the same page (fresh stroke objects).
+          let t0 = performance.now();
+          ink.writePage(ink.readPage(before));
+          const coldMs = performance.now() - t0;
+          const saves0 = view.stats.saves;
+          await T.stroke(0, T.wave(100, 300));
+          await T.sleep(300);  // the stroke is committed and drawn; the autosave is 2 s after it
+          const frames = [];
+          let last = performance.now(), savedAt = 0;
+          t0 = last;
+          while (performance.now() - t0 < 5000 && (!savedAt || performance.now() - savedAt < 300)) {
+            await T.frame();
+            const now = performance.now();
+            frames.push([Math.round(now - t0), now - last]);
+            last = now;
+            if (!savedAt && view.stats.saves > saves0) savedAt = now;
+          }
+          const slow = frames.filter(f => f[1] > 32);
+          const text = fs.get(path), pg = ink.readPage(text);
+          return { strokes: pg.strokes.length, saved: view.stats.saves > saves0, saveMs: view.stats.saveMs, coldMs,
+                   maxFrame: Math.max(...frames.map(f => f[1])), frames: frames.length, slow, savedAt: Math.round(savedAt - t0), same: ink.writePage(pg) === text };
+        }""")
+        print(f"dense page autosave (1,001 strokes): writePage {r['saveMs']:.1f} ms (uncached {r['coldMs']:.1f} ms), "
+              f"longest frame {r['maxFrame']:.1f} ms over {r['frames']} frames; saved at {r['savedAt']} ms; slow [ms, frame] {r['slow']}")
+        check('dense save: the autosave writes the page with the new stroke, byte-identical to a fresh write',
+              r['saved'] and r['strokes'] == 1001 and r['same'], r)
+        check('dense save: writePage after one new stroke on a 1,000-stroke page takes under 16 ms', r['saveMs'] < 16, r)
+        check('dense save: no frame over 32 ms while the autosave runs', r['maxFrame'] <= 32, r)
+        # ======== end of 27. Autosave on a dense page (#37) ========
+
         # --- unload removes the patch
         r = ev("""async () => {
           p.unload();

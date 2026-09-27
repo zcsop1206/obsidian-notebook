@@ -4,7 +4,7 @@
 // the existing bitmap; the whole page is redrawn only on load, resize, theme change or when
 // strokes are removed. Images placed on the page (#12) are drawn over the template, under the
 // highlighter layer, from decoded <img>s cached per image (ObjectImages).
-import { DEFAULT_INK, type Page, type PageImage, type Size, type Stroke } from '../format/page';
+import { DEFAULT_INK, prepareSave, type Page, type PageImage, type Size, type Stroke } from '../format/page';
 import { strokePathCached } from '../format/outline';
 import { fixedPaper, renderTemplate, type PdfTemplate, type Template } from '../format/template';
 
@@ -47,7 +47,8 @@ export function pixelRatio(cssWidth: number, cssHeight: number, dpr = window.dev
   return area * dpr * dpr > MAX_CANVAS_PIXELS ? Math.sqrt(MAX_CANVAS_PIXELS / area) : dpr;
 }
 
-// Outlines are computed once per stroke object and kept while it lives.
+// Outlines are computed once per stroke object and kept while it lives; the `d` they're made
+// from is cached by strokePathCached, which writePage shares.
 const outlines = new WeakMap<Stroke, Path2D>();
 
 export function strokePath2D(stroke: Stroke): Path2D {
@@ -55,6 +56,8 @@ export function strokePath2D(stroke: Stroke): Path2D {
   if (!p) {
     p = new Path2D(strokePathCached(stroke));
     outlines.set(stroke, p);
+    // And its points as the file stores them, so the next save only encodes new strokes (#37).
+    prepareSave(stroke);
   }
   return p;
 }

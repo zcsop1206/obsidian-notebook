@@ -106,12 +106,39 @@ export interface TemplatesBefore {
 
 /** 32-bit FNV-1a with the length: enough to recognise our own writes without keeping the text. */
 export function fingerprint(text: string): string {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < text.length; i++) {
+  return fnvDone(fnv(0x811c9dc5, text, 0, text.length), text);
+}
+
+function fnv(h: number, text: string, from: number, to: number): number {
+  for (let i = from; i < to; i++) {
     h ^= text.charCodeAt(i);
     h = Math.imul(h, 0x01000193);
   }
-  return (h >>> 0).toString(16) + ':' + text.length;
+  return h;
+}
+
+const fnvDone = (h: number, text: string) => (h >>> 0).toString(16) + ':' + text.length;
+
+/**
+ * Characters fingerprinted per task (a few ms). A dense page's file is megabytes, and
+ * fingerprinting it at once took about 30 ms of the frame the autosave ran in (#37).
+ */
+const FINGERPRINT_CHUNK = 1 << 19;
+
+/** fingerprint(text), computed in FINGERPRINT_CHUNK slices on separate tasks for a long text. */
+export function fingerprintLater(text: string): Promise<string> {
+  if (text.length <= FINGERPRINT_CHUNK) return Promise.resolve(fingerprint(text));
+  return new Promise(resolve => {
+    let h = 0x811c9dc5, at = 0;
+    const step = () => {
+      const to = Math.min(text.length, at + FINGERPRINT_CHUNK);
+      h = fnv(h, text, at, to);
+      at = to;
+      if (at < text.length) setTimeout(step, 0);
+      else resolve(fnvDone(h, text));
+    };
+    setTimeout(step, 0);
+  });
 }
 
 export class NoteStore {
@@ -433,6 +460,9 @@ export class NoteStore {
     }, wait);
   }
 
+  /** How long the last writePage of a flush took, in ms (#37: the view's stats.saveMs). */
+  writeMs = 0;
+
   /** Writes every changed page, then the index if it changed. Resolves when they're written. */
   flush(): Promise<void> {
     if (this.moving) return this.moving.then(() => this.flush());
@@ -445,7 +475,9 @@ export class NoteStore {
       if (!slot || !slot.page) continue;
       let text: string;
       try {
+        const t0 = performance.now();
         text = writePage(slot.page);
+        this.writeMs = performance.now() - t0;
       } catch (e) {
         this.listener.notice(`Couldn't save ${slot.path}: ${errorText(e)}`);
         continue;
@@ -470,9 +502,13 @@ export class NoteStore {
 
   /** Queues a write after any earlier write to the same file. Resolves true if it succeeded. */
   private save(path: string, text: string, onError: () => void): Promise<boolean> {
-    this.remember(path, text); // before writing: the modify event may fire during the write
+    // Remembered before writing: the modify event may fire during the write. A long text's
+    // fingerprint is computed over several tasks first (#37), still ahead of the write.
+    const remembered = text.length > FINGERPRINT_CHUNK
+      ? fingerprintLater(text).then(f => this.rememberPrint(path, f, text))
+      : (this.remember(path, text), null);
     const prev = this.writes.get(path) ?? Promise.resolve();
-    const job = prev.then(() => this.files.write(path, text)).then(
+    const job = (remembered ? Promise.all([prev, remembered]) : prev).then(() => this.files.write(path, text)).then(
       () => {
         this.saves++;
         this.listener.saved(path);
@@ -492,15 +528,27 @@ export class NoteStore {
   }
 
   private remember(path: string, text: string) {
+    this.rememberPrint(path, fingerprint(text), text);
+  }
+
+  /**
+   * The last text written or read per path, so recognising our own write in its modify event
+   * is a string comparison instead of fingerprinting megabytes again (#37).
+   */
+  private lastText = new Map<string, { text: string; f: string }>();
+
+  private rememberPrint(path: string, f: string, text: string) {
     const list = this.known.get(path) ?? [];
-    const f = fingerprint(text);
     if (list[list.length - 1] !== f) list.push(f);
     if (list.length > 4) list.shift();
     this.known.set(path, list);
+    this.lastText.set(path, { text, f });
   }
 
   private isKnown(path: string, text: string): boolean {
-    return (this.known.get(path) ?? []).includes(fingerprint(text));
+    const last = this.lastText.get(path);
+    const f = last && last.text === text ? last.f : fingerprint(text);
+    return (this.known.get(path) ?? []).includes(f);
   }
 
   /** Stops the save timer. Call flush() first; writes already queued still complete. */
