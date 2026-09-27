@@ -3,7 +3,7 @@
 # test/out/view-fixture.js (built by test/build.mjs). Covers creating a note, writing with
 # synthetic pen events, autosave timing, saving when hidden or closed, reopening, changes on
 # disk, adding pages, a 20-page note, the markdown takeover, page templates, and the pen (live
-# and committed outlines, nibs, stylus touches, the pen strip, stats and handler time), and the
+# and committed outlines, nibs, stylus touches, the toolbar, stats and handler time), and the
 # highlighter (tools, layers, crossings, the live overlay, long strokes), undo and redo, the
 # eraser, and zoom and finger navigation (#9: pans with momentum, pinches, zoom commands and
 # Ctrl+wheel, strokes at 50-400%, the pen during finger gestures, touch rules, frame times on
@@ -35,6 +35,13 @@ HELPERS = """() => {
   const T = window.T = {
     sleep,
     pages,
+    /** The toolbar (#10). */
+    bar: () => view.contentEl.querySelector('.nb-ink-toolbar'),
+    /** The picker of the tool in use, opened as a second tap on its active toolbar button does. */
+    picker() {
+      if (!view.toolbar.pickerOpen) view.contentEl.querySelector('.nb-ink-toolbar .nb-ink-tool.is-active').click();
+      return view.contentEl.querySelector('.nb-ink-picker');
+    },
     /** A synthetic stroke over page i through `pts` (page px). */
     async stroke(i, pts, type = 'pen', id = 7, gap = 4) {
       const el = pages()[i], r = el.getBoundingClientRect(), k = r.width / view.store.slots[i].size.width;
@@ -537,7 +544,8 @@ try:
         r = ev("""async () => {
           view.contentEl.querySelector('.nb-ink-scroll').scrollTop = 0;
           await T.sleep(100);
-          view.actionsEl.querySelector('[aria-label="Change template of all pages"]').click();
+          T.bar().querySelector('.nb-ink-page-settings').click();  // the toolbar's page settings (#10)
+          view.contentEl.querySelector('.nb-ink-picker .nb-ink-menu-all-templates').click();
           await T.choose('Grid, ¼ in');
           await view.save();
           const note = ink.readNote(fs.get('Paper.md'), 'Paper');
@@ -548,7 +556,7 @@ try:
           const hidden = [commands['change-page-template'].checkCallback(true), commands['change-all-templates'].checkCallback(true)];
           return { noteTpl: note.template, disk, strokes, hidden };
         }""")
-        check('templates: "Change template of all pages" (view action) changes every page and the note default',
+        check('templates: "Template of all pages" (toolbar page settings) changes every page and the note default',
               r['noteTpl'] == 'grid-quarter-inch' and r['disk'] == ['grid-quarter-inch'] * 4 and r['strokes'] == 1, r)
         check('templates: the template commands are hidden outside an ink view', r['hidden'] == [False, False], r['hidden'])
 
@@ -644,7 +652,7 @@ try:
         # (5) stylus touches never scroll: prevented anywhere in the view, except a touchstart on a control
         r = ev("""() => {
           const sc = view.contentEl.querySelector('.nb-ink-scroll'), pagesEl = view.contentEl.querySelector('.nb-ink-pages');
-          const add = view.contentEl.querySelector('.nb-ink-add'), swatch = view.contentEl.querySelector('.nb-ink-swatch');
+          const add = view.contentEl.querySelector('.nb-ink-add'), swatch = view.contentEl.querySelector('.nb-ink-toolbar .nb-ink-tool');
           return {
             offPage: [T.touch(pagesEl, 'touchstart', 'stylus'), T.touch(pagesEl, 'touchmove', 'stylus')],
             scroller: [T.touch(sc, 'touchstart', 'stylus'), T.touch(sc, 'touchmove', 'stylus')],
@@ -658,10 +666,10 @@ try:
         check('pen: a finger touchstart is not prevented; a finger touchmove over the pages is (#9: the view pans itself)', r['finger'] == [False, True], r)
         check('pen: a stylus touchstart on a control is not prevented (taps work); touchmove is', r['control'] == [False, False, True], r)
 
-        # (7) the pen strip and the commands set the next stroke's nib, colour and size
+        # (7) the toolbar's pen picker and the commands set the next stroke's nib, colour and size
         r = ev(f"""async () => {{
-          const strip = view.contentEl.querySelector('.nb-ink-strip'), q = sel => strip.querySelector(sel);
-          const layout = {{ height: strip.offsetHeight, controls: strip.querySelectorAll('.nb-ink-control').length, swatches: strip.querySelectorAll('.nb-ink-swatch').length }};
+          const strip = T.picker(), q = sel => strip.querySelector(sel);
+          const layout = {{ height: T.bar().offsetHeight, controls: strip.querySelectorAll('.nb-ink-control').length, swatches: strip.querySelectorAll('.nb-ink-swatch').length }};
           q('[data-nib="pressure"]').click();
           q('[data-color="#e0301e"]').click();
           q('[data-size="4"]').click();
@@ -678,14 +686,15 @@ try:
           view.setPen({{ color: '#ABCDEF', size: 40 }});
           const custom = {{ ...view.pen, active: strip.querySelectorAll('.nb-ink-swatch.is-active').length }};
           view.setPen({{ color: '#000000', size: 2.5 }});
+          view.toolbar.closePicker();
           await view.save();
           const disk = ink.readPage(fs.get('{pen_path}')).strokes.slice(-2).map(s => [s.nib, s.color, s.size]);
           return {{ layout, shown, afterCmds, disk, threw, custom, red: T.near(0, [0xe0, 0x30, 0x1e], 30) }};
         }}""")
-        print('pen strip:', r)
-        check('pen strip: one row with nib, 8 swatches, 3 sizes and a stepper', r['layout']['height'] < 44 and r['layout']['swatches'] == 8, r['layout'])
-        check('pen strip: clicks set nib, colour and size, and show them', r['shown'] == {'nib': 'pressure', 'color': '#e0301e', 'value': '4.5 px'}, r['shown'])
-        check('pen strip: the next stroke saves with them, drawn in red', r['disk'][0] == ['pressure', '#e0301e', 4.5] and r['red'] > 200, r)
+        print('pen picker:', r)
+        check('pen picker: the toolbar is one row; the picker has nib, 8 swatches, 3 sizes and a stepper', r['layout']['height'] < 56 and r['layout']['swatches'] == 8, r['layout'])
+        check('pen picker: clicks set nib, colour and size, and show them', r['shown'] == {'nib': 'pressure', 'color': '#e0301e', 'value': '4.5 px'}, r['shown'])
+        check('pen picker: the next stroke saves with them, drawn in red', r['disk'][0] == ['pressure', '#e0301e', 4.5] and r['red'] > 200, r)
         check('pen commands: uniform nib, next colour and next size', r['afterCmds'] == {'tool': 'pen', 'nib': 'uniform', 'color': '#1f9d55', 'size': 1.5} and r['disk'][1] == ['uniform', '#1f9d55', 1.5], r)
         check('pen: setPen refuses a colour that is not #rrggbb, lowercases one that is, clamps sizes',
               'Invalid pen colour' in r['threw'] and r['custom'] == {'tool': 'pen', 'nib': 'uniform', 'color': '#abcdef', 'size': 16, 'active': 0}, r)
@@ -753,12 +762,12 @@ try:
             return [...c.getContext('2d').getImageData(Math.round(x * s), Math.round(y * s), 1, 1).data];
           };
         }""")
-        # (1) switching tools: the command, then the strip; each tool shows its own groups
+        # (1) switching tools: the command, then the toolbar; each tool's picker shows its own groups
         r = ev("""() => {
-          const strip = view.contentEl.querySelector('.nb-ink-strip'), q = sel => strip.querySelector(sel);
-          const shown = sel => q(sel).style.display !== 'none';
+          const strip = T.bar(), q = sel => strip.querySelector(sel);
+          const shown = sel => !!T.picker().querySelector(sel);
           const groups = () => ({ tool: view.pen.tool, active: q('.nb-ink-tool.is-active').dataset.tool,
-            pen: ['.nb-ink-nibs', '.nb-ink-colors', '.nb-ink-sizes', '.nb-ink-stepper'].map(shown), hl: shown('.nb-ink-highlighter') });
+            pen: ['.nb-ink-nibs', '.nb-ink-colors', '.nb-ink-sizes', '.nb-ink-sizes .nb-ink-step'].map(shown), hl: shown('.nb-ink-highlighter') });
           const first = strip.firstElementChild.classList.contains('nb-ink-tools');
           const start = groups();
           const visible = commands['tool-highlighter'].checkCallback(true);
@@ -766,30 +775,34 @@ try:
           const byCommand = groups();
           commands['tool-pen'].checkCallback(false);
           const back = groups();
+          view.toolbar.closePicker();
           q('[data-tool="highlighter"]').click();
-          const byStrip = { ...groups(), swatches: strip.querySelectorAll('.nb-ink-hl-swatch').length,
-            sizes: [...strip.querySelectorAll('.nb-ink-hl-size')].map(b => Number(b.dataset.size)),
-            color: q('.nb-ink-hl-swatch.is-active').dataset.color, height: strip.offsetHeight };
+          const picker = T.picker();
+          const byStrip = { ...groups(), swatches: picker.querySelectorAll('.nb-ink-hl-swatch').length,
+            sizes: [...picker.querySelectorAll('.nb-ink-hl-size')].map(b => Number(b.dataset.size)),
+            color: picker.querySelector('.nb-ink-hl-swatch.is-active').dataset.color, height: strip.offsetHeight };
           return { first, start, visible, byCommand, back, byStrip };
         }""")
         print('highlighter: tools:', r)
-        check('highlighter: the strip starts with the tool group; the pen is the default tool with its groups shown',
+        check('highlighter: the toolbar starts with the tool group; the pen is the default tool with its groups shown',
               r['first'] and r['start'] == {'tool': 'pen', 'active': 'pen', 'pen': [True] * 4, 'hl': False}, r)
         check('highlighter: "Use the highlighter" switches to it and shows only its group',
               r['visible'] and r['byCommand'] == {'tool': 'highlighter', 'active': 'highlighter', 'pen': [False] * 4, 'hl': True}, r)
         check('highlighter: "Use the pen" switches back', r['back'] == r['start'], r['back'])
-        check('highlighter: the strip button switches to it; 5 swatches and 2 sizes, yellow active; still one row',
+        check('highlighter: the toolbar button switches to it; its picker has 5 swatches and 2 sizes, yellow active; still one row',
               r['byStrip']['tool'] == 'highlighter' and r['byStrip']['swatches'] == 5 and r['byStrip']['sizes'] == [14, 24]
-              and r['byStrip']['color'] == '#ffd400' and r['byStrip']['height'] < 44, r['byStrip'])
+              and r['byStrip']['color'] == '#ffd400' and r['byStrip']['height'] < 56, r['byStrip'])
         page.locator('#leaf').screenshot(path=os.path.join(OUT, 'highlighter_strip.png'))
+        ev("() => view.toolbar.closePicker()")
 
         # (2) a pen stroke, a highlight over it, a pen stroke after it, and a crossing highlight of the same colour
         r = ev(f"""async () => {{
-          const strip = view.contentEl.querySelector('.nb-ink-strip'), q = sel => strip.querySelector(sel);
+          const q = sel => T.bar().querySelector(sel);
           view.setTool('pen');
           await T.pen(0, Array.from({{ length: 60 }}, (_, j) => [200, 150 + j * 2, 0.3]));   // pen, before
           q('[data-tool="highlighter"]').click();
-          q('.nb-ink-hl-size[data-size="24"]').click();
+          T.picker().querySelector('.nb-ink-hl-size[data-size="24"]').click();
+          view.toolbar.closePicker();
           await T.pen(0, Array.from({{ length: 200 }}, (_, j) => [100 + j * 2, 200, 0.3]));  // highlight along y 200
           view.setTool('pen');
           await T.pen(0, Array.from({{ length: 60 }}, (_, j) => [400, 150 + j * 2, 0.3]));   // pen, after
@@ -894,7 +907,8 @@ try:
           const hl = {{ ...view.highlighter }};
           await T.pen(0, Array.from({{ length: 60 }}, (_, j) => [100 + j * 3, 800, 0.3]));
           view.setTool('pen');
-          const pen = {{ ...view.pen }}, penColor = view.contentEl.querySelector('.nb-ink-strip .nb-ink-swatch.is-active')?.dataset.color ?? null;
+          const pen = {{ ...view.pen }}, penColor = T.picker().querySelector('.nb-ink-swatch.is-active')?.dataset.color ?? null;
+          view.toolbar.closePicker();
           await T.pen(0, Array.from({{ length: 60 }}, (_, j) => [100 + j * 3, 850, 0.3]));
           view.setTool('highlighter');
           const hlAgain = {{ ...view.highlighter }};
@@ -937,12 +951,12 @@ try:
           };
           T.ids = (i = 0) => view.store.page(view.store.slots[i]).strokes.map(s => s.id);
           T.buttons = () => ['.nb-ink-undo', '.nb-ink-redo'].map(s => !view.contentEl.querySelector(s).disabled);
-          /** A Ctrl(+Shift)+Z keydown on the strip; returns [handled, defaultPrevented]. */
+          /** A Ctrl(+Shift)+Z keydown on the toolbar; returns [handled, defaultPrevented]. */
           T.key = (shift = false, prevented = false) => {
             const e = new KeyboardEvent('keydown', { key: shift ? 'Z' : 'z', ctrlKey: true, shiftKey: shift, bubbles: true, cancelable: true });
             if (prevented) e.preventDefault();
             const n = view.history.labels.length;
-            view.contentEl.querySelector('.nb-ink-strip').dispatchEvent(e);
+            T.bar().dispatchEvent(e);
             return [view.history.labels.length !== n, e.defaultPrevented];
           };
           /** Fingers tapped (or dragged by `move` px) on the pages container. */
@@ -1158,19 +1172,20 @@ try:
           view.commit({ key: view.pages[0] }, { tool: 'highlighter', color: '#ffd400', size: 20,
             points: Array.from({ length: 301 }, (_, j) => ({ x: 100 + j, y: 600, p: 0.5, t: 2 * j })) });
           await view.save();
-          const strip = view.contentEl.querySelector('.nb-ink-strip');
-          const sizes = strip.querySelector('.nb-ink-eraser-sizes');
-          const before = { sizesHidden: sizes.style.display === 'none', cmd: commands['tool-eraser'].checkCallback(true) };
+          const strip = T.bar();
+          const before = { sizesHidden: !view.contentEl.querySelector('.nb-ink-eraser-sizes'), cmd: commands['tool-eraser'].checkCallback(true) };
           strip.querySelector('.nb-ink-eraser').click();
+          const picker = T.picker();
           const after = { tool: view.pen.tool, active: strip.querySelector('.nb-ink-eraser').classList.contains('is-active'),
-            sizesShown: sizes.style.display !== 'none', small: strip.querySelector('.nb-ink-eraser-size.is-active').dataset.eraserSize };
+            sizesShown: !!picker.querySelector('.nb-ink-eraser-sizes'), small: picker.querySelector('.nb-ink-eraser-size.is-active').dataset.eraserSize };
+          view.toolbar.closePicker();
           return { ids: T.ids(), tools: view.store.slots[0].page.strokes.map(s => s.tool), before, after,
             yellow: T.near(0, [255, 239, 153], 14), lines: [150, 250, 350, 450, 550].map(x => T.darkIn(0, x - 5, 280, x + 5, 320)) };
         }""")
         er_ids = r['ids']
         print('eraser: setup:', {k: r[k] for k in ('tools', 'before', 'after', 'yellow', 'lines')})
         check('eraser setup: five pen lines and a highlighter stroke, drawn', r['tools'] == ['pen'] * 5 + ['highlighter'] and all(n > 20 for n in r['lines']) and r['yellow'] > 1000, r)
-        check('eraser strip: the Eraser button selects the eraser and shows its sizes (small first)',
+        check('eraser toolbar: the Eraser button selects the eraser; its picker shows its sizes (small first)',
               r['before'] == {'sizesHidden': True, 'cmd': True} and r['after'] == {'tool': 'eraser', 'active': True, 'sizesShown': True, 'small': '6'}, r)
 
         # A drag across the middle three lines, checked mid-drag (cursor) and after release.
@@ -1240,7 +1255,8 @@ try:
           const beside = Array.from({ length: 100 }, (_, j) => [160, 250 + j, 0.3]);
           await T.pen(0, beside, { predict: 0 });
           const small = T.ids().length;
-          view.contentEl.querySelector('[data-eraser-size="14"]').click();
+          T.picker().querySelector('[data-eraser-size="14"]').click();
+          view.toolbar.closePicker();
           const large = view.eraser.size;
           await T.pen(0, beside, { predict: 0 });
           const afterLarge = T.ids().length;
@@ -1253,7 +1269,7 @@ try:
         print('eraser: highlighter, sizes:', r)
         check('eraser: a touch never erases', r['touch'] == 0, r)
         check('eraser: a highlighter stroke is erasable (model and bitmap)', r['hl']['ids'] == [er_ids[0], er_ids[4]] and r['hl']['yellow'] == 0, r['hl'])
-        check('eraser: the large size (from the strip) reaches further than the small one',
+        check('eraser: the large size (from the picker) reaches further than the small one',
               r['small'] == 2 and r['large'] == 14 and r['afterLarge'] == 1, r)
         check('eraser: "Next eraser size" cycles back to the small size', r['next'] == 6, r)
         check('eraser: erasing empty paper changes nothing', r['empty'] == 1 and r['live'] == 0, r)
@@ -1269,7 +1285,7 @@ try:
           await T.pen(0, Array.from({ length: 60 }, (_, j) => [620 + j, 300, 0.3]), { predict: 0 });
           const erased = T.ids();
           view.contentEl.querySelector('.nb-ink-tool[data-tool="pen"]').click();  // back to the pen
-          const tool = view.pen.tool, sizesHidden = view.contentEl.querySelector('.nb-ink-eraser-sizes').style.display === 'none';
+          const tool = view.pen.tool, sizesHidden = !view.contentEl.querySelector('.nb-ink-eraser-sizes');
           await T.pen(0, T.col(400), { predict: 0 });
           const drawn = T.ids().length;
           commands['tool-eraser'].checkCallback(false);
@@ -1652,10 +1668,10 @@ try:
         check('nav: a two-finger tap (pointer and touch events) still undoes, and neither scrolls nor zooms',
               r['after'] == r['before'] - 1 and r['moved'] == 0 and r['zoom'], r)
 
-        # (7) touch rules: finger touchmoves over the pages are prevented, touchstarts and the strip are not
+        # (7) touch rules: finger touchmoves over the pages are prevented, touchstarts and the toolbar are not
         r = ev("""() => {
           const sc = T.sc(), pagesEl = view.contentEl.querySelector('.nb-ink-pages'), add = view.contentEl.querySelector('.nb-ink-add');
-          const strip = view.contentEl.querySelector('.nb-ink-strip'), swatch = view.contentEl.querySelector('.nb-ink-swatch');
+          const strip = T.bar(), swatch = T.bar().querySelector('.nb-ink-preset');
           return {
             fingerMove: [T.touch(T.pages()[0], 'touchmove', 'direct'), T.touch(pagesEl, 'touchmove', 'direct'), T.touch(sc, 'touchmove', 'direct'), T.touch(add, 'touchmove', 'direct')],
             fingerStart: [T.touch(T.pages()[0], 'touchstart', 'direct'), T.touch(add, 'touchstart', 'direct')],
@@ -1665,7 +1681,7 @@ try:
         }""")
         check('touch: a finger touchmove anywhere over the pages is prevented (no sidebar swipes)', r['fingerMove'] == [True] * 4, r)
         check('touch: finger touchstarts are not prevented, so taps on "Add page" still click', r['fingerStart'] == [False, False], r)
-        check('touch: fingers on the pen strip are left alone (it scrolls natively)', r['strip'] == [False, False], r)
+        check('touch: fingers on the toolbar are left alone', r['strip'] == [False, False], r)
         check('touch: stylus rules unchanged (prevented, except a touchstart on a control)', r['stylus'] == [True, True, False], r)
         r = ev("""async () => {
           const add = view.contentEl.querySelector('.nb-ink-add'), n = view.store.slots.length;
@@ -1823,13 +1839,13 @@ try:
           await T.sleep(100);
         }""")
         r = ev("""() => ({ shown: T.panel().style.display !== 'none', open: view.pagesPanelOpen, thumbs: T.thumbs().length,
-          margin: getComputedStyle(T.sc()).marginLeft, button: !!view.contentEl.querySelector('.nb-ink-strip .nb-ink-pages-toggle'),
+          margin: getComputedStyle(T.sc()).marginLeft, button: !!view.contentEl.querySelector('.nb-ink-toolbar .nb-ink-pages-toggle'),
           strokes: view.store.slots.map(s => view.store.page(s).strokes.length) })""")
         check('pages: the panel is closed by default (no thumbnails, pages area full width)', not r['shown'] and not r['open'] and r['thumbs'] == 0 and r['margin'] == '0px', r)
-        check('pages: the strip has a Pages button', r['button'], r)
+        check('pages: the toolbar has a Pages button', r['button'], r)
         check('pages: the test note has 4 pages with 1-4 strokes', r['strokes'] == [1, 2, 3, 4], r)
 
-        # (1) the strip button opens it: a thumbnail per page, numbered, drawn
+        # (1) the toolbar button opens it: a thumbnail per page, numbered, drawn
         r = ev("""async () => {
           const w0 = T.pages()[0].offsetWidth;
           view.contentEl.querySelector('.nb-ink-pages-toggle').click();
@@ -2306,6 +2322,7 @@ try:
         # ======== 19. The partial eraser (#15) ========
         # A "word" of four strokes (three pen lines and a highlighter stroke) erased across the middle.
         r = ev("""async () => {
+          delete p.settings.tools;  // a fresh install's tools: #10 saves them, and section 14 changed the eraser's
           await p.createInkNote('Partial', '', 'letter', 'blank');
           await T.sleep(150);
           view.setTool('pen');
@@ -2313,7 +2330,7 @@ try:
           for (const x of [200, 230, 260]) await T.pen(0, Array.from({ length: 101 }, (_, j) => [x, 250 + j, 0.3]), { predict: 0 });
           view.commit({ key: view.pages[0] }, { tool: 'highlighter', color: '#ffd400', size: 12,
             points: Array.from({ length: 101 }, (_, j) => ({ x: 320, y: 250 + j, p: 0.5, t: 2 * j })) });
-          const strip = view.contentEl.querySelector('.nb-ink-strip');
+          const strip = { querySelector: sel => T.picker().querySelector(sel) };  // the eraser's picker (#10)
           const active = () => strip.querySelector('.nb-ink-eraser-mode.is-active')?.dataset.eraserMode;
           const modes = { fresh: view.eraser.mode };
           commands['eraser-stroke'].checkCallback(false);
@@ -2323,7 +2340,8 @@ try:
           view.setTool('pen');
           commands['eraser-partial'].checkCallback(false);
           modes.partial = [view.pen.tool, view.eraser.mode, active()];
-          modes.shown = strip.querySelector('.nb-ink-eraser-sizes').style.display !== 'none';
+          modes.shown = !!strip.querySelector('.nb-ink-eraser-sizes');
+          view.toolbar.closePicker();
           const before = view.store.slots[0].page.strokes.map(s => ({ id: s.id, n: s.points.length }));
           const n = view.history.labels.length;
           await T.pen(0, Array.from({ length: 301 }, (_, j) => [150 + j, 300, 0.3]), { predict: 0 });
@@ -2335,10 +2353,10 @@ try:
         }""")
         print('partial eraser: setup and word:', {k: r[k] for k in ('modes', 'band', 'kept', 'last', 'steps')})
         check('partial: the default eraser mode is partial', r['modes']['fresh'] == 'partial', r['modes'])
-        check('partial: "Use the stroke eraser" selects the eraser in stroke mode; the strip shows it',
+        check('partial: "Use the stroke eraser" selects the eraser in stroke mode; the picker shows it',
               r['modes']['stroke'] == ['eraser', 'stroke', 'stroke'], r['modes'])
-        check('partial: the strip\'s Partial button switches the mode', r['modes']['clicked'] == ['partial', 'partial', 'true'], r['modes'])
-        check('partial: "Use the partial eraser" selects the eraser in partial mode, the strip shown',
+        check('partial: the picker\'s Partial button switches the mode', r['modes']['clicked'] == ['partial', 'partial', 'true'], r['modes'])
+        check('partial: "Use the partial eraser" selects the eraser in partial mode, the picker shown',
               r['modes']['partial'] == ['eraser', 'partial', 'partial'] and r['modes']['shown'], r['modes'])
         old_ids = {x['id'] for x in r['before']}
         after = r['after']
@@ -2686,6 +2704,301 @@ try:
         check('pdf pages: duplicate copies the PDF template; deleting pages leaves the PDF file',
               r['dup'] == ['pdf', 1, True] and r['kept'], r)
         # ======== end of 20. Import a PDF and write on it (#14) ========
+        # ======== 21. The toolbar and pen presets (#10) ========
+        r = ev("""async () => {
+          delete p.settings.tools;  // a fresh install
+          await p.createInkNote('Toolbar', '', 'letter', 'blank');
+          await T.sleep(150);
+          T.tb = sel => T.bar().querySelector(sel);
+          T.tool = t => T.tb(`.nb-ink-tool[data-tool="${t}"]`);
+          T.slot = i => T.tb(`.nb-ink-preset[data-slot="${i}"]`);
+          T.activeSlots = () => [...T.bar().querySelectorAll('.nb-ink-preset.is-active')].map(b => Number(b.dataset.slot));
+          const bar = T.bar(), groups = [...bar.children].map(g => g.classList[2]);
+          const buttons = [...bar.querySelectorAll('button')];
+          const size = buttons.map(b => [b.offsetWidth, b.offsetHeight]);
+          const lasso = T.tb('.nb-ink-lasso'), ruler = T.tb('.nb-ink-ruler');
+          // Every tool in one tap, from every tool.
+          const taps = [];
+          for (const from of ['pen', 'highlighter', 'eraser']) for (const to of ['pen', 'highlighter', 'eraser']) {
+            if (from === to) continue;
+            view.setTool(from);
+            T.tool(to).click();
+            taps.push(view.pen.tool === to && !view.toolbar.pickerOpen && T.tool(to).getAttribute('aria-pressed') === 'true');
+          }
+          view.setTool('pen');
+          return { groups, buttons: buttons.length, size, icons: buttons.filter(b => b.querySelector('svg') || b.dataset.icon || b.getAttribute('data-icon')).length,
+            lasso: [lasso.disabled, lasso.getAttribute('aria-label')], ruler: [ruler.disabled, ruler.getAttribute('aria-label')], taps,
+            header: [...view.actionsEl.querySelectorAll('[aria-label]')].map(a => a.getAttribute('aria-label')),
+            strip: !!view.contentEl.querySelector('.nb-ink-strip, .nb-ink-provisional') };
+        }""")
+        print('toolbar:', {k: r[k] for k in ('groups', 'buttons', 'lasso', 'ruler', 'header')})
+        check('toolbar: tools, presets and page actions in three groups; the provisional strip is gone',
+              r['groups'] == ['nb-ink-tools', 'nb-ink-presets', 'nb-ink-page-actions'] and not r['strip'], r)
+        check('toolbar: 15 buttons, each a 40 px icon target', r['buttons'] == 15 and all(w >= 40 and h >= 40 for w, h in r['size']), r['size'])
+        check('toolbar: lasso and ruler are placeholders, disabled with their issue', r['lasso'] == [True, 'Lasso: coming in #11'] and r['ruler'] == [True, 'Ruler: coming in #20'], r)
+        check('toolbar: every tool is one tap from every other', r['taps'] == [True] * 6, r['taps'])
+        check('toolbar: "Open as markdown" stays the header action', r['header'] == ['Open as markdown'], r['header'])
+
+        # The picker: the second tap on the active tool, nib, colour, size, custom colour and the preview.
+        r = ev("""async () => {
+          const pen = T.tool('pen');
+          pen.click();  // already the pen: the second tap opens its picker
+          const picker = view.contentEl.querySelector('.nb-ink-picker');
+          const opened = { open: view.toolbar.pickerOpen, shown: picker.style.display !== 'none', expanded: pen.getAttribute('aria-expanded'),
+            below: picker.getBoundingClientRect().top >= T.bar().getBoundingClientRect().bottom };
+          const canvas = picker.querySelector('canvas.nb-ink-preview');
+          const previewInk = rgb => {
+            const d = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+            let n = 0, m = 0;
+            for (let k = 0; k < d.length; k += 4) {
+              if (Math.abs(d[k] - 255) + Math.abs(d[k + 1] - 255) + Math.abs(d[k + 2] - 255) > 60) n++;
+              if (rgb && Math.abs(d[k] - rgb[0]) + Math.abs(d[k + 1] - rgb[1]) + Math.abs(d[k + 2] - rgb[2]) < 30) m++;
+            }
+            return rgb ? m : n;
+          };
+          const p0 = view.toolbar['picker'].previews, ink0 = previewInk();
+          picker.querySelector('[data-nib="pressure"]').click();
+          picker.querySelector('.nb-ink-swatch[data-color="#1e6fff"]').click();
+          const inkThin = previewInk();
+          for (let i = 0; i < 3; i++) picker.querySelector('[data-step="1"]').click();
+          const after = { ...view.pen, value: picker.querySelector('.nb-ink-size-value').textContent, open: view.toolbar.pickerOpen,
+            swatch: picker.querySelector('.nb-ink-swatch.is-active')?.dataset.color, previews: view.toolbar['picker'].previews - p0,
+            blue: previewInk([0x1e, 0x6f, 0xff]), inkThin, inkThick: previewInk(), ink0 };
+          const custom = picker.querySelector('input.nb-ink-custom-color');
+          custom.value = '#12ab34';
+          custom.dispatchEvent(new Event('input', { bubbles: true }));
+          const customed = { color: view.pen.color, active: picker.querySelectorAll('.nb-ink-swatch.is-active').length,
+            customActive: picker.querySelector('.nb-ink-custom').classList.contains('is-active'), green: previewInk([0x12, 0xab, 0x34]) };
+          await T.pen(0, T.loops(120, 300, 150));
+          const closedByWriting = view.toolbar.pickerOpen;
+          await view.save();
+          const disk = ink.readPage(fs.get(view.store.slots[0].path)).strokes.slice(-1).map(s => [s.nib, s.color, s.size])[0];
+          T.tool('pen').click();
+          const reopened = view.toolbar.pickerOpen;
+          document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          const byEscape = view.toolbar.pickerOpen;
+          T.tool('pen').click();
+          T.tool('pen').click();
+          const byToggle = view.toolbar.pickerOpen;
+          T.tool('pen').click();
+          document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerType: 'touch' }));
+          const byTapElsewhere = view.toolbar.pickerOpen;
+          // The highlighter's and the eraser's pickers.
+          T.tool('highlighter').click(); T.tool('highlighter').click();
+          const hp = view.contentEl.querySelector('.nb-ink-picker');
+          hp.querySelector('.nb-ink-hl-swatch[data-color="#3ddc84"]').click();
+          hp.querySelector('[data-step="-1"]').click();
+          const hl = { ...view.highlighter, nibs: hp.querySelectorAll('.nb-ink-nib').length, preview: previewInkOf(hp) };
+          function previewInkOf(el) { const c = el.querySelector('canvas.nb-ink-preview'), d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; let n = 0; for (let k = 0; k < d.length; k += 4) if (Math.abs(d[k] - 255) + Math.abs(d[k + 2] - 255) > 60) n++; return n; }
+          T.tool('eraser').click();
+          const hlClosed = view.toolbar.pickerOpen;
+          T.tool('eraser').click();
+          const ep = view.contentEl.querySelector('.nb-ink-picker');
+          ep.querySelector('[data-eraser-size="14"]').click();
+          ep.querySelector('[data-eraser-mode="stroke"]').click();
+          const er = { ...view.eraser, open: view.toolbar.pickerOpen };
+          T.bar().querySelector('.nb-ink-page-settings').click();
+          const menu = { kind: view.toolbar.pickerOpen, items: [...view.contentEl.querySelectorAll('.nb-ink-picker .nb-ink-menu-item')].map(b => b.textContent),
+            paper: view.contentEl.querySelector('.nb-ink-picker .nb-ink-paper').textContent };
+          view.toolbar.closePicker();
+          return { opened, after, customed, closedByWriting, disk, reopened, byEscape, byToggle, byTapElsewhere, hl, hlClosed, er, menu };
+        }""")
+        print('toolbar picker:', r)
+        check('picker: a second tap on the active tool opens its picker under the toolbar',
+              r['opened'] == {'open': 'pen', 'shown': True, 'expanded': 'true', 'below': True}, r['opened'])
+        a = r['after']
+        check('picker: nib, colour and 0.5 px steps change the pen and stay open', a['nib'] == 'pressure' and a['color'] == '#1e6fff' and a['size'] == 4
+              and a['value'] == '4 px' and a['swatch'] == '#1e6fff' and a['open'] == 'pen', a)
+        check('picker: the preview is drawn on each change, in the colour, thicker with the size',
+              a['previews'] >= 5 and a['ink0'] > 100 and a['blue'] > 100 and a['inkThick'] > a['inkThin'], a)
+        check('picker: the custom colour sets the pen (no preset swatch active) and the preview', r['customed']['color'] == '#12ab34'
+              and r['customed']['active'] == 0 and r['customed']['customActive'] and r['customed']['green'] > 100, r['customed'])
+        check('picker: starting to write closes it; the stroke has the chosen pen', r['closedByWriting'] is None and r['disk'] == ['pressure', '#12ab34', 4], r)
+        check('picker: closed by Escape, by its button again and by a tap elsewhere', r['reopened'] == 'pen' and r['byEscape'] is None
+              and r['byToggle'] is None and r['byTapElsewhere'] is None, r)
+        check('picker: the highlighter has colours and 0.5 px sizes, no nib, with a preview', r['hl']['color'] == '#3ddc84' and r['hl']['size'] == 17.5
+              and r['hl']['nibs'] == 0 and r['hl']['preview'] > 100, r['hl'])
+        check('picker: switching tool closes the other tool\'s picker; the eraser\'s has sizes and mode',
+              r['hlClosed'] is None and r['er'] == {'size': 14, 'mode': 'stroke', 'open': 'eraser'}, r)
+        check('picker: page settings lists the template choices and the paper size', r['menu']['kind'] == 'page'
+              and r['menu']['items'] == ['Template of this page…', 'Template of all pages…', 'Add page with template…']
+              and r['menu']['paper'] == 'Paper size: Letter, 8.5 × 11 in', r['menu'])
+
+        # Add page from the toolbar, and page settings' template change.
+        r = ev("""async () => {
+          const n = view.store.slots.length;
+          T.tb('.nb-ink-add-page').click();
+          await T.sleep(50);
+          const added = view.store.slots.length - n, label = view.history.labels.slice(-1)[0];
+          T.tb('.nb-ink-page-settings').click();
+          view.contentEl.querySelector('.nb-ink-picker .nb-ink-menu-page-template').click();
+          await T.choose('Dots, 5 mm');
+          const tpl = ink.templateName(view.store.slots[view.currentPageIndex()].page.template);
+          return { added, label, tpl, closed: view.toolbar.pickerOpen, undo: !T.tb('.nb-ink-undo').disabled };
+        }""")
+        check('toolbar: "Add page" adds a page (undoable); page settings changes this page\'s template',
+              r['added'] == 1 and r['label'] == 'Add page' and r['tpl'] == 'dots-5mm' and r['closed'] is None and r['undo'], r)
+
+        # Presets: one tap applies, the matching one is highlighted, save and long-press replace.
+        r = ev("""async () => {
+          const out = {};
+          out.labels = [0, 1, 2, 3, 4].map(i => T.slot(i).getAttribute('aria-label'));
+          view.setTool('pen');
+          T.slot(1).click();
+          out.blue = [{ ...view.pen }, T.activeSlots()];
+          T.slot(4).click();
+          out.hl = [view.pen.tool, { ...view.highlighter }, T.activeSlots()];
+          T.slot(3).click();
+          out.pressure = [{ ...view.pen }, T.activeSlots()];
+          view.setPen({ size: 5 });
+          out.none = T.activeSlots();
+          // "Save as favourite" with every slot taken asks which to replace.
+          T.tool('pen').click();
+          const picker = view.contentEl.querySelector('.nb-ink-picker');
+          picker.querySelector('.nb-ink-save-preset').click();
+          out.asks = picker.querySelector('.nb-ink-replace').style.display !== 'none';
+          picker.querySelector('.nb-ink-replace-slot[data-slot="2"]').click();
+          out.saved = [{ ...view.presets[2] }, T.activeSlots(), picker.querySelector('.nb-ink-save-status').textContent];
+          view.toolbar.closePicker();
+          // An empty slot: one tap saves the current pen; "Save as favourite" fills the first free slot.
+          p.settings.presets[4] = null;
+          view.toolbar.render();
+          out.empty = T.slot(4).classList.contains('is-empty');
+          view.setPen({ color: '#7b4fd6', size: 1.5, nib: 'uniform' });
+          T.slot(4).click();
+          out.filled = [{ ...view.presets[4] }, T.activeSlots()];
+          p.settings.presets[0] = null;
+          view.setTool('highlighter');
+          T.tool('highlighter').click();
+          view.contentEl.querySelector('.nb-ink-picker .nb-ink-save-preset').click();
+          out.free = { ...view.presets[0] };
+          view.toolbar.closePicker();
+          // A long press replaces a slot with the current settings, without applying it.
+          view.setTool('pen');
+          view.setPen({ color: '#f28c28', size: 6, nib: 'pressure' });
+          const b = T.slot(1), r = b.getBoundingClientRect(), at = { clientX: r.left + 20, clientY: r.top + 20, bubbles: true, pointerType: 'pen' };
+          b.dispatchEvent(new PointerEvent('pointerdown', at));
+          await T.sleep(700);
+          b.dispatchEvent(new PointerEvent('pointerup', at));
+          b.click();
+          out.long = [{ ...view.presets[1] }, { ...view.pen }, T.activeSlots()];
+          // A short press only applies.
+          T.slot(2).dispatchEvent(new PointerEvent('pointerdown', at));
+          T.slot(2).dispatchEvent(new PointerEvent('pointerup', at));
+          T.slot(2).click();
+          out.short = [{ ...view.presets[2] }, view.pen.size, T.activeSlots()];
+          // The eraser can't be saved.
+          view.setTool('eraser');
+          out.eraser = view.savePreset(3);
+          view.setTool('pen');
+          return out;
+        }""")
+        print('presets:', r)
+        check('presets: five labelled slots with the defaults', all(l.startswith(f'Favourite {i + 1}: ') for i, l in enumerate(r['labels']))
+              and 'uniform pen #1e6fff 2.5 px' in r['labels'][1] and 'highlighter #ffd400 18 px' in r['labels'][4], r['labels'])
+        check('presets: one tap applies a pen preset and highlights it', r['blue'] == [{'tool': 'pen', 'nib': 'uniform', 'color': '#1e6fff', 'size': 2.5}, [1]], r['blue'])
+        check('presets: one tap applies the highlighter preset (switching tool)', r['hl'] == ['highlighter', {'color': '#ffd400', 'size': 18}, [4]], r['hl'])
+        check('presets: the pressure preset; black 2.5 is not highlighted with it', r['pressure'] == [{'tool': 'pen', 'nib': 'pressure', 'color': '#000000', 'size': 4}, [3]], r['pressure'])
+        check('presets: no highlight once the settings match none', r['none'] == [], r['none'])
+        check('presets: "Save as favourite" with all slots taken asks which to replace, then saves there',
+              r['asks'] and r['saved'] == [{'tool': 'pen', 'color': '#000000', 'size': 5, 'nib': 'pressure'}, [2], 'Saved as favourite 3'], r)
+        check('presets: a tap on an empty slot saves the current pen into it', r['empty'] and r['filled'] == [{'tool': 'pen', 'color': '#7b4fd6', 'size': 1.5, 'nib': 'uniform'}, [4]], r)
+        check('presets: "Save as favourite" fills the first free slot', r['free'] == {'tool': 'highlighter', 'color': '#ffd400', 'size': 18}, r['free'])
+        check('presets: a long press replaces the slot with the current pen and does not apply the old one',
+              r['long'][0] == {'tool': 'pen', 'color': '#f28c28', 'size': 6, 'nib': 'pressure'} and r['long'][1]['color'] == '#f28c28' and r['long'][2] == [1], r['long'])
+        check('presets: a short press applies', r['short'][1] == 5 and r['short'][2] == [2], r['short'])
+        check('presets: the eraser is not saved as a preset', r['eraser'] is False, r)
+
+        # Persistence: saved in the plugin data (debounced), and back after the plugin reloads.
+        r = ev("""async () => {
+          view.setTool('highlighter');
+          view.setHighlighter({ color: '#4fc3f7', size: 22.5 });
+          view.setPen({ nib: 'uniform', color: '#8a8a8a', size: 3.5 });
+          view.setTool('eraser');
+          view.setEraser({ size: 14, mode: 'stroke' });
+          const soon = JSON.stringify(pluginData && pluginData.tools);
+          await T.sleep(700);
+          const data = JSON.parse(JSON.stringify(pluginData));
+          const presets = JSON.stringify(view.presets);
+          // Reload: a new plugin instance reads the data; a view it opens has the same tools and presets.
+          const old = view, oldLeaf = view.leaf;
+          const q = await loadPlugin();
+          const leaf = app.workspace.getLeaf('tab');
+          await leaf.setViewState({ type: 'notebook-ink', state: { file: 'Toolbar.md' }, active: true });
+          app.workspace.revealLeaf(leaf);
+          await T.sleep(150);
+          const v = leaf.view;
+          const back = { pen: { ...v.pen }, highlighter: { ...v.highlighter }, eraser: { ...v.eraser }, presets: JSON.stringify(v.presets),
+            active: v.contentEl.querySelector('.nb-ink-tool.is-active').dataset.tool, other: v !== old };
+          // Bad saved values fall back to the defaults, with a warning.
+          const warned = [], warn = console.warn;
+          console.warn = (...a) => warned.push(a.join(' '));
+          window.pluginData = { ...data, tools: { pen: { tool: 'quill', color: 'blue', size: 3 } }, presets: [{ tool: 'pen', color: '#000000', size: 2 }, 7] };
+          const bad = await loadPlugin();
+          console.warn = warn;
+          const parsed = { tools: bad.settings.tools, presets: bad.settings.presets };
+          bad.unload();
+          window.pluginData = data;
+          await leaf.detach();
+          q.unload();
+          app.workspace.revealLeaf(oldLeaf);
+          window.view = old;
+          await T.sleep(100);
+          return { soon, data: { tools: data.tools, presets: data.presets }, presets, back, warned: warned.length, parsed };
+        }""")
+        print('toolbar persistence:', r)
+        want = {'pen': {'tool': 'eraser', 'nib': 'uniform', 'color': '#8a8a8a', 'size': 3.5}, 'highlighter': {'color': '#4fc3f7', 'size': 22.5}, 'eraser': {'size': 14, 'mode': 'stroke'}}
+        check('persist: tools are saved in the plugin data after a short delay', r['data']['tools'] == want and r['soon'] != __import__('json').dumps(want), r)
+        check('persist: presets are saved in the plugin data', __import__('json').loads(r['presets']) == r['data']['presets'] and len(r['data']['presets']) == 5, r)
+        check('persist: after a plugin reload a new view has the same tool, settings and presets',
+              r['back']['other'] and {k: r['back'][k] for k in ('pen', 'highlighter', 'eraser')} == want and r['back']['active'] == 'eraser'
+              and r['back']['presets'] == r['presets'], r['back'])
+        check('persist: invalid saved tools and presets fall back to defaults with warnings',
+              r['warned'] >= 3 and r['parsed']['tools']['pen'] == {'tool': 'pen', 'nib': 'uniform', 'color': '#000000', 'size': 3}
+              and r['parsed']['presets'] == [{'tool': 'pen', 'color': '#000000', 'size': 2, 'nib': 'uniform'}, None], r['parsed'])
+
+        # Portrait and landscape iPad widths: at most two rows, nothing cut off; the picker fits.
+        fits = {}
+        for name, w, h in (('portrait', 768, 1024), ('landscape', 1024, 768)):
+            page.set_viewport_size({'width': w, 'height': h})
+            # The view as wide as the iPad screen (sidebars closed), less Obsidian's own bars in height.
+            ev(f"() => {{ const s = document.getElementById('leaf').style; s.width = '{w}px'; s.height = '{h - 120}px'; s.boxSizing = 'border-box'; }}")
+            page.wait_for_timeout(300)
+            fits[name] = ev("""async () => {
+              const bar = T.bar(), r = bar.getBoundingClientRect(), buttons = [...bar.querySelectorAll('button')];
+              const rows = new Set(buttons.map(b => Math.round(b.getBoundingClientRect().top))).size;
+              const inside = buttons.every(b => { const q = b.getBoundingClientRect(); return q.left >= r.left - 0.5 && q.right <= r.right + 0.5; });
+              T.tool(view.pen.tool).click();
+              const p = view.contentEl.querySelector('.nb-ink-picker').getBoundingClientRect(), c = view.contentEl.getBoundingClientRect();
+              const picker = p.left >= c.left && p.right <= c.right;
+              return { width: Math.round(r.width), height: Math.round(r.height), rows, inside, scroll: bar.scrollWidth <= bar.clientWidth, picker };
+            }""")
+            page.locator('.nb-ink-toolbar').screenshot(path=os.path.join(OUT, f'toolbar_{name}.png'))
+            page.locator('#leaf').screenshot(path=os.path.join(OUT, f'toolbar_{name}_view.png'))
+            ev("() => view.toolbar.closePicker()")
+        page.set_viewport_size({'width': 1000, 'height': 700})
+        ev("() => { const s = document.getElementById('leaf').style; s.width = s.height = s.boxSizing = ''; }")
+        page.wait_for_timeout(200)
+        print('toolbar fits:', fits)
+        for name in ('portrait', 'landscape'):
+            f = fits[name]
+            check(f'toolbar: fits the iPad {name} width in at most two rows, no overflow; the picker inside the view',
+                  f['width'] <= (768 if name == 'portrait' else 1024) and f['rows'] <= 2 and f['inside'] and f['scroll'] and f['picker'], f)
+
+        # Pencil taps on the toolbar and the picker still register (touchstart not prevented).
+        r = ev("""() => {
+          T.tool(view.pen.tool).click();
+          const picker = view.contentEl.querySelector('.nb-ink-picker');
+          const els = [T.tool('pen'), T.tool('eraser'), T.slot(0), T.tb('.nb-ink-undo'), T.tb('.nb-ink-add-page'), T.tb('.nb-ink-page-settings'),
+            T.tb('.nb-ink-pages-toggle'), ...picker.querySelectorAll('button, input, canvas')];
+          const starts = els.map(el => T.touch(el, 'touchstart', 'stylus'));
+          const moves = [T.touch(T.tool('pen'), 'touchmove', 'stylus')];
+          view.toolbar.closePicker();
+          return { n: els.length, prevented: starts.filter(Boolean).length, moves };
+        }""")
+        check('toolbar: Pencil touchstarts on toolbar and picker controls are not prevented (taps work); touchmove is',
+              r['n'] > 10 and r['prevented'] == 0 and r['moves'] == [True], r)
+        # ======== end of 21. The toolbar and pen presets (#10) ========
 
         # ======== 21. Pen polish (#32): smooth edges and the settled stroke ========
         # The same iPad-like stroke (a gentle arc, samples in 0.5 px steps as the Pencil reports
