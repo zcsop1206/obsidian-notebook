@@ -234,21 +234,29 @@ class Recorder {
     if (document.visibilityState === 'hidden') { this.hiddenAt = Date.now(); return; }
     if (this.state !== 'recording') return;
     await this.holdScreen();
-    // On iOS the mic unmutes and the recorder still says "recording" after a lock or app
-    // switch, but it never delivers audio again. So always start over on a fresh stream.
-    const away = this.hiddenAt ? r1((Date.now() - this.hiddenAt) / 1000) : null;
-    this.hiddenAt = null;
-    if (away != null) await this.reopen(`back after ${away} s hidden (audio from that time is lost)`);
-    else if (!track || track.readyState === 'ended') await this.reopen('mic track had ended');
+    if (this.reopening) return; // the watchdog got there first
+    if (this.hiddenAt) return this.resume();
+    const now = this.track();
+    if (!now || now.readyState === 'ended') await this.reopen('mic track had ended');
     else if (!this.rec || this.rec.state === 'inactive') {
       this.note('recorder had stopped, starting a new segment');
       this.startSegment();
     }
   }
 
-  // Restarts the recording if no chunk has arrived for 3 timeslices while visible.
+  // On iOS the mic unmutes and the recorder still says "recording" after a lock or app
+  // switch, but it never delivers audio again. So always start over on a fresh stream.
+  resume() {
+    const away = r1((Date.now() - this.hiddenAt) / 1000);
+    this.hiddenAt = null;
+    return this.reopen(`back after ${away} s hidden (audio from that time is lost)`);
+  }
+
+  // Restarts the recording if no chunk has arrived for 3 timeslices while visible. On the
+  // iPad this can run before the visibilitychange event on return, so it handles that too.
   watchdog() {
     if (this.state !== 'recording' || this.reopening || document.visibilityState !== 'visible') return;
+    if (this.hiddenAt) { this.resume(); return; }
     const quiet = Date.now() - this.lastChunk;
     if (quiet > CHUNK_MS * 3) this.reopen(`no audio for ${r1(quiet / 1000)} s`);
   }
