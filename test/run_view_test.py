@@ -3686,6 +3686,7 @@ try:
         check('chooser: a page changed to the PDF template keeps its ink and gets the PDF copied beside it',
               r['tpl'] == ['pdf', 2] and r['strokes'] == 1 and r['copied'], r)
         # ======== end of 23. Sized templates and page embeds (#27), PDF templates (#21) ========
+
         # ======== 24. The virtual page (#28) ========
         # A blank page always follows the last page: an element (.nb-ink-ghost), not in the store,
         # the index, the panel or the stats; the pen or highlighter going down on it makes it a
@@ -3868,6 +3869,16 @@ try:
         }""")
         check('virtual page: dark paper in the dark theme', r == [0x1e, 0x1e, 0x1e], r)
         ev("() => { document.body.classList.remove('theme-dark'); app.workspace.trigger('css-change'); }")
+        r = ev("""async () => {
+          await p.createInkNote('Ghost sticky', '', 'letter', 'sticky-3in');
+          await T.sleep(150);
+          const g = view.ghostEl, last = T.pages()[0];
+          await T.ghostStroke(T.wave(20, 100, 20), 57);
+          const pg = view.store.page(view.store.slots[1]);
+          return { w: g.offsetWidth, h: g.offsetHeight, lw: last.offsetWidth, lh: last.offsetHeight, size: pg.size, tpl: ink.templateName(pg.template) };
+        }""")
+        check('virtual page: a sized default template (sticky note) gives it that size, and the page it becomes too',
+              r['w'] == r['lw'] and r['h'] == r['lh'] and r['size'] == {'width': 288, 'height': 288} and r['tpl'] == 'sticky-3in', r)
         # ======== end of 24. The virtual page (#28) ========
 
         # --- unload removes the patch

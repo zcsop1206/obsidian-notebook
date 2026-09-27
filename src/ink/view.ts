@@ -25,7 +25,7 @@ import { anchorAt, clampZoom, navStatsLines, Navigator, newNavStats, scrollToKee
 import { currentTheme, PageBitmap, pageTheme, releaseScratch, strokeColor, TemplateImages, warmOutlines, type Theme } from './renderer';
 import { SpatialIndex } from './spatial';
 import { PagesPanel } from './pages-panel';
-import { NoteStore, noteTemplate, type NoteFiles, type PageSlot, type TemplatesBefore } from './store';
+import { NoteStore, type NoteFiles, type PageSlot, type TemplatesBefore } from './store';
 import { VIEW_TYPE_INK } from './takeover';
 import { TemplateChooser } from './template-chooser';
 import { centreOn, encodeClip, isIdentity, lassoSelect, moveBy, resizeBy, resizeScale, strokesBounds, transformStroke, withIds, type Box, type Transform } from './lasso';
@@ -1922,11 +1922,20 @@ export class InkView extends FileView {
     return this.ghost?.el ?? null;
   }
 
-  /** The blank page a new page would be (paper size and default template), and a key for it. */
+  /** Which default template and paper the virtual page shows (it's remade when they change). */
+  private ghostKey(): string {
+    const index = this.store!.index;
+    return `${index.template} ${index.paper}`;
+  }
+
+  /**
+   * The blank page a new page without a template would be, as store.insertPage makes it: the
+   * note's default template, at its size if it has one (#27), else the paper size.
+   */
   private ghostModel(): { page: Page; key: string } {
     const store = this.store!;
-    const size = store.paperSize;
-    return { page: newPage('p-000000', size, noteTemplate(store.index.template)), key: `${store.index.template} ${size.width}x${size.height}` };
+    const def = store.defaultTemplate();
+    return { page: newPage('p-000000', def.size ?? store.paperSize, def.template), key: this.ghostKey() };
   }
 
   private makeGhost() {
@@ -1959,9 +1968,15 @@ export class InkView extends FileView {
   private updateGhost() {
     const g = this.ghost, box = this.layout?.ghost;
     if (!g || !box || !this.store) return;
-    const model = this.ghostModel();
-    const stale = model.key !== g.key; // the note's default template changed
-    if (stale) Object.assign(g, model);
+    const stale = this.ghostKey() !== g.key; // the note's default template changed
+    if (stale) {
+      const size = g.page.size;
+      Object.assign(g, this.ghostModel());
+      if (g.page.size.width !== size.width || g.page.size.height !== size.height) {
+        this.relayout();
+        return this.update();
+      }
+    }
     const top = this.scroller.scrollTop, height = this.scroller.clientHeight;
     const pageHeight = box.height / Math.max(1, this.layout!.zoom);
     const near = box.top < top + height + pageHeight && box.top + box.height > top - pageHeight;
