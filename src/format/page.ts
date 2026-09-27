@@ -4,11 +4,20 @@
 // a pdf template's image (#14) is stored once, as the <image> of the <g id="template"> layer,
 // not in the metadata, and readPage reads it back from there (see template.ts).
 //
+// Images (#12): a page's `images` are drawn in <g id="objects">, between the template and the
+// highlight layer, as <image data-id="i-…" x y width height preserveAspectRatio="none"
+// href="data:…">. Like a pdf template's image, the bytes are stored once, in the drawing: the
+// metadata's `images` hold id, x, y, width and height, and readPage reads each image's data
+// back from the <image> with its data-id. A stroke written on an image carries its id in `on`
+// (the ink belongs to the image: it moves, scales and is deleted with it). A page without
+// images writes `images` and `on` nowhere, and its objects layer stays the empty last layer,
+// so pages written before #12 keep their bytes.
+//
 // Off-page coordinates (#35): a stroke belongs to the page it started on and may run off its
 // edges and back. Its points are stored as they were sampled, not clamped to the page, so x
 // and y can be negative or beyond the page's width and height; the outline near the edge keeps
 // its true shape, and the drawing is clipped by the page (the SVG's viewBox, the view's canvases).
-import { isPageId, isStrokeId } from './ids';
+import { isImageId, isPageId, isStrokeId } from './ids';
 import { fmt1, strokePath } from './outline';
 import { fixedPaper, IMAGE_RE, metadataTemplate, parseTemplate, renderTemplate, type Size, type Template } from './template';
 
@@ -90,6 +99,8 @@ interface StrokeBase {
   /** Width in CSS px, stored to 0.1 px (for the pressure nib, the width at pressure 0.5). */
   size: number;
   points: Point[];
+  /** The id of the image this stroke was written on (#12), if any. */
+  on?: string;
 }
 
 export interface PenStroke extends StrokeBase {
@@ -112,6 +123,20 @@ export interface Page {
   template: Template;
   /** In drawing order. Highlighter strokes are drawn under all pen strokes. */
   strokes: Stroke[];
+  /** Images on the page (#12), bottom first, drawn under all strokes. Absent or empty: none. */
+  images?: PageImage[];
+}
+
+/** An image placed on a page (#12). Coordinates in page px, rounded like points (0.1 px). */
+export interface PageImage {
+  /** `i-` and 6 lowercase hex characters, unique within the page. */
+  id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** `data:image/jpeg;base64,…` or png, at the image's own resolution; '' if missing. */
+  data: string;
 }
 
 /** An empty page. */
@@ -200,6 +225,26 @@ function checkStroke(s: unknown, i: number, seen: Set<string>): StrokeHead {
   return fail(`stroke ${id} has an unknown tool ${JSON.stringify(st.tool)}`);
 }
 
+/** An image's fields, validated and rounded (data: '' unless a base64 JPEG or PNG data URL). */
+function checkImage(v: unknown, i: number, seen: Set<string>): PageImage {
+  const im = v as Partial<PageImage>;
+  if (typeof im !== 'object' || im === null) fail(`image ${i} is not an object`);
+  if (typeof im.id !== 'string' || !isImageId(im.id)) fail(`image ${i} has an invalid id ${JSON.stringify(im.id)}`);
+  if (seen.has(im.id)) fail(`image id ${im.id} is used twice`);
+  seen.add(im.id);
+  if (!isNum(im.x) || !isNum(im.y) || !isNum(im.width) || !isNum(im.height)) fail(`image ${im.id} needs numeric x, y, width and height`);
+  const width = roundXY(im.width), height = roundXY(im.height);
+  if (width <= 0 || height <= 0) fail(`image ${im.id} has no area`);
+  const data = typeof im.data === 'string' && IMAGE_RE.test(im.data) ? im.data : '';
+  return { id: im.id, x: roundXY(im.x), y: roundXY(im.y), width, height, data };
+}
+
+/** A stroke's `on`, kept only if it names one of the page's images. */
+const onImage = (s: unknown, images: ReadonlySet<string>): string | undefined => {
+  const on = (s as { on?: unknown }).on;
+  return typeof on === 'string' && images.has(on) ? on : undefined;
+};
+
 // ---- writing
 
 /** Default ink (`.i`, fill) and template lines (`.t`, stroke) follow dark mode (not on pdf pages). */
@@ -226,23 +271,28 @@ export function writePage(page: Page): string {
   if (typeof page.id !== 'string' || !isPageId(page.id)) fail(`invalid page id ${JSON.stringify(page.id)}`);
   const size = checkSize(page.size);
   const template = parseTemplate(page.template);
+  const imageIds = new Set<string>();
+  const images = (page.images ?? []).map((im, i) => checkImage(im, i, imageIds));
   const seen = new Set<string>();
   const strokes = page.strokes.map((s, i) => {
     const head = checkStroke(s, i, seen);
+    const on = onImage(s, imageIds);
     if (!Array.isArray(s.points) || s.points.length === 0) fail(`stroke ${head.id} has no points`);
     for (const pt of s.points) {
       if (!isNum(pt.x) || !isNum(pt.y) || !isNum(pt.p) || !isNum(pt.t)) fail(`stroke ${head.id} has a non-numeric point`);
     }
     const flat = encodePoints(s.points);
-    return { ...head, flat, points: decodePoints(flat) };
+    return { ...head, on, flat, points: decodePoints(flat) };
   });
 
   const json = (v: unknown) => JSON.stringify(v);
   const strokeJson = strokes.map(s =>
     `{"id":${json(s.id)},"tool":${json(s.tool)},` + (s.tool === 'pen' ? `"nib":${json(s.nib)},` : '') +
-    `"color":${json(s.color)},"size":${json(s.size)},"points":${json(s.flat)}}`);
+    `"color":${json(s.color)},"size":${json(s.size)},` + (s.on ? `"on":${json(s.on)},` : '') + `"points":${json(s.flat)}}`);
+  const imageJson = images.map(im => json({ id: im.id, x: im.x, y: im.y, width: im.width, height: im.height }));
   const meta =
-    `{"format":${json(FORMAT)},"id":${json(page.id)},"size":${json(size)},"template":${json(metadataTemplate(template))},"strokes":[` +
+    `{"format":${json(FORMAT)},"id":${json(page.id)},"size":${json(size)},"template":${json(metadataTemplate(template))},` +
+    (images.length ? `"images":[\n${imageJson.join(',\n')}\n],` : '') + `"strokes":[` +
     (strokeJson.length ? '\n' + strokeJson.join(',\n') + '\n' : '') + ']}';
 
   const path = (s: Stroke) => {
@@ -250,16 +300,21 @@ export function writePage(page: Page): string {
     return `<path data-id="${s.id}" ${paint} d="${strokePath(s)}"/>`;
   };
   const w = fmt1(size.width), h = fmt1(size.height);
+  const image = (im: PageImage) =>
+    `<image data-id="${im.id}" x="${fmt1(im.x)}" y="${fmt1(im.y)}" width="${fmt1(im.width)}" height="${fmt1(im.height)}" preserveAspectRatio="none" href="${im.data}"/>`;
+  // With images, the objects layer sits under the ink; without, it stays last and empty (#12).
+  const objects = images.length ? [layer('objects', '', images.filter(im => im.data).map(image))] : [];
   return [
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">`,
     fixedPaper(template) ? PDF_STYLE : STYLE,
     // `]]>` could only occur inside a JSON string, where `>` may be escaped instead.
     `<metadata><![CDATA[${meta.replace(/]]>/g, ']]\\u003e')}]]></metadata>`,
     layer('template', '', renderTemplate(template, size)),
+    ...objects,
     // Highlighter paths are opaque and the layer is translucent, so crossing strokes don't darken.
     layer('highlight', ' opacity="0.4"', strokes.filter(s => s.tool === 'highlighter').map(path)),
     layer('ink', '', strokes.filter(s => s.tool === 'pen').map(path)),
-    layer('objects', '', []),
+    ...(images.length ? [] : [layer('objects', '', [])]),
     '</svg>',
     '',
   ].join('\n');
@@ -274,6 +329,14 @@ export function writePage(page: Page): string {
 function templateImage(svgText: string): string {
   const m = /<g id="template"[^>]*>\s*<image\b[^>]*?\shref="([^"]*)"/.exec(svgText);
   return m && IMAGE_RE.test(m[1]) ? m[1] : '';
+}
+
+/** The `href` of each <image data-id="i-…"> of the objects layer (#12), by id. */
+function objectImages(svgText: string): Map<string, string> {
+  const out = new Map<string, string>();
+  const re = /<image data-id="(i-[0-9a-f]{6})"[^>]*?\shref="([^"]*)"/g;
+  for (let m = re.exec(svgText); m; m = re.exec(svgText)) if (!out.has(m[1])) out.set(m[1], m[2]);
+  return out;
 }
 
 /**
@@ -298,7 +361,11 @@ export function readPage(svgText: string): Page {
   if (typeof data.id !== 'string' || !isPageId(data.id)) fail(`invalid page id ${JSON.stringify(data.id)}`);
   const size = checkSize(data.size);
   let template = parseTemplate(data.template);
-  if (template.kind === 'pdf') template = { ...template, image: templateImage(svgText) };
+  if (template.kind === 'pdf' || template.kind === 'image') template = { ...template, image: templateImage(svgText) };
+  if (data.images !== undefined && !Array.isArray(data.images)) fail('images must be an array');
+  const imageIds = new Set<string>();
+  const hrefs = data.images ? objectImages(svgText) : null;
+  const images = ((data.images ?? []) as unknown[]).map((v, i) => checkImage({ ...(v as object), data: hrefs?.get((v as PageImage)?.id) }, i, imageIds));
   if (!Array.isArray(data.strokes)) fail('strokes must be an array');
   const seen = new Set<string>();
   const strokes: Stroke[] = data.strokes.map((s: unknown, i: number) => {
@@ -307,7 +374,8 @@ export function readPage(svgText: string): Page {
     if (!Array.isArray(flat) || flat.length === 0 || flat.length % 4 !== 0 || !flat.every(isNum)) {
       fail(`stroke ${head.id} points must be a non-empty flat array of [x, y, p, dt] numbers`);
     }
-    return { ...head, points: decodePoints(flat) };
+    const on = onImage(s, imageIds);
+    return on ? { ...head, on, points: decodePoints(flat) } : { ...head, points: decodePoints(flat) };
   });
-  return { id: data.id, size, template, strokes };
+  return images.length ? { id: data.id, size, template, strokes, images } : { id: data.id, size, template, strokes };
 }
