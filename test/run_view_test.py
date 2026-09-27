@@ -4510,6 +4510,186 @@ try:
         check('ruler: reopening the note shows no ruler', r['reopened'] == [False, False, False], r)
         # ======== end of 26. The ruler (#20) ========
 
+        # ======== 27. Shapes: hold to straighten (#16) ========
+        r = ev("""async () => {
+          view.resetZoom();
+          await T.sleep(120);
+          T.middle();
+          await T.sleep(50);
+          view.setTool('pen');
+          /** A hand-drawn path through `corners` (page px), ~2 px steps with a wobble, as [x, y, p]. */
+          T.hand = (corners, wob = 1.5) => {
+            const out = [];
+            let s = 0;
+            for (let i = 1; i < corners.length; i++) {
+              const [ax, ay] = corners[i - 1], [bx, by] = corners[i], L = Math.hypot(bx - ax, by - ay), n = Math.max(1, Math.round(L / 2));
+              for (let j = i === 1 ? 0 : 1; j <= n; j++) {
+                const u = j / n, w = wob * Math.sin(s / 23);
+                out.push([ax + (bx - ax) * u - (by - ay) / L * w, ay + (by - ay) * u + (bx - ax) / L * w, 0.3 + 0.2 * Math.sin(s / 50)]);
+                s += L / n;
+              }
+            }
+            return out;
+          };
+          T.rect = (x, y, w, h) => T.hand([[x + 10, y + 2], [x + w - 6, y - 1], [x + w, y + 5], [x + w + 2, y + h - 6], [x + w - 5, y + h], [x + 5, y + h + 2], [x - 1, y + h - 5], [x + 1, y + 6], [x + 12, y + 1]]);
+          T.circle = (cx, cy, R) => T.hand(Array.from({ length: 49 }, (_, j) => [cx + R * Math.cos(j / 46 * 2 * Math.PI), cy + R * Math.sin(j / 46 * 2 * Math.PI)]), 1);
+          /** Draws `pts` on page 0 and holds still for `ms` with the pointer down; returns the preview then and before. */
+          T.hold = async (pts, { ms = 700, id = 80, type = 'pen', repeat = false } = {}) => {
+            await T.pen(0, pts, { id, type, up: false });
+            await T.frame();
+            const before = { shape: view.input.previewShape, path: view.input.livePath };
+            if (repeat) {
+              // WebKit keeps sending pointermoves at (nearly) the same place while the Pencil is held.
+              const el = T.pages()[0], r = el.getBoundingClientRect(), k = r.width / 816, [x, y] = pts[pts.length - 1];
+              for (let t = 0; t < ms; t += 40) {
+                el.dispatchEvent(new PointerEvent('pointermove', { pointerId: id, pointerType: type, pressure: 0.4, clientX: r.left + x * k + (t % 80 ? 0.5 : 0), clientY: r.top + y * k,
+                  bubbles: true, cancelable: true, buttons: 1 }));
+                await T.sleep(40);
+              }
+            } else await T.sleep(ms);
+            await T.frame();
+            return { before, shape: view.input.previewShape, path: view.input.livePath, live: T.liveInk(1) };
+          };
+          T.labels = () => view.history.labels.slice(-2);
+          return true;
+        }""")
+
+        # A rough rectangle, held, then lifted.
+        r = ev("""async () => {
+          const pts = T.rect(250, 380, 300, 200), n0 = view.store.page(view.store.slots[0]).strokes.length;
+          const h = await T.hold(pts);
+          return { h, n0, pts: pts.length };
+        }""")
+        page.locator('#leaf').screenshot(path=os.path.join(OUT, 'shapes_preview.png'))
+        r2 = ev("""async () => {
+          T.penUp(0, T.rect(250, 380, 300, 200).slice(-1)[0], 80);
+          await T.frame();
+          const st = T.lastStroke(0), pts = st.points;
+          const xs = pts.map(q => q.x), ys = pts.map(q => q.y), x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+          const onSides = pts.every(q => q.x === x0 || q.x === x1 || q.y === y0 || q.y === y1);
+          const corners = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]].filter(([x, y]) => pts.some(q => q.x === x && q.y === y)).length;
+          const out = { kind: view.input.lastShape, n: view.store.page(view.store.slots[0]).strokes.length, tool: st.tool, onSides, corners, box: [x0, y0, x1, y1],
+            closed: pts[0].x === pts[pts.length - 1].x && pts[0].y === pts[pts.length - 1].y, id: st.id, labels: T.labels(), live: T.liveInk(1) };
+          view.undo();
+          const u = T.lastStroke(0);
+          out.undo = { id: u.id, n: u.points.length, straight: u.points.every(q => q.x === x0 || q.x === x1 || q.y === y0 || q.y === y1), count: view.store.page(view.store.slots[0]).strokes.length };
+          view.redo();
+          const re = T.lastStroke(0);
+          out.redo = { same: JSON.stringify(re.points) === JSON.stringify(pts), id: re.id };
+          view.undo(); view.undo();
+          out.twice = view.store.page(view.store.slots[0]).strokes.length;
+          view.redo();
+          out.redoAdd = T.lastStroke(0).points.length;
+          view.redo();
+          out.redoBoth = JSON.stringify(T.lastStroke(0).points) === JSON.stringify(pts);
+          return out;
+        }""")
+        print('shapes: rectangle:', r, r2)
+        check('shapes: holding a rough rectangle still for 600 ms previews a rectangle in place of the stroke',
+              r['h']['before']['shape'] is None and r['h']['shape'] == 'rectangle' and r['h']['path'] != r['h']['before']['path'] and r['h']['live'] > 1000, r)
+        check('shapes: lifted, the saved stroke is the rectangle: axis-aligned, 4 exact corners, closed; the overlay is cleared',
+              r2['kind'] == 'rectangle' and r2['n'] == r['n0'] + 1 and r2['onSides'] and r2['corners'] == 4 and r2['closed'] and r2['tool'] == 'pen' and r2['live'] == 0, r2)
+        check('shapes: undo steps are "Add stroke", "Straighten"; undo restores the freehand stroke (same id), redo the rectangle',
+              r2['labels'] == ['Add stroke', 'Straighten'] and r2['undo']['id'] == r2['id'] and not r2['undo']['straight'] and r2['undo']['count'] == r2['n']
+              and r2['redo']['same'] and r2['redo']['id'] == r2['id'], r2)
+        check('shapes: a second undo removes the stroke; redo brings it back freehand, then straightened',
+              r2['twice'] == r['n0'] and r2['redoAdd'] == r2['undo']['n'] and r2['redoBoth'], r2)
+        page.locator('#leaf').screenshot(path=os.path.join(OUT, 'shapes_rectangle.png'))
+
+        # A line, and a circle held with WebKit-style repeated pointermoves.
+        r = ev("""async () => {
+          const out = {};
+          const line = T.hand([[200, 700], [560, 640]], 2);
+          out.lineHold = (await T.hold(line, { id: 81 })).shape;
+          T.penUp(0, line[line.length - 1], 81);
+          await T.frame();
+          let st = T.lastStroke(0), a = st.points[0], b = st.points[st.points.length - 1];
+          const off = q => Math.abs((q.x - a.x) * (b.y - a.y) - (q.y - a.y) * (b.x - a.x)) / Math.hypot(b.x - a.x, b.y - a.y);
+          out.line = { kind: view.input.lastShape, off: Math.max(...st.points.map(off)), n: st.points.length, labels: T.labels() };
+          const circle = T.circle(620, 450, 70);
+          out.circleHold = (await T.hold(circle, { id: 82, repeat: true })).shape;
+          T.penUp(0, circle[circle.length - 1], 82);
+          await T.frame();
+          st = T.lastStroke(0);
+          const xs = st.points.map(q => q.x), ys = st.points.map(q => q.y), cx = (Math.min(...xs) + Math.max(...xs)) / 2, cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+          const rs = st.points.map(q => Math.hypot(q.x - cx, q.y - cy));
+          out.circle = { kind: view.input.lastShape, spread: Math.max(...rs) - Math.min(...rs), r: rs[0] };
+          view.undo();
+          out.circleUndo = T.lastStroke(0).points.length !== st.points.length;
+          view.redo();
+          return out;
+        }""")
+        print('shapes: line and circle:', r)
+        check('shapes: a held wobbly line is saved straight (every point within 0.1 px of the line through its ends)',
+              r['lineHold'] == 'line' and r['line']['kind'] == 'line' and r['line']['off'] <= 0.1 and r['line']['labels'] == ['Add stroke', 'Straighten'], r)
+        check('shapes: a circle held with repeated pointermoves in place is saved as a circle (radius spread under 0.3 px about its box centre); undo restores the freehand one',
+              r['circleHold'] == 'circle' and r['circle']['kind'] == 'circle' and r['circle']['spread'] < 0.3 and r['circleUndo'], r)
+
+        # Moving on after the hold, the ruler, the highlighter and the toggle.
+        r = ev("""async () => {
+          const out = {};
+          const line = T.hand([[200, 330], [500, 330]], 1.5);
+          out.held = (await T.hold(line, { id: 83 })).shape;
+          await T.pen(0, T.hand([[500, 330], [520, 420], [470, 470]], 0).slice(1), { id: 83, up: false });
+          await T.frame();
+          out.after = view.input.previewShape;
+          out.path = view.input.livePath.length > 0;
+          T.penUp(0, [470, 470], 83);
+          await T.frame();
+          out.moved = { kind: view.input.lastShape, n: T.lastStroke(0).points.length, label: T.labels()[1] };
+          // The ruler: a ruled stroke is never straightened.
+          view.toggleRuler();
+          view.setRulerCentre(408, 528);
+          view.setRulerAngle(0);
+          await T.frame();
+          const pts = [];
+          for (let j = 0; j <= 30; j++) pts.push(T.onRuler(-100 + 5 * j, 36 + 3 / (T.pages()[0].getBoundingClientRect().width / 816)));
+          pts.push(pts[30]);
+          let ruledHold = 'unset';
+          await T.penAt(pts, { id: 84, between: async j => { if (j === 31) { await T.sleep(700); ruledHold = view.input.previewShape; } } });
+          out.ruler = { ruled: view.input.lastRuled, hold: ruledHold, kind: view.input.lastShape, label: T.labels()[1] };
+          view.toggleRuler();
+          await T.frame();
+          // The highlighter.
+          view.setTool('highlighter');
+          const hl = T.rect(150, 800, 200, 120);
+          out.hlHold = (await T.hold(hl, { id: 85 })).shape;
+          T.penUp(0, hl[hl.length - 1], 85);
+          await T.frame();
+          const hs = T.lastStroke(0);
+          out.hl = { kind: view.input.lastShape, tool: hs.tool, labels: T.labels() };
+          view.setTool('pen');
+          // Recognition off: the command toggles it.
+          commands['toggle-shapes'].checkCallback(false);
+          out.off = view.shapesOn;
+          const r2 = T.rect(420, 800, 200, 120);
+          out.offHold = (await T.hold(r2, { id: 86 })).shape;
+          T.penUp(0, r2[r2.length - 1], 86);
+          await T.frame();
+          out.offKind = view.input.lastShape;
+          out.offLabel = T.labels()[1];
+          commands['toggle-shapes'].checkCallback(false);
+          out.on = view.shapesOn;
+          return out;
+        }""")
+        print('shapes: moved, ruler, highlighter, toggle:', r)
+        check('shapes: moving on after the hold drops the shape and the stroke stays freehand, one "Add stroke"',
+              r['held'] == 'line' and r['after'] is None and r['path'] and r['moved']['kind'] is None and r['moved']['label'] == 'Add stroke', r)
+        check('shapes: a ruled stroke held still is not straightened', r['ruler']['ruled'] and r['ruler']['hold'] is None and r['ruler']['kind'] is None and r['ruler']['label'] == 'Add stroke', r)
+        check('shapes: the highlighter straightens too (a highlighter rectangle)', r['hlHold'] == 'rectangle' and r['hl']['kind'] == 'rectangle' and r['hl']['tool'] == 'highlighter'
+              and r['hl']['labels'] == ['Add stroke', 'Straighten'], r)
+        check('shapes: "Toggle shape recognition" turns it off (a held rectangle stays freehand) and on again',
+              r['off'] is False and r['offHold'] is None and r['offKind'] is None and r['offLabel'] == 'Add stroke' and r['on'] is True, r)
+        page.locator('#leaf').screenshot(path=os.path.join(OUT, 'shapes_all.png'))
+
+        r = ev("""async () => {
+          await view.save();
+          const path = view.store.slots[0].path, pg = ink.readPage(fs.get(path)), model = view.store.page(view.store.slots[0]);
+          return { same: ink.writePage(model) === fs.get(path), n: pg.strokes.length, n1: model.strokes.length };
+        }""")
+        check('shapes: saved as ordinary strokes (the file reads back and writes identically)', r['same'] and r['n'] == r['n1'], r)
+        # ======== end of 27. Shapes (#16) ========
+
         # --- unload removes the patch
         r = ev("""async () => {
           p.unload();
