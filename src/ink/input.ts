@@ -22,11 +22,15 @@
 // therefore bounded by LIVE_MAX + OVERLAP points however long the stroke. On release the
 // stroke goes to the host, which draws its exact outline into the page bitmap, and both
 // overlays are cleared.
+//
+// The highlighter (#6) is drawn translucent, at HIGHLIGHT_ALPHA like the page's highlight layer,
+// but composited once so that its frozen head and its tail (and the stroke where it crosses
+// itself) don't darken where they overlap: see PenInput.highlight.
 import { strokePath } from '../format/outline';
-import { roundP, roundXY, type PenStroke, type Point, type Size } from '../format/page';
+import { roundP, roundXY, type HighlighterStroke, type PenStroke, type Point, type Size } from '../format/page';
 import { fmt, median, yn } from '../debug/util';
 import type { PenSettings } from './pen';
-import { pixelRatio } from './renderer';
+import { HIGHLIGHT_ALPHA, pixelRatio } from './renderer';
 
 /** Samples closer than this (page px) to the previous one are dropped. */
 export const MIN_STEP = 0.25;
@@ -47,6 +51,12 @@ export interface PageTarget {
 /** A finished stroke, without its id. */
 export type NewPenStroke = Omit<PenStroke, 'id'>;
 
+/** A finished stroke of either tool, without its id. */
+export type NewStroke = NewPenStroke | Omit<HighlighterStroke, 'id'>;
+
+/** What a stroke is written with: its tool, colour and size, and the nib for a pen stroke. */
+export type StrokeStyle = Omit<NewPenStroke, 'points'> | Omit<HighlighterStroke, 'id' | 'points'>;
+
 export interface PenHost {
   /** The writable page an event landed on, or null. */
   pageAt(target: EventTarget | null): PageTarget | null;
@@ -55,9 +65,11 @@ export interface PenHost {
   /** The colour a stroke of this colour is drawn in (the default ink follows the theme). */
   drawColor(color: string): string;
   /** A finished stroke on a page. */
-  commit(target: PageTarget, stroke: NewPenStroke): void;
+  commit(target: PageTarget, stroke: NewStroke): void;
   /** The pen stats changed (a stroke ended or a touch was ignored). */
   statsChanged(): void;
+  /** What a stroke starting now is written with (the active tool's own colour and size). */
+  strokeStyle(): StrokeStyle;
 }
 
 // ---- sampling (pure; tested with fake events)
@@ -280,6 +292,8 @@ interface Live {
   target: PageTarget;
   map: PageMap;
   pen: PenSettings;
+  /** What the stroke is written with. */
+  style: StrokeStyle;
   color: string;
   trace: Trace;
   predicted: Point[];
@@ -314,6 +328,8 @@ export class PenInput {
   private frame = 0;
   /** The path `d` of the tail drawn in the last frame (for tests). */
   livePath = '';
+  /** Where a highlighter frame is put together before it's composited (see highlight). */
+  private scratch: HTMLCanvasElement | null = null;
 
   /** `listen` adds a listener on the element holding the pages (removed with the view). */
   constructor(private host: PenHost, listen: Listen, readonly stats: PenStats = newPenStats()) {
@@ -348,11 +364,14 @@ export class PenInput {
     const rect = target.el.getBoundingClientRect();
     this.place(target, rect);
     const pen = { ...this.host.pen() };
+    const style = { ...this.host.strokeStyle() };
+    // The highlighter's head canvas only stores the frozen part, opaque; highlight() shows it.
+    this.head.style.visibility = style.tool === 'highlighter' ? 'hidden' : '';
     this.stats.coalesced = typeof e.getCoalescedEvents === 'function';
     this.stats.predicted = typeof e.getPredictedEvents === 'function';
     const live: Live = this.live = {
       pointerId: e.pointerId, pointerType: e.pointerType, target, map: pageMap(rect, target.size, e.timeStamp), pen,
-      color: this.host.drawColor(pen.color), trace: newTrace(), predicted: [], frozen: 0, pieces: 0,
+      style, color: this.host.drawColor(style.color), trace: newTrace(), predicted: [], frozen: 0, pieces: 0,
       events: 0, handler: [], frames: [], maxPredicted: 0, tailBox: null, head: false,
     };
     addSamples(live.trace, [e], live.map);
@@ -384,7 +403,7 @@ export class PenInput {
     this.record(live, cancelled);
     // A cancelled stroke (the system took the pointer) is kept, like a finished one.
     const { points } = live.trace;
-    if (points.length) this.host.commit(live.target, { tool: 'pen', nib: live.pen.nib, color: live.pen.color, size: live.pen.size, points });
+    if (points.length) this.host.commit(live.target, { ...live.style, points });
     this.clear();
     this.host.statsChanged();
   }
@@ -408,23 +427,70 @@ export class PenInput {
       live.head = true;
     }
     const ctx = this.tailCtx;
-    if (live.tailBox) {
-      const [x0, y0, x1, y1] = live.tailBox;
-      ctx.clearRect(x0, y0, x1 - x0, y1 - y0);
-    }
     const tail = pts.slice(plan.tail).concat(live.predicted);
-    this.livePath = this.fill(ctx, live, tail);
-    live.tailBox = box(tail, live.pen.size);
+    if (live.style.tool === 'highlighter') this.livePath = this.highlight(live, tail);
+    else {
+      if (live.tailBox) {
+        const [x0, y0, x1, y1] = live.tailBox;
+        ctx.clearRect(x0, y0, x1 - x0, y1 - y0);
+      }
+      this.livePath = this.fill(ctx, live, tail);
+    }
+    live.tailBox = box(tail, live.style.size);
     live.frames.push(performance.now() - t0);
   }
 
   /** Fills the outline of these points in the stroke's settings; returns the path `d`. */
   private fill(ctx: CanvasRenderingContext2D, live: Live, points: Point[]): string {
-    const d = strokePath({ tool: 'pen', nib: live.pen.nib, size: live.pen.size, points });
+    const d = strokePath({ ...live.style, points });
     if (d) {
       ctx.fillStyle = live.color;
       ctx.fill(new Path2D(d));
     }
+    return d;
+  }
+
+  /**
+   * A highlighter frame. The frozen head is drawn opaque onto the head canvas, which is hidden.
+   * Each frame, the part of the tail canvas that the tail covered last frame or covers now is
+   * rebuilt: the head's pixels there and the tail's outline are drawn opaque onto a scratch
+   * canvas, which then replaces that part of the tail canvas at HIGHLIGHT_ALPHA. Every pixel of
+   * the live stroke is therefore composited once, like the saved highlight layer, with no darker
+   * seam where head and tail overlap. A frame costs the tail's outline (at most LIVE_MAX +
+   * OVERLAP points, as for the pen) plus two copies of the tail's bounding box. Returns the
+   * tail's path `d`.
+   */
+  private highlight(live: Live, points: Point[]): string {
+    const c = this.tail, ctx = this.tailCtx, size = live.target.size;
+    const kx = c.width / size.width, ky = c.height / size.height;
+    const d = strokePath({ ...live.style, points });
+    const now = box(points, live.style.size), was = live.tailBox;
+    const b = now && was ? [Math.min(now[0], was[0]), Math.min(now[1], was[1]), Math.max(now[2], was[2]), Math.max(now[3], was[3])] : now ?? was;
+    if (!b) return d;
+    // In whole device pixels, so the area cleared is exactly the area redrawn.
+    const x = Math.max(0, Math.floor(b[0] * kx)), y = Math.max(0, Math.floor(b[1] * ky));
+    const w = Math.min(c.width, Math.ceil(b[2] * kx)) - x, h = Math.min(c.height, Math.ceil(b[3] * ky)) - y;
+    if (w <= 0 || h <= 0) return d;
+    const scratch = this.scratch ??= document.createElement('canvas');
+    if (scratch.width < w || scratch.height < h) {
+      scratch.width = Math.max(scratch.width, w);
+      scratch.height = Math.max(scratch.height, h);
+    }
+    const s = scratch.getContext('2d')!;
+    s.setTransform(1, 0, 0, 1, 0, 0);
+    s.clearRect(0, 0, w, h);
+    if (live.head) s.drawImage(this.head, x, y, w, h, 0, 0, w, h);
+    if (d) {
+      s.setTransform(kx, 0, 0, ky, -x, -y);
+      s.fillStyle = live.color;
+      s.fill(new Path2D(d));
+    }
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(x, y, w, h);
+    ctx.globalAlpha = HIGHLIGHT_ALPHA;
+    ctx.drawImage(scratch, 0, 0, w, h, x, y, w, h);
+    ctx.restore();
     return d;
   }
 
@@ -506,6 +572,8 @@ export class PenInput {
       c.width = c.height = 0;
       c.remove();
     }
+    if (this.scratch) this.scratch.width = this.scratch.height = 0;
+    this.scratch = null;
   }
 }
 

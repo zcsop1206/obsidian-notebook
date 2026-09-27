@@ -199,6 +199,20 @@
   font-style: italic;
 }
 
+/* PROVISIONAL tool group and highlighter group (#6); highlighter swatches are chisel-shaped. */
+.nb-ink-strip .nb-ink-hl-swatch {
+  width: 26px;
+  min-width: 26px;
+  height: 16px;
+  padding: 0;
+  border-radius: 3px;
+  border: 1px solid rgba(0, 0, 0, 0.2);
+}
+
+.nb-ink-strip .nb-ink-hl-swatch.is-active {
+  box-shadow: 0 0 0 2px var(--background-primary, #fff), 0 0 0 4px var(--interactive-accent, #7b6cd9);
+}
+
 /* Pen stats overlay ("Toggle ink stats overlay"). */
 .nb-ink-stats {
   position: absolute;
