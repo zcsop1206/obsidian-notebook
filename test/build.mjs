@@ -1,5 +1,6 @@
 // Bundles the unit tests (test/unit/*.test.ts) into test/out/unit.js, run with
-// `node --test test/out/unit.js`, and the fixture script into test/out/make-fixture.js.
+// `node --test test/out/unit.js`, the fixture script into test/out/make-fixture.js, and the
+// format functions and large-note generator for the ink view test into test/out/view-fixture.js.
 import esbuild from 'esbuild';
 import { readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -14,3 +15,4 @@ await esbuild.build({
   outfile: 'test/out/unit.js',
 });
 await esbuild.build({ ...common, entryPoints: ['test/make-fixture.ts'], outfile: 'test/out/make-fixture.js' });
+await esbuild.build({ ...common, platform: 'browser', format: 'iife', target: 'es2020', entryPoints: ['test/view-fixture.ts'], outfile: 'test/out/view-fixture.js' });
