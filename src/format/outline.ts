@@ -102,7 +102,8 @@ export function strokePath(stroke: OutlineInput, live = false): string {
 
 /**
  * The outline's points, as perfect-freehand computes them: of the refitted points for a
- * finished pen stroke, of the raw points for a live one (`live`) and for the highlighter.
+ * finished pen stroke, of the points as given with `live` (the pen's live overlay passes the
+ * same refit, computed incrementally by LiveFit, #52) and for the highlighter.
  */
 export function strokeOutline(stroke: OutlineInput, live = false): number[][] {
   const points = stroke.tool === 'pen' && !live ? refit(stroke.points) : stroke.points;
@@ -159,6 +160,98 @@ export function refit(points: readonly Point[]): Point[] {
   }
   out.push(smooth[n - 1]);
   return out;
+}
+
+/**
+ * The live stroke's points (#52): refit(points), computed incrementally as points arrive, so the
+ * live stroke is drawn from the same smoothed points as the committed one and nothing moves when
+ * the pen lifts. refit's smoothing of a point depends only on the points within REFIT_RADIUS of
+ * arc length around it (its window narrows near the ends, which keeps the ends exact); once the
+ * stroke has run on REFIT_RADIUS past a point, that point's smoothing and its thinning decision
+ * are final. Those settled points are computed once and kept; each update only computes the
+ * few points within REFIT_RADIUS of the tip (provisional, as refit of the stroke so far would
+ * give them) and the new ones. The result equals refit(points) for every prefix (a unit test
+ * checks it), so the tip stays exactly on the last sample. `points` must be the same growing
+ * array (the live trace), appended to only.
+ */
+export class LiveFit {
+  /** Arc length at each point seen. */
+  private s: number[] = [];
+  /** refit's output for the settled points (the first point and the smoothed, thinned ones). */
+  private fitted: Point[] = [];
+  /** The provisional points after them, the last sample last. */
+  private rest: Point[] = [];
+  /** The first point not settled yet, and refit's window bounds for it. */
+  private next = 1;
+  private lo = 0;
+  private hi = 0;
+
+  /** Brings the fit up to date with `points`; returns the number of points to draw. */
+  update(points: readonly Point[]): number {
+    const n = points.length, s = this.s;
+    for (let i = s.length; i < n; i++) s.push(i ? s[i - 1] + Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y) : 0);
+    if (n < 3 || REFIT_RADIUS <= 0) {
+      // refit returns fewer than 3 points as they are (and everything when turned off).
+      this.fitted.length = 0;
+      this.rest = points.slice();
+      return n;
+    }
+    const total = s[n - 1], fitted = this.fitted;
+    if (!fitted.length) fitted.push(points[0]);
+    // Settle the points REFIT_RADIUS or more before the tip: their window is final.
+    while (this.next < n - 1 && total - s[this.next] >= REFIT_RADIUS) {
+      const i = this.next++;
+      const b = this.smooth(points, i, total);
+      const a = fitted[fitted.length - 1];
+      if (Math.hypot(b.x - a.x, b.y - a.y) >= REFIT_STEP) fitted.push(b);
+    }
+    // The rest as refit would give it now (windows narrowed toward the tip), thinned on from the
+    // last settled point, and the last sample. The window bounds are put back afterwards.
+    const rest: Point[] = [];
+    let a = fitted[fitted.length - 1];
+    const lo = this.lo, hi = this.hi;
+    for (let i = this.next; i < n - 1; i++) {
+      const b = this.smooth(points, i, total);
+      if (Math.hypot(b.x - a.x, b.y - a.y) >= REFIT_STEP) rest.push(a = b);
+    }
+    this.lo = lo;
+    this.hi = hi;
+    rest.push(points[n - 1]);
+    this.rest = rest;
+    return fitted.length + rest.length;
+  }
+
+  /** Points that no longer change: every point before this index is final. */
+  get settled(): number {
+    return this.fitted.length;
+  }
+
+  /** The points to draw from `from` to `to` (exclusive; default all), as update last computed them. */
+  slice(from: number, to = Infinity): Point[] {
+    const f = this.fitted, k = f.length;
+    const end = Math.min(to, k + this.rest.length);
+    if (from >= end) return [];
+    if (end <= k) return f.slice(from, end);
+    return (from < k ? f.slice(from) : []).concat(this.rest.slice(Math.max(0, from - k), end - k));
+  }
+
+  /** refit's smoothed point i (the same arithmetic, in the same order), moving the window bounds on. */
+  private smooth(points: readonly Point[], i: number, total: number): Point {
+    const s = this.s, n = points.length;
+    const r = Math.min(REFIT_RADIUS, s[i], total - s[i]);
+    let lo = this.lo, hi = this.hi;
+    while (s[lo] < s[i] - r) lo++;
+    while (hi < n - 1 && s[hi + 1] <= s[i] + r) hi++;
+    let w = 0, x = 0, y = 0, p = 0;
+    for (let j = lo; j <= hi; j++) {
+      const k = r > 0 ? 1 - Math.abs(s[j] - s[i]) / (r + 1e-9) : 1;
+      if (k <= 0) continue;
+      w += k; x += k * points[j].x; y += k * points[j].y; p += k * points[j].p;
+    }
+    this.lo = lo;
+    this.hi = hi;
+    return w > 0 ? { x: x / w, y: y / w, p: p / w, t: points[i].t } : points[i];
+  }
 }
 
 /** A closed polygon as `M x y L x y … Z`, dropping points that round onto the previous one. */

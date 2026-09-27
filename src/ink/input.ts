@@ -30,9 +30,10 @@
 //
 // Drawing: the event handlers only record samples; drawing happens at most once per animation
 // frame. The stroke in progress is the same perfect-freehand outline as the saved page
-// (strokePath in format/outline.ts with the stroke's options) of the raw points, without the
-// refit a finished pen stroke gets (#32), filled through Path2D on two overlay canvases over the
-// page (past the canvas limit, over the band of it a page bitmap would cover, at full device
+// (strokePath in format/outline.ts with the stroke's options) of the same points: for the pen,
+// the refit a finished stroke gets (#32), computed incrementally (LiveFit, #52), so the stroke
+// doesn't change when the pen lifts; filled through Path2D on two overlay canvases over the page
+// (past the canvas limit, over the band of it a page bitmap would cover, at full device
 // resolution, moved when the view leaves it mid-stroke; see place and follow): the tail canvas
 // is cleared and redrawn every frame with the outline of the latest points plus the predicted
 // tail; once more than LIVE_MAX points are live, the older ones are drawn once onto the head
@@ -79,7 +80,7 @@
 // canvas hidden, the shape drawn translucent on the tail canvas) until the pen lifts, when it
 // is given to the host's commitShape with the freehand stroke; moving more than HOLD_SLOP
 // again drops it and the freehand stroke is drawn again, its points continuing.
-import { strokePath } from '../format/outline';
+import { LiveFit, strokePath } from '../format/outline';
 import { roundP, roundXY, type HighlighterStroke, type PenStroke, type Point, type Size } from '../format/page';
 import { fmt, median, yn } from '../debug/util';
 import type { EraserMode, EraserSettings, PenSettings } from './pen';
@@ -454,7 +455,10 @@ interface Live {
   style: StrokeStyle;
   color: string;
   trace: Trace;
+  /** A pen stroke's points as drawn: refit incrementally, as the committed stroke's (#52). */
+  fit: LiveFit;
   predicted: Point[];
+  /** Drawn points (of fit for the pen, of trace for the highlighter) frozen onto the head canvas. */
   frozen: number;
   pieces: number;
   events: number;
@@ -630,7 +634,7 @@ export class PenInput {
     map.edge = this.rulerEdge(target, map, e);
     const live: Live = this.live = {
       pointerId: e.pointerId, pointerType: e.pointerType, target, map, pen,
-      style, color: this.host.drawColor(style.color), trace: newTrace(), predicted: [], frozen: 0, pieces: 0,
+      style, color: this.host.drawColor(style.color), trace: newTrace(), fit: new LiveFit(), predicted: [], frozen: 0, pieces: 0,
       events: 0, handler: [], frames: [], maxPredicted: 0, tailBox: null, head: false,
       hold: null, len: 0, lenCount: 1, shape: null,
     };
@@ -723,7 +727,12 @@ export class PenInput {
       return;
     }
     const pts = live.trace.points;
-    const plan = livePlan(this.drawnCount(live), live.frozen);
+    // The pen is drawn from its refit points (#52; LiveFit: refit of the points so far, the same
+    // points the committed stroke's outline is of), the highlighter from its points.
+    const count = this.drawnCount(live);
+    let plan = livePlan(count, live.frozen);
+    // Only points that no longer change are frozen (the refit's last 1.5 px still move).
+    if (plan.freeze && live.style.tool === 'pen' && plan.freeze[1] > live.fit.settled) plan = livePlan(live.frozen, live.frozen);
     if (plan.freeze) {
       this.fill(this.headCtx, live, this.drawn(live, plan.freeze[0], plan.freeze[1]));
       live.frozen = plan.frozen;
@@ -745,14 +754,22 @@ export class PenInput {
     live.frames.push(performance.now() - t0);
   }
 
-  /** The number of points drawn. */
+  /** Brings the drawn points up to date; returns how many there are. */
   private drawnCount(live: Live): number {
-    return live.trace.points.length;
+    return live.style.tool === 'pen' ? live.fit.update(live.trace.points) : live.trace.points.length;
   }
 
-  /** The drawn points from `from` to `to` (exclusive). */
+  /** The drawn points from `from` to `to` (exclusive), as drawnCount last computed them. */
   private drawn(live: Live, from: number, to?: number): Point[] {
-    return live.trace.points.slice(from, to);
+    return live.style.tool === 'pen' ? live.fit.slice(from, to) : live.trace.points.slice(from, to);
+  }
+
+  /** The points drawn for the stroke in progress (the pen's refit, #52), for tests. */
+  get livePoints(): Point[] {
+    const live = this.live;
+    if (!live) return [];
+    this.drawnCount(live);
+    return this.drawn(live, 0);
   }
 
   // ---- shapes (#16)

@@ -1,8 +1,9 @@
 // The pen (#5): settings, sampling pointer events (with fake coalesced and predicted events),
-// the frozen head of a long live stroke, and that the live outline is the saved one.
+// the frozen head of a long live stroke, and that the live outline is the saved one (#52: drawn
+// from the refit points, LiveFit).
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { pressureCurve, strokePath } from '../../src/format/outline';
+import { LiveFit, pressureCurve, strokePath } from '../../src/format/outline';
 import { newPage, readPage, writePage, type PenStroke, type Point } from '../../src/format/page';
 import {
   addSamples, blockStylusTouch, LIVE_KEEP, LIVE_MAX, livePlan, MIN_STEP, newTrace, OVERLAP, predictedPoints, samplesOf,
@@ -152,20 +153,21 @@ function sampled(n: number): Point[] {
   return trace.points;
 }
 
-test('live: the live outline of finished points is the saved stroke\'s outline without the refit (#32)', () => {
+test('live: the live outline of finished points is the saved stroke\'s outline (#32, #52: the live stroke is drawn refitted)', () => {
   for (const nib of ['uniform', 'pressure'] as const) {
     const points = sampled(150);
     assert.ok(points.length < LIVE_MAX);
-    const plan = livePlan(points.length, 0);
-    const live = strokePath({ tool: 'pen', nib, size: 2.5, points: points.slice(plan.tail) }, true);
+    const fit = new LiveFit(), n = fit.update(points);
+    const plan = livePlan(n, 0);
+    const live = strokePath({ tool: 'pen', nib, size: 2.5, points: fit.slice(plan.tail) }, true);
     const stroke: PenStroke = { id: '0000abcd', tool: 'pen', nib, color: '#1e6fff', size: 2.5, points };
     const page = newPage('p-00aa11');
     page.strokes.push(stroke);
     const text = writePage(page);
     const saved = readPage(text).strokes[0];
     assert.deepEqual(saved.points, points, 'sampled points survive the file unchanged');
-    assert.equal(live, strokePath(saved, true));
-    assert.notEqual(live, strokePath(saved), 'the committed stroke is refitted');
+    assert.equal(live, strokePath(saved), 'the live outline is the committed (refitted) one');
+    assert.notEqual(live, strokePath(saved, true), 'not the raw points\' outline');
     assert.ok(text.includes(`d="${strokePath(stroke)}"`), 'the file draws the committed (refitted) path');
   }
 });
