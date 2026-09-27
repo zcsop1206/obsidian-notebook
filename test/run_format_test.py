@@ -4,7 +4,8 @@
 # colour with the colour scheme while other colours don't, and that crossing highlighter strokes
 # don't darken. The template pages (lined with margin, grid, dots) must show their lines in the
 # grey of each scheme (light grey on white, dark grey on dark), with the margin line pink in
-# both. Run by `npm test`; screenshots land in test/out/. Exits non-zero on a failure.
+# both. A PDF page (#14), written at test time by the format functions into test/out, must show
+# its embedded page image with the ink over it in both schemes. Run by `npm test`; screenshots land in test/out/. Exits non-zero on a failure.
 import base64, os, re, subprocess, sys, time
 from playwright.sync_api import sync_playwright
 
@@ -139,6 +140,50 @@ try:
         check('pen page: blue ink is the same in light and dark', abs(lp[2] - dp[2]) < 50, (lp[2], dp[2]))
         hc = results[(hl, 'light')]['counts']
         check('highlighter page: crossing highlighters do not darken', hc[3] > 1000 and hc[4] < 30, hc)
+
+        # ---- a PDF page (#14), generated into test/out by the format functions: its embedded
+        # JPEG (white with a red square and a blue bar) must render under the ink in both schemes.
+        page = ctx.new_page()
+        errors = []
+        page.on('pageerror', lambda e: errors.append(str(e)))
+        page.goto(f'{base_url}/test/harness.html')
+        page.add_script_tag(url=f'{base_url}/test/out/view-fixture.js')
+        svg = page.evaluate("""() => {
+          const c = document.createElement('canvas'); c.width = 1240; c.height = 1754;  // A4 at 150 dpi
+          const g = c.getContext('2d');
+          g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+          g.fillStyle = '#d00000'; g.fillRect(0, 0, 200, 200);
+          g.fillStyle = '#0030c0'; g.fillRect(100, 800, 1040, 60);
+          const image = c.toDataURL('image/jpeg', 0.85);
+          const points = Array.from({ length: 40 }, (_, i) => ({ x: 100 + i * 10, y: 600, p: 0.5, t: i * 8 }));
+          return ink.writePage({ id: 'p-0f0f0f', size: { width: 793.7, height: 1122.5 },
+            template: { kind: 'pdf', source: 'pdfnote/lecture.pdf', page: 1, image },
+            strokes: [{ id: '0000beef', tool: 'pen', nib: 'uniform', color: '#000000', size: 6, points }] });
+        }""")
+        page.close()
+        check('pdf page: generated without errors', not errors and svg.count('data:image/jpeg;base64,') == 1, errors)
+        with open(os.path.join(OUT, 'format_pdf_page.svg'), 'w', encoding='utf8') as f:
+            f.write(svg)
+        RED, BLUEBAR = (0xd0, 0, 0), (0, 0x30, 0xc0)
+        for scheme in ['light', 'dark']:
+            page = ctx.new_page()
+            page.emulate_media(color_scheme=scheme)
+            page.goto(f'{base_url}/test/out/')
+            page.set_content(f"<body style='margin:0;background:{BG[scheme]}'><img id='p' src='{base_url}/test/out/format_pdf_page.svg'></body>")
+            page.wait_for_function("() => document.getElementById('p').complete")
+            size = page.evaluate("() => { const i = document.getElementById('p'); return [i.naturalWidth, i.naturalHeight]; }")
+            shot = page.locator('#p').screenshot(path=os.path.join(OUT, f'format_pdf_page_{scheme}.png'))
+            # Screenshot px are 2 per page px: the red square spans 0-128 page px, the bar y 512-550,
+            # the stroke y 600 from x 100 to 490.
+            r = page.evaluate(COUNT_JS, [base64.b64encode(shot).decode(), list(rgb(BG[scheme])), [list(RED), list(BLUEBAR), list(INK[scheme])],
+                                         [0, 0], [[40, 40], [600, 1060], [600, 1200], [1500, 2000]]])
+            near = lambda a, b, tol=40: all(abs(x - y) <= tol for x, y in zip(a, b))
+            print(f'pdf page {scheme}: natural {size}, samples {r["at"]}, counts [red, blue bar, ink] {r["counts"]}')
+            check(f'pdf page {scheme}: loads at its own size', size == [794, 1123], size)
+            check(f'pdf page {scheme}: the embedded page image is the background (red square, blue bar, white paper)',
+                  near(r['at'][0], RED) and near(r['at'][1], BLUEBAR) and near(r['at'][3], (255, 255, 255), 8), r['at'])
+            check(f'pdf page {scheme}: the ink is drawn over it', near(r['at'][2], INK[scheme], 30), r['at'][2])
+            page.close()
         b.close()
 finally:
     srv.terminate()
