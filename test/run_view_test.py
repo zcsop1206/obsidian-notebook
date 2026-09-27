@@ -4225,13 +4225,20 @@ try:
         check('images: after reopening, the photo, the ink on it and the image page are read back and drawn',
               r['images'] == 1 and r['data'] and r['on'] == [r['id'], r['id'], None] and r['kind'] == 'image' and r['p2img'] and near(r['red'], (0xd0, 0x20, 0x20)), r)
 
-        # The page menu's entries; picking a file through the file input inserts it.
+        # The image entries are in the Import menu (#54), no longer in page settings; picking a file
+        # from the device through the file input inserts it.
         r = ev("""async () => {
           view.contentEl.querySelector('.nb-ink-page-settings').click();
-          const picker = view.contentEl.querySelector('.nb-ink-picker');
-          const items = ['.nb-ink-menu-insert-image', '.nb-ink-menu-insert-image-page', '.nb-ink-menu-paste-image'].map(c => !!picker.querySelector(c));
+          let picker = view.contentEl.querySelector('.nb-ink-picker');
+          const old = ['.nb-ink-menu-insert-image', '.nb-ink-menu-insert-image-page', '.nb-ink-menu-paste-image'].map(c => !!picker.querySelector(c));
+          view.toolbar.closePicker();
+          view.contentEl.querySelector('.nb-ink-import').click();
+          picker = view.contentEl.querySelector('.nb-ink-picker');
+          const items = ['.nb-ink-import-image-here', '.nb-ink-import-image-page', '.nb-ink-import-paste-image'].map(c => !!picker.querySelector(c));
           const n0 = T.P(0).images.length;
-          picker.querySelector('.nb-ink-menu-insert-image').click();
+          picker.querySelector('.nb-ink-import-image-here').click();
+          const src = modals[modals.length - 1];
+          [...src.contentEl.querySelectorAll('.suggestion-item')].find(e => e.textContent === 'Choose an image from this device…').click();
           const input = document.querySelector('input.nb-image-file-input');
           const accept = input && input.accept;
           const dt = new DataTransfer();
@@ -4239,14 +4246,14 @@ try:
           input.files = dt.files;
           input.dispatchEvent(new Event('change'));
           for (let i = 0; i < 50 && T.P(0).images.length === n0; i++) await T.sleep(20);
-          const out = { items, accept, n0, n: T.P(0).images.length, gone: !document.querySelector('input.nb-image-file-input') };
+          const out = { old, items, accept, n0, n: T.P(0).images.length, gone: !document.querySelector('input.nb-image-file-input') };
           view.undo();
           view.clearSelection();
           view.setTool('pen');
           return out;
         }""")
-        check('images: the page menu offers Insert image, Insert image as page and Paste image; the file input (image/*) inserts the chosen file',
-              r['items'] == [True, True, True] and r['accept'] == 'image/*' and r['n'] == r['n0'] + 1 and r['gone'], r)
+        check('images: Image onto this page, Image as a page and Paste image are in the Import menu, not page settings; the file input (image/*) inserts the chosen file',
+              r['old'] == [False, False, False] and r['items'] == [True, True, True] and r['accept'] == 'image/*' and r['n'] == r['n0'] + 1 and r['gone'], r)
         # ======== end of 25. Images on pages (#12) ========
 
         # ======== 26. The ruler (#20) ========
@@ -4842,9 +4849,9 @@ try:
             kinds: { toolbar: base.filter(el => T.bar().contains(el)).length, panel: base.filter(el => T.panel().contains(el)).length,
               footer: base.filter(el => el.closest('.nb-ink-footer')).length, ruler: base.filter(el => el.closest('.nb-ink-ruler-layer')).length } };
           const pickers = {};
-          for (const [tool, open] of [['pen', 'pen'], ['highlighter', 'highlighter'], ['eraser', 'eraser'], ['lasso', 'lasso'], ['pen', 'page']]) {
+          for (const [tool, open] of [['pen', 'pen'], ['highlighter', 'highlighter'], ['eraser', 'eraser'], ['lasso', 'lasso'], ['pen', 'page'], ['pen', 'import']]) {
             view.setTool(tool);
-            if (open === 'page') T.tb('.nb-ink-page-settings').click(); else T.picker();
+            if (open === 'page') T.tb('.nb-ink-page-settings').click(); else if (open === 'import') T.tb('.nb-ink-import').click(); else T.picker();
             const picker = view.contentEl.querySelector('.nb-ink-picker'), els = T.interactive(picker);
             pickers[open] = { n: els.length, bad: T.audit([picker, ...els]), kind: view.toolbar.pickerOpen };
             view.toolbar.closePicker();
@@ -4872,8 +4879,9 @@ try:
         check('controls audit: toolbar, preset slots, Pages panel thumbnails and buttons, footer and ruler label: Pencil never prevented, all marked',
               r['base']['n'] >= 24 and r['base']['bad'] == [] and r['base']['kinds']['toolbar'] == 16 and r['base']['kinds']['panel'] >= 6
               and r['base']['kinds']['footer'] == 2 and r['base']['kinds']['ruler'] == 1, r['base'])
-        check('controls audit: every picker (pen with the ruler row, highlighter, eraser, lasso, page settings): Pencil never prevented, all marked',
-              all(v['bad'] == [] and v['n'] >= 1 and v['kind'] == k for k, v in r['pickers'].items()) and r['pickers']['pen']['n'] >= 20, r['pickers'])
+        check('controls audit: every picker (pen with the ruler row, highlighter, eraser, lasso, page settings, Import #54): Pencil never prevented, all marked',
+              all(v['bad'] == [] and v['n'] >= 1 and v['kind'] == k for k, v in r['pickers'].items()) and r['pickers']['pen']['n'] >= 20
+              and r['pickers']['import']['n'] == 6, r['pickers'])
         check('controls audit: the selection menu (outside the scroller): Pencil never prevented, all marked',
               r['selmenu']['shown'] and not r['selmenu']['inScroller'] and r['selmenu']['n'] >= 12 and r['selmenu']['bad'] == [], r['selmenu'])
         check('controls audit: the ruler label (inside the scroller) opens its input on a Pencil tap and the input takes focus; no stroke',
