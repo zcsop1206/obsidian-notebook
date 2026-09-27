@@ -2182,6 +2182,111 @@ try:
         check('reopen: the renamed note lists its pages from the folder its embeds name', r == {'type': 'notebook-ink', 'loaded': 1, 'ids': [pid], 'strokes': 7}, r)
         # ======== end of 17. Renaming or moving a note keeps its pages (#26) ========
 
+        # ======== 18. Gestures across page edges (#35) ========
+        # A gesture belongs to the page it started on and continues wherever the pointer goes.
+        # Off-page samples are dispatched on another element (the pages layer, as in the gap
+        # between pages; the scroller, as in its margin; or the body, outside the view), as a
+        # browser that doesn't honour pointer capture would. Chromium's synthetic events can't
+        # reproduce WebKit's capture, so this checks the robust path: the window listeners.
+        ev("""async () => {
+          await p.createInkNote('Edges', '', 'letter', 'blank');
+          await T.sleep(150);
+          view.contentEl.querySelector('.nb-ink-add').click();
+          await T.sleep(150);
+          view.contentEl.querySelector('.nb-ink-scroll').scrollTop = 0;
+          await T.sleep(100);
+          view.setTool('pen');
+          T.el = which => which === 'layer' ? view.pagesEl : which === 'scroller' ? view.contentEl.querySelector('.nb-ink-scroll') : document.body;
+          /**
+           * A gesture on page i through pts ([x, y] page px), one sample per event and a frame
+           * after each; samples off the page are dispatched on T.el(off). Returns nothing.
+           */
+          T.edge = async (i, pts, off, { id = 41, up = true } = {}) => {
+            const pg = T.pages()[i], size = view.store.slots[i].size;
+            const fire = (type, [x, y]) => {
+              const r = pg.getBoundingClientRect(), k = r.width / size.width;
+              const on = x >= 0 && y >= 0 && x <= size.width && y <= size.height;
+              (on ? pg : T.el(off)).dispatchEvent(new PointerEvent(type, { pointerId: id, pointerType: 'pen', pressure: 0.3,
+                clientX: r.left + x * k, clientY: r.top + y * k, bubbles: true, cancelable: true, button: 0, buttons: type === 'pointerup' ? 0 : 1 }));
+            };
+            fire('pointerdown', pts[0]);
+            for (let j = 1; j < pts.length; j++) { fire('pointermove', pts[j]); await new Promise(r => requestAnimationFrame(r)); }
+            if (up) fire('pointerup', pts[pts.length - 1]);
+          };
+          T.line = (x0, y0, x1, y1, n) => Array.from({ length: n + 1 }, (_, j) => [x0 + (x1 - x0) * j / n, y0 + (y1 - y0) * j / n]);
+          T.ids = i => view.store.slots[i].page.strokes.map(s => s.id);
+        }""")
+
+        # (1) Pen: off the right edge and back is one stroke, its off-page points kept as they are.
+        for off in ('layer', 'scroller', 'outside'):
+            r = ev(f"""async () => {{
+              const n = view.store.slots[0].page.strokes.length;
+              const pts = [...T.line(700, 150, 900, 150, 50), ...T.line(900, 154, 700, 154, 50).slice(1)];
+              await T.edge(0, pts, '{off}');
+              const drawing = view.input.drawing;
+              view.input.cancel();
+              const s = view.store.slots[0].page.strokes;
+              const st = s[s.length - 1];
+              return {{ added: s.length - n, drawing, points: st && st.points.length, maxX: st && Math.max(...st.points.map(q => q.x)),
+                ends: st && [st.points[0].x, st.points[0].y, st.points[st.points.length - 1].x, st.points[st.points.length - 1].y],
+                xs: st && st.points.slice(45, 56).map(q => q.x), ink: T.darkIn ? T.darkIn(0, 690, 140, 816, 165) : T.ink(0) }};
+            }}""")
+            check(f'edges ({off}): a pen stroke off the right edge and back is one stroke, ended by pointerup',
+                  r['added'] == 1 and not r['drawing'] and r['points'] == 101, r)
+            check(f'edges ({off}): off-page points are stored as they are (x up to 900), start and end on the page',
+                  r['maxX'] == 900 and r['ends'] == [700, 150, 700, 154], r)
+        r = ev("() => ({ ink: T.ink(0), live: T.liveInk() })")
+        check('edges: the strokes are drawn on the page (clipped), the overlays cleared', r['ink'] > 500 and r['live'] == 0, r)
+
+        # (2) A gesture that starts in the gap between pages does nothing.
+        r = ev("""async () => {
+          const n = T.ids(0).length + T.ids(1).length;
+          const r0 = T.pages()[0].getBoundingClientRect(), r1 = T.pages()[1].getBoundingClientRect(), k = r0.width / 816;
+          const y = (r0.bottom + r1.top) / 2, fire = (type, x) => view.pagesEl.dispatchEvent(new PointerEvent(type, { pointerId: 42,
+            pointerType: 'pen', pressure: 0.3, clientX: r0.left + x * k, clientY: y, bubbles: true, cancelable: true, button: 0, buttons: 1 }));
+          fire('pointerdown', 100);
+          for (let x = 110; x < 300; x += 10) fire('pointermove', x);
+          fire('pointerup', 300);
+          await T.sleep(50);
+          return { added: T.ids(0).length + T.ids(1).length - n, drawing: view.input.drawing, live: T.liveInk() };
+        }""")
+        check('edges: a pen gesture starting in the gap between pages draws nothing', r == {'added': 0, 'drawing': False, 'live': 0}, r)
+
+        # (3) The stroke eraser keeps erasing across the right edge and the bottom edge (into the gap).
+        def edge_erase(mode, off):
+            return ev(f"""async () => {{
+              view.setTool('pen');
+              for (const i of [0, 1]) {{ const ids = T.ids(i); if (ids.length) view.eraseStrokes(i, ids); }}
+              const vline = (x, y0, y1) => T.edge(0, T.line(x, y0, x, y1, Math.round(y1 - y0)), 'layer');
+              await vline(700, 280, 320);   // hit on the way out of the right edge
+              await vline(812, 440, 460);   // 4 px inside the edge: hit by the leg 2 px outside it
+              await vline(700, 580, 620);   // hit after coming back
+              await vline(400, 280, 620);   // never touched
+              await vline(200, 1010, 1040); // hit going down into the gap
+              await vline(550, 1010, 1050); // hit coming back up from the gap
+              await vline(350, 990, 1010);  // under the part of the drag in the gap, 70 px away
+              const before = T.ids(0);
+              view.setTool('eraser');
+              if ({'true' if mode else 'false'}) view.setEraser({{ mode: '{mode}' }});
+              await T.edge(0, [...T.line(600, 300, 818, 300, 60), ...T.line(818, 300, 818, 600, 60).slice(1), ...T.line(818, 600, 600, 600, 60).slice(1)], '{off}');
+              const right = T.ids(0), rightSamples = view.input.lastErase && view.input.lastErase.samples;
+              await T.edge(0, [...T.line(200, 1000, 200, 1080, 20), ...T.line(200, 1080, 550, 1080, 60).slice(1), ...T.line(550, 1080, 550, 1000, 20).slice(1)], '{off}');
+              const bottom = T.ids(0), erasing = !!view.input.erasing, bottomSamples = view.input.lastErase && view.input.lastErase.samples;
+              view.input.cancel();
+              view.setTool('pen');
+              return {{ before, right, bottom, erasing, rightSamples, bottomSamples, strokes: view.store.slots[0].page.strokes.map(s => [s.id, s.points.length, Math.round(s.points[0].x)]) }};
+            }}""")
+        for off in ('scroller', 'outside'):
+            r = edge_erase('', off)
+            bf = r['before']
+            check(f'edges ({off}): the eraser follows every sample off the page (181 right, 101 bottom)',
+                  r['rightSamples'] == 181 and r['bottomSamples'] == 101, r)
+            check(f'edges ({off}): the eraser dragged off the right edge and back removes the lines on both sides of the exit and the one at the edge',
+                  r['right'] == [bf[3], bf[4], bf[5], bf[6]], r)
+            check(f'edges ({off}): the eraser dragged into the gap below and back up removes the lines on both sides, not the one 70 px away',
+                  r['bottom'] == [bf[3], bf[6]] and not r['erasing'], r)
+        # ======== end of 18. Gestures across page edges (#35) ========
+
         # --- unload removes the patch
         r = ev("""async () => {
           p.unload();
