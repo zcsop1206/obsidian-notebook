@@ -91,11 +91,16 @@ Ink numbers, from `_spike/_results.md` (one page, 2026-09-26 2:56 PM, synced to 
 - The user agent reports as desktop Safari (`Macintosh; Intel Mac OS X 10_15_7 … Mobile/15E148 obsidian`), as iPadOS does. Don't detect the iPad from the user agent; use Obsidian's `Platform`.
 - Size: about 40 bytes per point (582 kB / 14,345), since every point is stored twice: in the path outline and raw in `<metadata>`. Worth trimming (fewer decimals, delta-encoded timestamps, or dropping samples closer than a threshold) before real use.
 
-Still not recorded: the audio results. `_results.md` has no audio section, so no recording was stopped cleanly in that vault. Still unknown:
-- whether Safari's MediaRecorder honours the timeslice;
-- whether a truncated mp4 plays after recovery;
+Audio numbers, from `_spike/rec-20260926-201500/` (a 15 s recording in the foreground, 2026-09-26 8:15 PM):
+- Format `audio/mp4` (saved as `.m4a`). `appendBinary` exists, so chunks were appended to one file live, with no parts to merge.
+- The timeslice is honoured: 8 chunks in 15 s, 0 late, longest gap 2 s.
+- 689 kB/min, about 41 MB/hour, matching the 96 kbps estimate.
+- Mic "iPad Microphone" at 48 kHz, echo cancellation on. Channel count, noise suppression and auto gain aren't reported.
+- Screen wake lock: allowed, held while recording and released on stop.
+
+Still unknown, because this recording stayed in the foreground (protocol steps 4–6):
 - what happens to the mic on screen lock and app switch;
-- whether the wake lock is allowed.
+- whether a recording cut off by a force quit plays after recovery.
 
 In headless Chromium, through `test/run_spike_test.py`:
 - Synthetic pen strokes, a finger touch, a tap and a real mouse stroke all draw.
@@ -115,7 +120,7 @@ In headless Chromium, through `test/run_spike_test.py`:
 
 ## Next steps
 
-1. **Read the iPad results.** Done: the basics work, so building continues. Ink numbers are recorded (see Verified so far); the audio results still need a recording stopped cleanly on the iPad.
+1. **Read the iPad results.** Done: the basics work, so building continues. Ink and foreground audio numbers are recorded (see Verified so far); screen lock, app switching and force-quit recovery still need testing on the iPad (protocol steps 4–6).
 2. **GitHub API sync, as its own plugin and repo:** the first real feature, because everything else depends on it. It lives in `zcsop1206/obsidian-github-sync` (locally `Documents/obsidian-github-sync`), whose `CONTEXT.md` holds the design and status. It only needs to run on mobile, since the laptop uses plain git.
 3. **Ink:**
    - The real page view: continuous vertical scroll, fixed page width, paper templates.
