@@ -110,8 +110,7 @@ export default class NotebookPlugin extends Plugin {
     // Sized templates and page embeds (#27), PDF templates (#21).
     const templates = this.templates = new TemplateRegistry(this.app, () => this.settings.templatesFolder);
     templates.watch(this);
-    setTemplateRegistry(templates);
-    this.register(() => setTemplateRegistry(null));
+    this.register(setTemplateRegistry(templates));
     this.app.workspace.onLayoutReady(() => void templates.load());
     this.addInkCommand('copy-page-embed', 'Copy embed for this page', view => void view.copyPageEmbed());
     this.addCommand({ id: 'add-pdf-template', name: 'Add PDF template', callback: () => this.addPdfTemplate() });

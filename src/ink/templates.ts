@@ -178,13 +178,21 @@ export class TemplateRegistry {
   }
 }
 
-let current: TemplateRegistry | null = null;
+/** Registries of loaded plugin instances, newest last (one in Obsidian; the tests load several). */
+const registries: TemplateRegistry[] = [];
 
-/** Sets the plugin's registry (null on unload); the ink view and the dialogs use it. */
-export function setTemplateRegistry(registry: TemplateRegistry | null) {
-  current = registry;
+/**
+ * Makes this the plugin's registry, which the ink view and the dialogs use; returns the function
+ * that removes it again (plugin unload), leaving an older instance's in place.
+ */
+export function setTemplateRegistry(registry: TemplateRegistry): () => void {
+  registries.push(registry);
+  return () => {
+    const i = registries.lastIndexOf(registry);
+    if (i >= 0) registries.splice(i, 1);
+  };
 }
 
 export function templateRegistry(): TemplateRegistry | null {
-  return current;
+  return registries[registries.length - 1] ?? null;
 }

@@ -3436,6 +3436,9 @@ try:
         # ======== end of 22. The lasso (#11) ========
 
         # ======== 23. Sized templates and page embeds (#27), PDF templates (#21) ========
+        # Section 21 loaded and unloaded other plugin instances, whose commands and view factory the
+        # mock kept; reload the plugin so this section drives one instance (and its registry).
+        ev("""async () => { p.unload(); window.p = await loadPlugin(); }""")
         ev("""() => {
           T.light = async () => { document.body.classList.remove('theme-dark'); app.workspace.trigger('css-change'); await T.sleep(100); };
           T.dark = async () => { document.body.classList.add('theme-dark'); app.workspace.trigger('css-change'); await T.sleep(100); };
@@ -3450,6 +3453,8 @@ try:
             m.contentEl.querySelector('button.mod-cta').click();
             await T.waitFor(() => view.file && view.file.basename === name && view.store && T.pages().length);
             await T.sleep(200);
+            view.setTool('pen');  // the saved tool state may hold another tool
+            view.setPen({ color: '#000000' });
             return { options, papers };
           };
           T.dirOf = path => path.includes('/') ? path.slice(0, path.lastIndexOf('/') + 1) : '';
@@ -3614,7 +3619,7 @@ try:
           view.insertPageAfter(0);
           await view.save();
           await T.sleep(100);
-          const pages = view.store.slots.map(s => { const pg = ink.readPage(fs.get(s.path)); return [pg.size, pg.template.kind, pg.template.source, pg.template.page, pg.template.image.length > 1000]; });
+          const pages = view.store.slots.map(s => { const pg = ink.readPage(fs.get(s.path)); return [pg.size, pg.template.kind, pg.template.source, pg.template.page, (pg.template.image || '').length > 1000, ink.templateName(pg.template)]; });
           const pdf = fs.get(`${dir}Engineering log/engineering.pdf`), src = fs.get('templates/ink/engineering.pdf');
           const imgs = [];
           for (const s of view.store.slots) imgs.push((await T.imageInk(s.path)).n);
@@ -3632,7 +3637,7 @@ try:
         check('pdf template note: the note\'s template is pdf:engineering and its paper the PDF page\'s size',
               r['tpl'] == 'pdf:engineering' and r['paper'] == '793.7x1122.5', r)
         check('pdf template note: every page (first, added, inserted) has the PDF page as its background',
-              len(r['pages']) == 3 and all(pg == [{'width': 793.7, 'height': 1122.5}, 'pdf', 'engineering.pdf', 2, True] for pg in r['pages']), r['pages'])
+              len(r['pages']) == 3 and all(pg == [{'width': 793.7, 'height': 1122.5}, 'pdf', 'engineering.pdf', 2, True, 'pdf'] for pg in r['pages']), r['pages'])
         check('pdf template note: the PDF is copied into the page folder', r['copied'], r)
         check('pdf template note: each page file renders its background (GitHub, reading view)', all(n > 2000 for n in r['imgs']), r['imgs'])
         check('pdf template note: a sharp render of the PDF page at 200%', r['sharp'], r)
