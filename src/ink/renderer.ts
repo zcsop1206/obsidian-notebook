@@ -284,17 +284,20 @@ export class PageBitmap {
     ctx.setTransform(this.canvas.width / size.width, 0, 0, this.canvas.height / size.height, 0, 0);
   }
 
-  /** Draws the whole page. `template` is the rasterised template layer, if any. */
-  render(page: Page, theme: Theme, template: CanvasImageSource | null) {
-    this.renderBase(page, theme, template);
-    this.renderPen(page, theme, 0, Infinity);
+  /**
+   * Draws the whole page. `template` is the rasterised template layer, if any. Strokes whose id
+   * is in `skip` are left out (the lasso's selection while it's dragged, #11).
+   */
+  render(page: Page, theme: Theme, template: CanvasImageSource | null, skip?: ReadonlySet<string> | null) {
+    this.renderBase(page, theme, template, skip);
+    this.renderPen(page, theme, 0, Infinity, skip);
   }
 
   /**
    * Draws the page without its pen strokes: paper, template and highlighter layer. With
    * renderPen, a page can be drawn over several frames (#9), each rasterising only part of it.
    */
-  renderBase(page: Page, theme: Theme, template: CanvasImageSource | null) {
+  renderBase(page: Page, theme: Theme, template: CanvasImageSource | null, skip?: ReadonlySet<string> | null) {
     theme = pageTheme(page, theme);
     const { ctx, canvas } = this;
     const w = canvas.width, h = canvas.height;
@@ -305,7 +308,7 @@ export class PageBitmap {
     if (template) ctx.drawImage(template, 0, 0, w, h);
     // Highlighters at full opacity on their own canvas, then composited once at 40%, so
     // crossing highlighter strokes don't darken (as in the SVG).
-    const highlights = page.strokes.filter(s => s.tool === 'highlighter');
+    const highlights = page.strokes.filter(s => s.tool === 'highlighter' && !skip?.has(s.id));
     if (highlights.length) {
       const hctx = scratchCanvas(w, h);
       this.pageTransform(hctx, page.size);
@@ -323,13 +326,13 @@ export class PageBitmap {
    * Draws up to `count` pen strokes, in order, from stroke index `from`, over what's drawn.
    * Returns the index to continue from (the number of strokes once all are drawn).
    */
-  renderPen(page: Page, theme: Theme, from: number, count: number): number {
+  renderPen(page: Page, theme: Theme, from: number, count: number, skip?: ReadonlySet<string> | null): number {
     theme = pageTheme(page, theme);
     this.pageTransform(this.ctx, page.size);
     const strokes = page.strokes;
     let i = from;
     for (let n = 0; i < strokes.length && n < count; i++) {
-      if (strokes[i].tool !== 'pen') continue;
+      if (strokes[i].tool !== 'pen' || skip?.has(strokes[i].id)) continue;
       this.fill(strokes[i], theme);
       n++;
     }
