@@ -2,71 +2,12 @@
 <html><head><meta charset="utf-8">
 <link rel="stylesheet" href="../styles.css">
 <style>
-  body { margin: 0; font-family: sans-serif; --text-normal: #202020; --text-muted: #666; --background-modifier-border: #e4e4e4; --font-monospace: monospace; }
+  body { margin: 0; font-family: sans-serif; --text-normal: #202020; --text-muted: #666; --text-error: #c33; --background-secondary: #f2f2f2; --background-modifier-border: #e4e4e4; --font-monospace: monospace; }
+  body.theme-dark { --text-normal: #dadada; --text-muted: #999; --background-secondary: #262626; }
   #leaf { width: 900px; height: 600px; border: 1px solid #ccc; }
+  .view-actions { display: flex; justify-content: flex-end; }
 </style></head>
 <body><div id="leaf"></div>
-<script>
-// Obsidian's DOM helpers
-HTMLElement.prototype.empty = function () { this.innerHTML = ''; };
-HTMLElement.prototype.addClass = function (c) { this.classList.add(c); };
-HTMLElement.prototype.setText = function (t) { this.textContent = t; };
-HTMLElement.prototype.createEl = function (tag, o = {}) { const el = document.createElement(tag); if (o.cls) el.className = o.cls; if (o.text) el.textContent = o.text; this.appendChild(el); return el; };
-HTMLElement.prototype.createDiv = function (o = {}) { return this.createEl('div', o); };
-
-window.notices = [];
-class Notice { constructor(m) { notices.push(m); } }
-
-// In-memory vault adapter
-window.fs = new Map(); // path -> string | Uint8Array
-window.dirs = new Set();
-const adapter = {
-  async exists(p) { return fs.has(p) || dirs.has(p); },
-  async mkdir(p) { dirs.add(p); },
-  async write(p, d) { fs.set(p, String(d)); },
-  async read(p) { if (!fs.has(p)) throw new Error('ENOENT ' + p); return fs.get(p); },
-  async append(p, d) { if (!fs.has(p)) throw new Error('append to missing ' + p); fs.set(p, fs.get(p) + d); },
-  async writeBinary(p, b) { fs.set(p, new Uint8Array(b.slice(0))); },
-  async appendBinary(p, b) { const old = fs.get(p); const n = new Uint8Array(old.length + b.byteLength); n.set(old); n.set(new Uint8Array(b), old.length); fs.set(p, n); },
-  async readBinary(p) { return fs.get(p).slice().buffer; },
-  async list(p) {
-    const kids = q => q.startsWith(p + '/') && !q.slice(p.length + 1).includes('/');
-    return { files: [...fs.keys()].filter(kids), folders: [...dirs].filter(kids) };
-  },
-  async remove(p) { fs.delete(p); },
-  async rmdir(p, rec) { for (const k of [...fs.keys()]) if (k.startsWith(p + '/')) fs.delete(k); for (const k of [...dirs]) if (k === p || k.startsWith(p + '/')) dirs.delete(k); },
-};
-window.adapter = adapter;
-
-class Component { registerInterval(id) { return id; } }
-class ItemView extends Component { constructor(leaf) { super(); this.leaf = leaf; this.app = leaf.app; this.contentEl = document.createElement('div'); this.contentEl.className = 'view-content'; } }
-const views = {};
-const app = {
-  vault: { adapter },
-  workspace: {
-    onLayoutReady(cb) { cb(); },
-    getLeavesOfType() { return []; },
-    getLeaf() {
-      return { app, async setViewState({ type }) { const v = views[type](this); this.view = v; const host = document.getElementById('leaf'); host.innerHTML = ''; host.appendChild(v.contentEl); v.contentEl.style.height = '100%'; await v.onOpen(); window.view = v; } };
-    },
-    revealLeaf() {},
-  },
-};
-class Plugin extends Component {
-  constructor() { super(); this.app = app; }
-  registerView(t, f) { views[t] = f; }
-  addRibbonIcon() {}
-  addCommand() {}
-}
-window.obsidian = { Plugin, ItemView, Notice };
-window.loadPlugin = async () => {
-  const code = await (await fetch('../main.js?' + Date.now())).text();
-  const module = { exports: {} };
-  new Function('module', 'exports', 'require', code)(module, module.exports, m => { if (m !== 'obsidian') throw new Error(m); return window.obsidian; });
-  // esbuild's cjs output puts `export default` on module.exports.default, as Obsidian expects.
-  const P = module.exports.default ?? module.exports;
-  const p = new P();
-  await p.onload();
-  return p;
-};
-</script></body></html>
+<!-- The mock obsidian module (window.obsidian), the in-memory vault (window.fs) and loadPlugin(). -->
+<script src="mock-obsidian.js"></script>
+</body></html>
