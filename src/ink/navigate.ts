@@ -13,7 +13,7 @@
 // fingers' centroid. With two fingers, a pinch starts once their distance has changed by more
 // than NAV_SLOP px:
 // the zoom is the view's zoom times the ratio of the distance now to the distance then,
-// clamped to 50-400%. While pinching, the pages layer gets `transform: scale(k)` around the
+// clamped to 50-1000% (#60). While pinching, the pages layer gets `transform: scale(k)` around the
 // content point that was under the centroid when the pinch started, so the existing bitmaps
 // are scaled with no re-render; the centroid keeps panning through the scroll position. When
 // the pinch ends (a finger lifts), the host commits the zoom: lays out again at the new zoom,
@@ -34,9 +34,15 @@ import { TAP_SLOP } from './gestures';
 import { pageAtY, type Layout } from './layout';
 
 export const MIN_ZOOM = 0.5;
-export const MAX_ZOOM = 4;
-/** The zoom commands' step. */
+/**
+ * 1000%, as far as Notability zooms (#60). Band bitmaps (#52) keep a zoomed page's bitmap to
+ * about the viewport, so a higher zoom costs no more pixels per visible area.
+ */
+export const MAX_ZOOM = 10;
+/** The zoom commands' step up to 400%. */
 export const ZOOM_STEP = 0.25;
+/** The zoom commands' steps above 400% (25% steps would take 24 taps from 400% to 1000%). */
+export const HIGH_ZOOM_STEPS: readonly number[] = Object.freeze([4, 5, 6, 8, 10]);
 /**
  * A pan starts once a finger has moved more than this from where it landed, and a pinch once
  * the fingers' distance has changed by more than this, in px. The same as TAP_SLOP, so a tap
@@ -57,8 +63,16 @@ export const WHEEL_COMMIT_MS = 150;
 
 export const clampZoom = (z: number) => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, z));
 
-/** The next zoom step (multiples of 25%) above (`dir` 1) or below (-1) `zoom`, clamped. */
+/**
+ * The next zoom step above (`dir` 1) or below (-1) `zoom`, clamped: multiples of 25% up to
+ * 400%, then HIGH_ZOOM_STEPS (500%, 600%, 800%, 1000%).
+ */
 export function zoomStep(zoom: number, dir: 1 | -1): number {
+  const top = HIGH_ZOOM_STEPS[0];
+  if (dir > 0 ? zoom >= top - 1e-6 : zoom > top + 1e-6) {
+    const next = dir > 0 ? HIGH_ZOOM_STEPS.find(z => z > zoom + 1e-6) : [...HIGH_ZOOM_STEPS].reverse().find(z => z < zoom - 1e-6);
+    return clampZoom(next ?? (dir > 0 ? MAX_ZOOM : top));
+  }
   const n = zoom / ZOOM_STEP;
   const next = dir > 0 ? Math.floor(n + 1e-6) + 1 : Math.ceil(n - 1e-6) - 1;
   return clampZoom(next * ZOOM_STEP);

@@ -36,6 +36,19 @@ test('bitmapBand: at 400% a band around the viewport at full resolution, within 
   assert.ok(b.width * b.height * 4 < 32_000_000 / 2, 'less than a whole capped page');
 });
 
+test('bitmapBand: at 1000% (#60, a Letter page 8160 × 10560 CSS px) the band is the same size as at 400%, within the limit', () => {
+  const W = 8160, H = 10560;
+  for (const vp of [LANDSCAPE, PORTRAIT]) {
+    const at4 = bitmapBand(PAGE.w, PAGE.h, { x: 1000, y: 1500, ...vp }, 2, MAX)!;
+    for (const [x, y] of [[4000, 5000], [0, 0], [W - vp.width, H - vp.height]]) {
+      const v = { x, y, ...vp }, b = bitmapBand(W, H, v, 2, MAX)!;
+      assert.ok(b.width * b.height * 4 <= MAX, `${b.width} x ${b.height} fits`);
+      assert.ok(inside(b, v, W, H), 'covers the visible part');
+      assert.deepEqual([b.width, b.height], [at4.width, at4.height], 'no more pixels than at 400%');
+    }
+  }
+});
+
 test('bitmapBand: a page off screen gets the part nearest the viewport; a viewport too big for the limit gets just itself', () => {
   const below = bitmapBand(PAGE.w, PAGE.h, { x: 800, y: -900, ...LANDSCAPE }, 2, MAX)!;
   assert.equal(below.y, 0, 'the top of a page below the view');
