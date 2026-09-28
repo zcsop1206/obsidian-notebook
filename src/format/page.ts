@@ -18,7 +18,7 @@
 // and y can be negative or beyond the page's width and height; the outline near the edge keeps
 // its true shape, and the drawing is clipped by the page (the SVG's viewBox, the view's canvases).
 import { isImageId, isPageId, isStrokeId } from './ids';
-import { fmt1, strokePathCached, type OutlineInput } from './outline';
+import { fmt1, isStroked, strokePathCached, type OutlineInput } from './outline';
 import { fixedPaper, IMAGE_RE, metadataTemplate, parseTemplate, renderTemplate, type Size, type Template } from './template';
 
 export type { Size } from './template';
@@ -258,6 +258,28 @@ const STYLE =
  */
 const PDF_STYLE = '<style>.i{fill:#1f1f1f}.t{stroke:#c9c9c9}</style>';
 
+/**
+ * The same with `.u`, the stroke colour of default-ink uniform strokes (#60: stroked
+ * centrelines, fill none), for pages that have any. Other pages keep the styles above, so their
+ * files are byte-identical to before #60.
+ */
+const STYLE_U =
+  '<style>.i{fill:#1f1f1f}.t{stroke:#c9c9c9}.u{stroke:#1f1f1f}' +
+  '@media (prefers-color-scheme:dark){.i{fill:#e6e3de}.t{stroke:#3c3c3c}.u{stroke:#e6e3de}}</style>';
+const PDF_STYLE_U = '<style>.i{fill:#1f1f1f}.t{stroke:#c9c9c9}.u{stroke:#1f1f1f}</style>';
+
+/**
+ * A stroke's <path> attributes before `d`. A filled outline: the default ink's class `i` or its
+ * colour as `fill`. A stroked centreline (the uniform pen, #60): no fill, the default ink's class
+ * `u` or its colour as `stroke`, `size` wide, round caps and joins.
+ */
+function pathPaint(s: StrokeHead): string {
+  const ink = s.color === DEFAULT_INK;
+  if (!isStroked(s)) return ink ? 'class="i"' : `fill="${s.color}"`;
+  return (ink ? 'class="u" fill="none"' : `fill="none" stroke="${s.color}"`) +
+    ` stroke-width="${fmt1(s.size)}" stroke-linecap="round" stroke-linejoin="round"`;
+}
+
 /** A stroke's points as the file stores them, and the inputs of its outline (#37). */
 interface Encoded {
   points: readonly Point[];
@@ -378,7 +400,9 @@ export function writePage(page: Page): string {
   // layer first and then the file copied them twice (#37).
   const out: string[] = [
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}">\n`,
-    fixedPaper(template) ? PDF_STYLE : STYLE, '\n',
+    strokes.some(s => isStroked(s) && s.color === DEFAULT_INK)
+      ? (fixedPaper(template) ? PDF_STYLE_U : STYLE_U)
+      : (fixedPaper(template) ? PDF_STYLE : STYLE), '\n',
     '<metadata><![CDATA[', ...meta, ']]></metadata>\n',
   ];
   // A layer of items, each on its own line; an item is one or more pieces.
@@ -392,7 +416,7 @@ export function writePage(page: Page): string {
     out.push(items.length ? '\n</g>\n' : '</g>\n');
   };
   const paths = (tool: Stroke['tool']) => strokes.filter(s => s.tool === tool).map(s =>
-    [`<path data-id="${s.id}" ${s.color === DEFAULT_INK ? 'class="i"' : `fill="${s.color}"`} d="`, s.d, '"/>']);
+    [`<path data-id="${s.id}" ${pathPaint(s)} d="`, s.d, '"/>']);
   layer('template', '', renderTemplate(template, size));
   // With images, the objects layer sits under the ink; without, it stays last and empty (#12).
   if (images.length) layer('objects', '', images.filter(im => im.data).map(image));

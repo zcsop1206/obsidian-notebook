@@ -39,14 +39,24 @@ test('export: SVG path to PDF operators', () => {
   assert.ok(Math.abs(Math.hypot(mid[0], mid[1]) - 1) < 3e-4);
 });
 
-test('export: a pen stroke is its saved outline, filled; default ink black, others their colour', () => {
-  const s = { id: 'aaaaaaaa', tool: 'pen' as const, nib: 'uniform' as const, color: '#000000', size: 3,
+test('export: a pen stroke is its saved path: a uniform one stroked (#60), a pressure one filled; default ink black, others their colour', () => {
+  const s = { id: 'aaaaaaaa', tool: 'pen' as const, nib: 'pressure' as const, color: '#000000', size: 3,
     points: [0, 1, 2, 3, 4, 5].map(i => ({ x: 100 + i * 10, y: 100 + (i % 2) * 5, p: 0.5, t: i * 8 })) };
   const ops = strokeOps(s);
   assert.ok(ops.startsWith('0 0 0 rg\n') && ops.endsWith('\nf\n'));
   const qs = (strokePath(s).match(/Q/g) ?? []).length;
   assert.equal((ops.match(/ c$/gm) ?? []).length, qs);
   assert.ok(strokeOps({ ...s, color: '#1e5bd8' }).startsWith('0.118 0.357 0.847 rg'));
+  // The uniform nib: its centreline, stroked `size` wide with round caps and joins, not filled.
+  const u = { ...s, nib: 'uniform' as const, size: 0.5 };
+  const uops = strokeOps(u);
+  assert.ok(uops.startsWith('0 0 0 RG 0.5 w 1 J 1 j\n') && uops.endsWith('\nS\n') && !/\bf\n/.test(uops), uops);
+  assert.equal((uops.match(/ c$/gm) ?? []).length, (strokePath(u).match(/Q/g) ?? []).length);
+  assert.equal((uops.match(/ m$/gm) ?? []).length, 1, 'one open subpath');
+  assert.ok(!uops.includes('\nh\n'), 'not closed');
+  assert.ok(strokeOps({ ...u, color: '#1e5bd8' }).startsWith('0.118 0.357 0.847 RG 0.5 w'));
+  // A dot: a zero-length segment, which round caps paint as a disc `size` wide.
+  assert.equal(strokeOps({ ...u, size: 2, points: [{ x: 10, y: 20, p: 0.5, t: 0 }] }), '0 0 0 RG 2 w 1 J 1 j\n10 20 m\n10 20 l\nS\n');
   assert.equal(pdfColor('#ffffff'), '1 1 1');
   assert.equal(pdfColor('#c9c9c9'), '0.788 0.788 0.788');
 });
