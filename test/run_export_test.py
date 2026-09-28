@@ -4,7 +4,7 @@
 # margin, a sticky note, a page with a JPEG and a PNG image with ink on them, and a pdf-kind
 # page), runs the export command, reads the PDF's bytes from the mock vault and checks them with
 # pypdf: page count and sizes in points, vector ink (a fill operator per stroke, cubic curves,
-# the stroke colours), an image XObject per image and pdf page, the highlighter's transparency
+# the stroke colours; #60: thin uniform strokes stroked, round-capped), an image XObject per image and pdf page, the highlighter's transparency
 # group drawn with ExtGState ca 0.4, the Title. Also: a second export gets a unique name, the
 # page settings menu's entry exports, and the share sheet is offered on iOS only.
 # Needs Python Playwright and pypdf (`pip install pypdf`). Run by `npm test`; the PDFs land in
@@ -57,6 +57,9 @@ SETUP = """async () => {
       hl('00000003', '#ffeb3b', line(140, 400, 600, 400)),
       hl('00000004', '#69f0ae', line(300, 300, 320, 500)),
       pen('00000005', '#000000', [{ x: 700, y: 700, p: 0.5, t: 0 }]),  // a dot
+      // #60: thin uniform strokes, stroked centrelines (a line and a dot)
+      pen('0000000a', '#000000', line(150, 560, 600, 580, 120), { nib: 'uniform', size: 0.5 }),
+      pen('0000000b', '#1e5bd8', [{ x: 650, y: 580, p: 0.5, t: 0 }], { nib: 'uniform', size: 0.5 }),
     ] },
     { id: ids[1], size: { width: 288, height: 288 }, template: { kind: 'fill', color: '#fff59d' }, strokes: [pen('00000006', '#000000', line(30, 100, 250, 150))] },
     { id: ids[2], size: { width: 816, height: 1056 }, template: { kind: 'blank' },
@@ -74,7 +77,8 @@ SETUP = """async () => {
   const leaf = app.workspace.getLeaf('tab');
   await leaf.openFile(app.vault.getFile('Export.md'));
   await sleep(200);
-  return pages.map(pg => pg.strokes.length);
+  // Strokes drawn as filled outlines on each page (the uniform ones are stroked, #60).
+  return pages.map(pg => pg.strokes.filter(s => s.nib !== 'uniform').length);
 }"""
 
 def pdf_of(ev, path):
@@ -146,6 +150,11 @@ try:
         check('vector ink: curves (c operators), not images, on every page',
               all(len(re.findall(r' c$', a + '\n' + f, re.M)) > 20 for a, f in ops), [len(re.findall(r' c$', a + '\n' + f, re.M)) for a, f in ops])
         a0, f0 = ops[0]
+        thin = re.findall(r'(\S+ \S+ \S+) RG 0\.5 w 1 J 1 j\n((?:[^\n]* [mlc]\n)+)S\n', a0)
+        print('thin uniform strokes in the PDF:', [(c, len(body.split('\n')) - 1) for c, body in thin])
+        check('thin uniform pen (#60): stroked centrelines 0.5 px wide with round caps and joins (w, 1 J, 1 j, S), in their colours, one open subpath each',
+              [c for c, _ in thin] == ['0 0 0', '0.118 0.357 0.847'] and all(body.count(' m\n') == 1 and ' h\n' not in body for _, body in thin)
+              and thin[0][1].count(' c\n') > 20 and re.fullmatch(r'650 580 m\n650 580 l\n', thin[1][1]) is not None, thin)
         check('vector ink: pen strokes in black and blue on the page, after the highlights',
               '0 0 0 rg' in a0 and '0.118 0.357 0.847 rg' in a0 and a0.index('/Hl Do') < a0.index('0.118 0.357 0.847 rg'), a0[:300])
         check('page transform: px scaled by 0.75 with y flipped', a0.startswith('q\n0.75 0 0 -0.75 0 792 cm'), a0[:60])

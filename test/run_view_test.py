@@ -6,13 +6,14 @@
 # and committed outlines, nibs, stylus touches, the toolbar, stats and handler time), and the
 # highlighter (tools, layers, crossings, the live overlay, long strokes), undo and redo, the
 # eraser, and zoom and finger navigation (#9: pans with momentum, pinches, zoom commands and
-# Ctrl+wheel, strokes at 50-400%, the pen during finger gestures, touch rules, frame times on
+# Ctrl+wheel, strokes at 50-1000%, the pen during finger gestures, touch rules, frame times on
 # the 20-page note, bitmap memory at 400%), renaming or moving notes and page folders (#26), and PDF import (#14:
 # pages, the copied PDF, the embedded JPEG, sharp renders at 200%, writing on PDF pages), and images on pages (#12),
-# and the pen at zoom (#52: viewport bitmaps, the live stroke against the committed one, seams, pointercancel).
+# and the pen at zoom (#52: viewport bitmaps, the live stroke against the committed one, seams, pointercancel),
+# and the thin pen and 1000% zoom (#60: width variation and roughness at 400%, tiny writing, the saved file, 1000%).
 # Run by `npm test`; screenshots land in test/out/.
 # Exits non-zero if any check fails.
-import os, subprocess, sys, time
+import os, re, subprocess, sys, time
 from playwright.sync_api import sync_playwright
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -6003,6 +6004,298 @@ try:
               and r['custom'][0] == [[816, 1056, 'lined-college']] * 3 and r['added'] == [816, 1056, 'lined-college'], r)
         ev("() => { p.settings.favouriteTemplates = []; }")
         # ======== end of 31. Import menu, custom templates and favourites (#54); resizing asks first (#56) ========
+
+        # ======== 32. The thin pen and 1000% zoom (#60) ========
+        # The uniform nib is drawn as its refitted centreline, stroked `size` wide (before #60, a
+        # filled perfect-freehand outline, whose width wobbled at the smallest sizes). Strokes are
+        # written with the Pencil's 0.5 CSS px steps at 100% and measured as the page bitmap paints
+        # them at 400% on a 2x display: before (outlinePath, the pre-#60 drawing of the same
+        # points) and after (strokePath). Width variation is the coefficient of variation, column by
+        # column, of the coverage times the cosine of the centre line's slope (the width across the
+        # line); roughness is section 21's RMS second difference of the centre and the coverage.
+        ev("""async () => {
+          await p.createInkNote('Thin', '', 'letter', 'blank');
+          await T.sleep(150);
+          view.addPage();
+          await T.sleep(150);
+          view.setTool('pen');
+          view.setPen({ nib: 'uniform', color: '#000000', size: 2.5 });
+          /** Pencil samples along f(t) (page px of page i, t 0..1, `len` px long) at 40 px/s and 471 samples/s, with a little tremor, as client points in 0.5 CSS px steps. */
+          T.t60samples = (i, f, len, seed = 11) => {
+            const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648) - 0.5;
+            const n = Math.round(len / 40 * 471), out = [];
+            let tx = 0, ty = 0;
+            for (let j = 0; j <= n; j++) {
+              const [x, y] = f(j / n);
+              tx = 0.9 * tx + 0.04 * rnd(); ty = 0.9 * ty + 0.04 * rnd();
+              out.push(T.z52client(i, x + tx, y + ty));
+            }
+            return out;
+          };
+          /** The last stroke of page i. */
+          T.t60last = i => { const s = view.store.page(view.store.slots[i]).strokes; return s[s.length - 1]; };
+          /**
+           * Paints path d as a stroke of `style` is painted (filled; the uniform nib stroked) at R
+           * device px per page px and measures the columns over page x0..x1 (the stroke runs along x,
+           * within y0..y1): width variation, mean width (page px) and roughness (device px).
+           */
+          T.t60metrics = (d, style, R, [x0, x1, y0, y1]) => {
+            const ox = x0 - 5, oy = y0 - 5, W = Math.ceil((x1 - x0 + 10) * R), H = Math.ceil((y1 - y0 + 10) * R);
+            const c = document.createElement('canvas');
+            c.width = W; c.height = H;
+            const g = c.getContext('2d');
+            g.setTransform(R, 0, 0, R, -ox * R, -oy * R);
+            ink.paintPath(g, style, ink.canvasPath(style, d), '#000');
+            const a = g.getImageData(0, 0, W, H).data, cen = [], cov = [];
+            for (let X = Math.ceil(5 * R); X < (x1 - ox) * R; X++) {
+              let sw = 0, sy = 0;
+              for (let Y = 0; Y < H; Y++) { const v = a[(Y * W + X) * 4 + 3] / 255; sw += v; sy += v * Y; }
+              cov.push(sw); cen.push(sw ? sy / sw : 0);
+            }
+            const r = Math.round(R), w = [];
+            for (let i = r; i < cov.length - r; i++) w.push(cov[i] * Math.cos(Math.atan((cen[i + r] - cen[i - r]) / (2 * r))));
+            const mean = w.reduce((p, q) => p + q, 0) / w.length, sd = Math.sqrt(w.reduce((p, q) => p + (q - mean) ** 2, 0) / w.length);
+            const rough = v => { let q = 0; for (let i = 1; i < v.length - 1; i++) q += (v[i - 1] - 2 * v[i] + v[i + 1]) ** 2; return Math.sqrt(q / (v.length - 2)); };
+            return { cv: sd / mean, width: mean / R, min: Math.min(...w) / R, max: Math.max(...w) / R, centre: rough(cen), coverage: rough(cov) };
+          };
+        }""")
+
+        # (1) width variation and roughness at 0.5, 1, 1.5 and 2.5 px, before and after, at 400%
+        r = ev("""async () => {
+          await T.z52at(1, 0, 408, 300);
+          const k = T.pages()[0].offsetWidth / 816, R = 4 * k * devicePixelRatio, out = {};
+          const shapes = {
+            straight: y => [t => [100 + 60 * t, y + 8 * t], 60.5, [103, 157, y, y + 8]],
+            wavy: y => [t => [100 + 60 * t, y + 2 * Math.sin(2 * Math.PI * 5 * t)], 75, [103, 157, y - 2, y + 2]],
+          };
+          let y = 90;
+          for (const [name, shape] of Object.entries(shapes)) {
+            for (const size of [0.5, 1, 1.5, 2.5]) {
+              const [f, len, box] = shape(y);
+              view.setPen({ size });
+              await T.z52pen(T.t60samples(0, f, len));
+              const s = T.t60last(0), before = { tool: 'highlighter', size };  // painted filled, as the outline was
+              out[`${name} ${size}`] = { before: T.t60metrics(ink.outlinePath(s), before, R, box), after: T.t60metrics(ink.strokePath(s), s, R, box),
+                points: s.points.length, size: s.size, nib: s.nib, chars: [ink.outlinePath(s).length, ink.strokePath(s).length] };
+              y += 22;
+            }
+          }
+          view.setPen({ size: 2.5 });
+          return { out, R };
+        }""")
+        print(f"thin pen at 400% ({r['R']:.2f} device px per page px): width variation (CV per column), roughness (centre, coverage; device px), before -> after:")
+        for k, v in r['out'].items():
+            b0, a0 = v['before'], v['after']
+            print(f"  {k:13s} CV {b0['cv']:.3f} -> {a0['cv']:.3f}; width {b0['min']:.2f}..{b0['max']:.2f} -> {a0['min']:.2f}..{a0['max']:.2f} px; "
+                  f"centre {b0['centre']:.3f} -> {a0['centre']:.3f}; coverage {b0['coverage']:.3f} -> {a0['coverage']:.3f}; path {v['chars'][0]} -> {v['chars'][1]} chars")
+        m = r['out']
+        check('thin pen (#60): strokes written with the uniform nib at 0.5, 1, 1.5 and 2.5 px', all(v['nib'] == 'uniform' and v['points'] > 100 for v in m.values())
+              and [v['size'] for v in m.values()] == [0.5, 1, 1.5, 2.5] * 2, m)
+        check('thin pen: the width is even at every size, straight and wavy (variation under 4% per column, mean within 3% of the size)',
+              all(v['after']['cv'] < 0.04 and abs(v['after']['width'] - v['size']) < 0.03 * v['size'] + 0.02 for v in m.values()), {k: round(v['after']['cv'], 3) for k, v in m.items()})
+        check('thin pen: less width variation than the filled outline at 0.5 and 1 px (by a third on the wavy stroke)',
+              all(m[f'{s} {z}']['after']['cv'] < m[f'{s} {z}']['before']['cv'] for s in ('straight', 'wavy') for z in (0.5, 1))
+              and all(m[f'wavy {z}']['after']['cv'] < 0.67 * m[f'wavy {z}']['before']['cv'] for z in (0.5, 1)), m)
+        check('thin pen: smoother edges than the filled outline at 0.5 px (centre and coverage roughness down by a quarter)',
+              all(m[f'{s} 0.5']['after'][q] < 0.75 * m[f'{s} 0.5']['before'][q] for s in ('straight', 'wavy') for q in ('centre', 'coverage')), m)
+        check('thin pen: at 2.5 px (the default) as smooth as before (roughness within 25%) and evener',
+              all(m[f'{s} 2.5']['after'][q] < 1.25 * m[f'{s} 2.5']['before'][q] for s in ('straight', 'wavy') for q in ('centre', 'coverage'))
+              and all(m[f'{s} 2.5']['after']['cv'] <= m[f'{s} 2.5']['before']['cv'] + 0.003 for s in ('straight', 'wavy')), m)
+
+        # (2) tiny writing at 400%: letter-like loops about 4 px tall at 0.5 px, dots (one-point strokes)
+        r = ev("""async () => {
+          await T.z52at(1, 1, 408, 300);
+          view.setPen({ size: 0.5 });
+          const words = [], dots = [];
+          for (let w = 0; w < 3; w++) {
+            const x0 = 300 + w * 42, y0 = 300;
+            // a cursive run of loops (like 'elle'), then an 'i' stem and its dot
+            await T.z52pen(T.t60samples(1, t => { const a = t * 4 * 2 * Math.PI; return [x0 + 24 * t - 2.5 * Math.sin(a), y0 - 2 * (1 - Math.cos(a))]; }, 80, 3 + w));
+            words.push(T.t60last(1));
+            await T.z52pen(T.t60samples(1, t => [x0 + 30, y0 - 3 * t], 3, 7 + w));
+            const q = T.z52client(1, x0 + 30, y0 - 5.5);
+            await T.z52pen([q]);
+            dots.push(T.t60last(1));
+          }
+          await view.save();
+          return { dots: dots.map(s => s.points.length), path: ink.strokePath(dots[0]), size: dots[0].size };
+        }""")
+        check('tiny writing: a tap is a one-point stroke whose path is a zero-length line (a dot with round caps)',
+              r['dots'] == [1, 1, 1] and re.fullmatch(r'M[\d.]+ [\d.]+L[\d.]+ [\d.]+', r['path']) is not None, r)
+        ev("async () => { await T.z52at(4, 1, 363, 296, 800); }")
+        clip = ev("() => T.z52clip(1, [296, 288, 430, 303])")
+        sb = shot(clip)
+        save_shot('thin_pen_400.png', sb)
+        r = ev("""async ([b64, clip]) => {
+          const strokes = view.store.page(view.store.slots[1]).strokes.slice(-9), out = { err: [] };
+          // Each stroke against its ideal alone is not what the screenshot shows; compare all of them at once.
+          const a = await T.z52img(b64), W = a.width, H = a.height, R = W / clip.width;
+          const r = T.pages()[1].getBoundingClientRect(), k = r.width / view.store.slots[1].size.width, ky = r.height / view.store.slots[1].size.height;
+          const paint = (before) => {
+            const c = document.createElement('canvas');
+            c.width = W; c.height = H;
+            const g = c.getContext('2d');
+            g.fillStyle = '#fff'; g.fillRect(0, 0, W, H);
+            // as the bitmap: x and y scaled by the page box's own width and height (each rounded to whole px)
+            g.setTransform(R * k, 0, 0, R * ky, R * (r.left - clip.x), R * (r.top - clip.y));
+            for (const s of strokes) {
+              if (before) ink.paintPath(g, { tool: 'highlighter', size: s.size }, new Path2D(ink.outlinePath(s)), '#1f1f1f');
+              else ink.paintPath(g, s, ink.canvasPath(s, ink.strokePath(s)), '#1f1f1f');
+            }
+            return c;
+          };
+          const ideal = paint(false).getContext('2d').getImageData(0, 0, W, H).data;
+          let diff = 0, inkSum = 0;
+          for (let q = 0; q < ideal.length; q += 4) { diff += Math.abs(a.data[q] - ideal[q]); inkSum += 255 - ideal[q]; }
+          out.err = diff / inkSum;
+
+          // The dots: solid ink at their centre in the screenshot.
+          out.dots = strokes.filter(s => s.points.length === 1).map(s => {
+            const X = Math.round(R * (r.left - clip.x + s.points[0].x * k)), Y = Math.round(R * (r.top - clip.y + s.points[0].y * ky));
+            return a.data[(Y * W + X) * 4];
+          });
+          out.before = paint(true).toDataURL('image/png');
+          out.px = [W, H];
+          return out;
+        }""", [sb, clip])
+        save_shot('thin_pen_400_before.png', r.pop('before').split(',', 1)[1])
+        print(f"tiny writing at 400% (test/out/thin_pen_400.png; the same strokes as filled outlines: thin_pen_400_before.png): {r}")
+        check('tiny writing at 400%: the committed ink is the stroked centrelines at the screen resolution (grey error under 0.05); dots drawn',
+              r['err'] < 0.05 and len(r['dots']) == 3 and all(v < 100 for v in r['dots']), r)
+
+        # (3) the saved file: stroked paths, round caps and joins, the default ink's colour following dark mode; metadata as before
+        path60 = ev("() => view.store.slots[1].path")
+        r = ev(f"""async () => {{
+          const text = fs.get('{path60}'), page = ink.readPage(text), mem = view.store.page(view.store.slots[1]).strokes;
+          const lines = text.split('\\n').filter(l => l.startsWith('<path data-id='));
+          const attrs = mem.map(s => {{
+            const l = lines.find(x => x.includes(`data-id="${{s.id}}"`));
+            const m = / d="([^"]*)"/.exec(l);
+            return {{ ok: l.startsWith(`<path data-id="${{s.id}}" class="u" fill="none" stroke-width="${{s.size}}" stroke-linecap="round" stroke-linejoin="round" d="`),
+                     same: !!m && m[1] === ink.strokePath(s), open: !m[1].includes('Z') }};
+          }});
+          const meta = JSON.parse(/<!\\[CDATA\\[([\\s\\S]*)\\]\\]>/.exec(text)[1]);
+          return {{ n: mem.length, attrs: attrs.filter(a => !(a.ok && a.same && a.open)).length, style: text.split('\\n')[1],
+                   points: page.strokes.every((s, i) => JSON.stringify(s.points) === JSON.stringify(mem[i].points)),
+                   keys: [...new Set(meta.strokes.map(s => Object.keys(s).join()))], format: meta.format }};
+        }}""")
+        check('saved file (#60): every uniform stroke is a stroked centreline (class u, fill none, stroke-width = size, round caps and joins, d = strokePath, open)',
+              r['n'] == 9 and r['attrs'] == 0, r)
+        check('saved file: the style gives .u the default ink colour, in light and dark', '.u{stroke:#1f1f1f}' in r['style'] and '.u{stroke:#e6e3de}' in r['style'], r['style'])
+        check('saved file: the metadata is notebook-ink/1 as before (same fields; points read back unchanged)',
+              r['format'] == 'notebook-ink/1' and r['keys'] == ['id,tool,nib,color,size,points'] and r['points'], r)
+        # The file on its own (as Obsidian's reading view, GitHub or a browser show it), light and dark, scaled 8x.
+        svg_ink = {}
+        for scheme in ('light', 'dark'):
+            page.emulate_media(color_scheme=scheme)
+            svg_ink[scheme] = ev(f"""async () => {{
+              const img = new Image();
+              img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(fs.get('{path60}'));
+              await img.decode();
+              const R = 8, c = document.createElement('canvas');
+              c.width = 140 * R; c.height = 20 * R;
+              const g = c.getContext('2d');
+              g.fillStyle = '#808080'; g.fillRect(0, 0, c.width, c.height);
+              g.drawImage(img, -294 * R, -288 * R, 816 * R, 1056 * R);
+              const d = g.getImageData(0, 0, c.width, c.height).data;
+              let dark = 0, light = 0, px = null;
+              for (let k = 0; k < d.length; k += 4) {{
+                if (d[k] < 60) {{ dark++; px = px || [d[k], d[k + 1], d[k + 2]]; }}
+                if (d[k] > 200) light++;
+              }}
+              const pages = view.store.page(view.store.slots[1]).strokes.filter(s => s.points.length === 1);
+              const dot = pages.map(s => {{ const x = Math.round((s.points[0].x - 294) * R), y = Math.round((s.points[0].y - 288) * R); return d[(y * c.width + x) * 4]; }});
+              return {{ dark, light, dot }};
+            }}""")
+        page.emulate_media(color_scheme='light')
+        print('saved file drawn on its own at 8x (dark / light pixels on grey; the dots\' centres):', svg_ink)
+        check('saved file on its own: the stroked ink draws near-black in light mode and near-white in dark mode, dots included',
+              svg_ink['light']['dark'] > 2000 and svg_ink['light']['light'] == 0 and all(v < 60 for v in svg_ink['light']['dot'])
+              and svg_ink['dark']['light'] > 2000 and svg_ink['dark']['dark'] == 0 and all(v > 200 for v in svg_ink['dark']['dot']), svg_ink)
+
+        # (4) the lasso's drag preview fills a stroke's area (strokePath2D): the same pixels as the stroke painted
+        r = ev("""() => {
+          const strokes = view.store.page(view.store.slots[1]).strokes.slice(-9), R = 9, W = 140 * R, H = 20 * R;
+          const draw = area => {
+            const c = document.createElement('canvas');
+            c.width = W; c.height = H;
+            const g = c.getContext('2d');
+            g.setTransform(R, 0, 0, R, -294 * R, -288 * R);
+            for (const s of strokes) {
+              if (area) { g.fillStyle = '#000'; g.fill(ink.centrelineArea(ink.strokePath(s), s.size / 2)); }
+              else ink.paintPath(g, s, ink.canvasPath(s, ink.strokePath(s)), '#000');
+            }
+            return g.getImageData(0, 0, W, H).data;
+          };
+          const a = draw(false), b = draw(true);
+          let diff = 0, inked = 0;
+          for (let k = 3; k < a.length; k += 4) { if (a[k] > 128) inked++; if (Math.abs(a[k] - b[k]) > 64) diff++; }
+          return { inked, diff, frac: diff / inked };
+        }""")
+        check('lasso preview (#60): a stroked centreline\'s area, filled, is the stroke as painted (under 1% of its pixels differ)', r['inked'] > 5000 and r['frac'] < 0.01, r)
+
+        # (5) 1000%: layout, scrolling both ways, band bitmaps within the cap, strokes under the pointer, panning
+        r = ev("""async () => {
+          view.setZoom(1);
+          await T.sleep(100);
+          const w1 = T.pages()[0].offsetWidth, steps = [];
+          view.setZoom(4);
+          for (let i = 0; i < 5; i++) { commands['zoom-in'].checkCallback(false); steps.push(view.zoom); }
+          view.setZoom(12);
+          const clamped = view.zoom;
+          await T.z52at(10, 0, 408, 528, 800);
+          const sc = T.sc(), el = T.pages()[0];
+          const layout = { w1, w10: el.offsetWidth, h10: el.offsetHeight, right: el.offsetLeft + el.offsetWidth, layer: parseFloat(view.contentEl.querySelector('.nb-ink-pages').style.width),
+                           scrollW: sc.scrollWidth, client: sc.clientWidth, scrollH: sc.scrollHeight };
+          sc.scrollLeft = 0; await T.sleep(50);
+          const left0 = sc.scrollLeft;
+          sc.scrollLeft = 1e9; await T.sleep(50);
+          const leftMax = sc.scrollLeft;
+          await T.z52at(10, 0, 408, 528, 800);
+          const maps = T.z52maps(), covers = T.z52covers(0);
+          view.toggleStats();
+          const text = view.contentEl.querySelector('.nb-ink-stats').textContent;
+          view.toggleStats();
+          return { steps, clamped, layout, left0, leftMax, maps, covers, stat: text.match(/zoom \\d+%/)?.[0] };
+        }""")
+        print(f"zoom 1000%: {r}")
+        L = r['layout']
+        check('zoom 1000% (#60): the zoom commands step 400 -> 500 -> 600 -> 800 -> 1000%, clamped there; the stats show it',
+              r['steps'] == [5, 6, 8, 10, 10] and r['clamped'] == 10 and r['stat'] == 'zoom 1000%', r)
+        check('zoom 1000%: pages are 10 times their fitted width (a Letter page 816 x 1056 page px), the layer as wide, scrolling both ways',
+              abs(L['w10'] - 10 * L['w1']) <= 1 and abs(L['h10'] - L['w10'] * 1056 / 816) <= 1 and L['layer'] >= L['w10']
+              and L['scrollW'] > 9 * L['client'] and r['left0'] == 0 and r['leftMax'] + L['client'] >= L['right'] and L['scrollH'] > 2 * L['h10'], r)
+        check('zoom 1000%: the visible page has a band bitmap at full device resolution covering the view, every bitmap within 16M pixels',
+              r['covers'] and any(m_['band'] and m_['i'] == 0 and m_['ratio'] == 2 for m_ in r['maps']) and all(m_['w'] * m_['h'] <= 16_000_000 for m_ in r['maps']), r['maps'])
+        r = ev("""async () => {
+          await T.z52at(10, 0, 408, 528, 600);
+          const [cx, cy] = T.centre(), out = {};
+          const pts = Array.from({ length: 40 }, (_, j) => [cx - 160 + 8 * j, cy + 30 * Math.sin(j / 5)]);
+          const { i, expected } = await T.penAt(pts);
+          out.worst = T.landed(i, expected);
+          out.page = i;
+          const s = view.store.page(view.store.slots[i]).strokes;
+          out.span = [expected[0], expected[expected.length - 1]];
+          // Panning at 1000%: a finger drag down and across, then the band follows.
+          const rebands = view.stats.rebands || 0, sc = T.sc(), frames = [];
+          let x = cx, y = cy, last = performance.now();
+          T.finger('pointerdown', 101, x, y);
+          for (let k = 0; k < 60; k++) { x -= 6; y -= 20; T.finger('pointermove', 101, x, y); await T.frame(); const now = performance.now(); frames.push(now - last); last = now; }
+          T.finger('pointerup', 101, x, y);
+          await T.settle();
+          await T.sleep(600);
+          frames.sort((a, b) => a - b);
+          out.pan = { median: frames[frames.length >> 1], max: frames[frames.length - 1], over32: frames.filter(f => f > 32).length, rebands: (view.stats.rebands || 0) - rebands,
+                      covers: T.z52covers(0) && T.z52covers(1), maps: T.z52maps() };
+          view.setZoom(1);
+          return out;
+        }""")
+        print(f"zoom 1000%: a stroke lands within {r['worst']:.3f} page px of the pointer; pan (60 frames): median {r['pan']['median']:.1f} ms, "
+              f"max {r['pan']['max']:.1f} ms, over 32 ms {r['pan']['over32']}, {r['pan']['rebands']} bands redrawn")
+        check('zoom 1000%: a pen stroke lands under the pointer (within 0.2 page px)', 0 <= r['worst'] <= 0.2, r)
+        check('zoom 1000%: after panning the bands follow and cover the view, each within 16M pixels',
+              r['pan']['covers'] and r['pan']['rebands'] >= 1 and all(m_['w'] * m_['h'] <= 16_000_000 for m_ in r['pan']['maps']), r['pan'])
+        # ======== end of 32. The thin pen and 1000% zoom (#60) ========
 
         # --- unload removes the patch
         r = ev("""async () => {
