@@ -1,7 +1,7 @@
 {
   "id": "notebook",
   "name": "Notebook",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "minAppVersion": "1.7.2",
   "description": "Handwritten notes with the Apple Pencil, stored as SVG pages in the vault. Includes an ink debug view for pen and audio measurements.",
   "author": "Adit Bhargava",
