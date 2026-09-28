@@ -131,11 +131,23 @@ HELPERS = """() => {
       const a = j / 14;
       return [x0 + j * 0.28 - 7 * Math.sin(a), y0 - 9 * (1 - Math.cos(a)), p(j)];
     }),
-    /** The outline's vertical extent near page x, for a stroke along x. */
-    widthAt(d, x) {
-      const ys = [], re = /(-?[\d.]+) (-?[\d.]+)/g;  // every point and control point (M, L, Q)
-      for (let m = re.exec(d); m; m = re.exec(d)) if (Math.abs(Number(m[1]) - x) < 1.5) ys.push(Number(m[2]));
-      return Math.max(...ys) - Math.min(...ys);
+    /**
+     * A stroke's drawn width near page x, for a stroke along x: its path painted as the page
+     * bitmap paints it (filled, or stroked for the uniform nib, #60) at 8 px per page px, the
+     * coverage of the device column at x, in page px.
+     */
+    inkWidth(s, x) {
+      const R = 8, d = ink.strokePath(s), ys = (d.match(/-?[\d.]+ (-?[\d.]+)/g) || []).map(v => Number(v.split(' ')[1]));
+      const y0 = Math.min(...ys) - s.size - 2, H = Math.ceil((Math.max(...ys) - y0 + s.size + 2) * R);
+      const c = document.createElement('canvas');
+      c.width = 1; c.height = H;
+      const g = c.getContext('2d');
+      g.setTransform(R, 0, 0, R, -x * R, -y0 * R);
+      ink.paintPath(g, s, ink.canvasPath(s, d), '#000');
+      const a = g.getImageData(0, 0, 1, H).data;
+      let n = 0;
+      for (let k = 3; k < a.length; k += 4) n += a[k] / 255;
+      return n / R;
     },
     /** Dispatches a TouchEvent with one touch of this touchType at element `el`; returns defaultPrevented. */
     touch(el, type, touchType) {
@@ -580,7 +592,7 @@ try:
           view.setPen({{ nib: 'uniform' }});
           await view.save();
           const disk = ink.readPage(fs.get('{pen_path}')).strokes;
-          const w = s => {{ const d = ink.strokePath(s); return [T.widthAt(d, 150), T.widthAt(d, 450)]; }};
+          const w = s => [T.inkWidth(s, 150), T.inkWidth(s, 450)];
           return {{ nibs: disk.map(s => s.nib), uniform: w(disk[0]), pressure: w(disk[1]), ps: [disk[0].points[50].p, disk[0].points[350].p] }};
         }}""")
         print('pen: widths at low and high pressure:', r)
@@ -732,7 +744,7 @@ try:
           const a = { ...view.stats.pen.last };
           const scribble = Array.from({ length: 3000 }, (_, j) => [400 + 200 * Math.sin(j / 97) + 30 * Math.sin(j / 7), 400 + 150 * Math.cos(j / 131) + 30 * Math.cos(j / 9), 0.2]);
           await T.pen(0, scribble, { up: false, per: 8 });
-          const liveTail = view.input.live.trace.points.length - view.input.live.frozen;
+          const liveTail = view.input.livePoints.length - view.input.live.frozen;  // drawn (refit) points not yet frozen
           const livePx = T.liveInk();
           T.penUp(0, scribble[scribble.length - 1]);
           const b = { ...view.stats.pen.last };
@@ -3018,8 +3030,9 @@ try:
         # ======== 21. Pen polish (#32): smooth edges and the settled stroke ========
         # The same iPad-like stroke (a gentle arc, samples in 0.5 px steps as the Pencil reports
         # them) rasterised at device pixel ratio 2, the way the page bitmap draws it: before, the
-        # raw points' outline as a straight-segment polygon (0.3.0); after, strokePath (the refitted
-        # points' outline as quadratic curves). Edge roughness is the RMS second difference, column
+        # raw points' outline as a straight-segment polygon (0.3.0); after, strokePath (#32: the
+        # refitted points' outline as quadratic curves; #60: for the uniform nib, their centreline,
+        # stroked). Edge roughness is the RMS second difference, column
         # by column, of the stroke's centre (alpha-weighted) and of its coverage: a staircase or a
         # polygon's kinks show up in both, a smooth edge in neither.
         r = ev("""() => {
@@ -3038,8 +3051,9 @@ try:
             c.width = W * R; c.height = H * R;
             const g = c.getContext('2d');
             g.setTransform(R, 0, 0, R, 0, 0);
-            g.fillStyle = '#000';
-            g.fill(new Path2D(d));
+            // as the page bitmap paints it: the 0.3.0 polygon filled; strokePath filled, or stroked for the uniform nib (#60)
+            const style = k === 'before' ? { tool: 'highlighter', size: s.size } : s;
+            ink.paintPath(g, style, ink.canvasPath(style, d), '#000');
             const a = g.getImageData(0, 0, c.width, c.height).data, cen = [], cov = [];
             for (let x = 100 * R; x < 320 * R; x++) {
               let sw = 0, sy = 0;
@@ -5256,12 +5270,13 @@ try:
             return g.getImageData(0, 0, c.width, c.height);
           };
           /**
-           * Compares a screenshot of `clip` with the outline `d` (page px of page i) filled in the
-           * default ink on white at the screen's resolution: `err` is the summed grey difference
+           * Compares a screenshot of `clip` with the path `d` (page px of page i) painted in the
+           * default ink on white at the screen's resolution as a stroke of `style` is (filled; a
+           * uniform pen's centreline stroked, #60): `err` is the summed grey difference
            * over the ideal's ink (0: identical); `soft` the partially covered pixels per inked
            * column (about 2 for a crisp stroke, one per edge; more when an upscaled bitmap blurs it).
            */
-          T.z52ideal = async (b64, clip, i, d) => {
+          T.z52ideal = async (b64, clip, i, d, style = { tool: 'highlighter', size: 1 }) => {
             const a = await T.z52img(b64), W = a.width, H = a.height, R = W / clip.width;
             const r = T.pages()[i].getBoundingClientRect(), k = r.width / view.store.slots[i].size.width;
             const c = document.createElement('canvas');
@@ -5269,8 +5284,7 @@ try:
             const g = c.getContext('2d');
             g.fillStyle = '#fff'; g.fillRect(0, 0, W, H);
             g.setTransform(R * k, 0, 0, R * k, R * (r.left - clip.x), R * (r.top - clip.y));
-            g.fillStyle = '#1f1f1f';
-            g.fill(new Path2D(d));
+            window.ink.paintPath(g, style, window.ink.canvasPath(style, d), '#1f1f1f');  // filled, or stroked for the uniform nib (#60)
             const b = g.getImageData(0, 0, W, H);
             let diff = 0, ink = 0, partial = 0, cols = 0;
             for (let x = 0; x < W; x++) {
@@ -5359,7 +5373,7 @@ try:
             ev(f"async () => {{ await T.z52at({z}, 0, 320, 285); }}")
             clip = ev("() => T.z52clip(0, [300, 262, 340, 305])")
             sb = shot(clip)
-            smooth[z] = ev("async ([b, clip]) => T.z52ideal(b, clip, 0, ink.strokePath(T.z52stroke))", [sb, clip])
+            smooth[z] = ev("async ([b, clip]) => T.z52ideal(b, clip, 0, ink.strokePath(T.z52stroke), T.z52stroke)", [sb, clip])
             save_shot(f'zoom52_committed_{z * 100}.png', sb)
         print(f"committed ink against an ideal rendering at the screen's resolution (grey error over the ink; partial pixels per column): "
               f"100% {smooth[1]['err']:.3f} / {smooth[1]['soft']:.2f}, 400% {smooth[4]['err']:.3f} / {smooth[4]['soft']:.2f}")
@@ -5395,7 +5409,8 @@ try:
         ev("async () => { await T.z52at(4, 1, 330, 500); }")
         ev("""() => {
           T.z52pts = [];
-          for (let j = 0; j < 900; j++) { const a = j / 16; T.z52pts.push(T.z52client(1, 250 + j * 0.17 - 8 * Math.sin(a), 510 - 10 * (1 - Math.cos(a)))); }
+          // (#60: the uniform nib's refit keeps points 1 px apart at 2.5 px, so 1500 samples for several frozen pieces)
+          for (let j = 0; j < 1500; j++) { const a = j / 16; T.z52pts.push(T.z52client(1, 250 + j * 0.1 - 8 * Math.sin(a), 510 - 10 * (1 - Math.cos(a)))); }
         }""")
         r = ev("""async () => {
           await T.z52pen(T.z52pts, { up: false });

@@ -30,16 +30,17 @@
 // within MIN_STEP of it. Predicted samples are kept apart as a tail and never stored.
 //
 // Drawing: the event handlers only record samples; drawing happens at most once per animation
-// frame. The stroke in progress is the same perfect-freehand outline as the saved page
-// (strokePath in format/outline.ts with the stroke's options) of the same points: for the pen,
-// the refit a finished stroke gets (#32), computed incrementally (LiveFit, #52), so the stroke
-// doesn't change when the pen lifts; filled through Path2D on two overlay canvases over the page
+// frame. The stroke in progress is the same path as the saved page's (strokePath in
+// format/outline.ts with the stroke's options) of the same points: for the pen, the refit a
+// finished stroke gets (#32), computed incrementally (LiveFit, #52), so the stroke doesn't change
+// when the pen lifts; filled, or for the uniform nib (#60) its centreline stroked `size` wide
+// (paintPath in renderer.ts), through Path2D on two overlay canvases over the page
 // (past the canvas limit, over the band of it a page bitmap would cover, at full device
 // resolution, moved when the view leaves it mid-stroke; see place and follow): the tail canvas
 // is cleared and redrawn every frame with the outline of the latest points plus the predicted
 // tail; once more than LIVE_MAX points are live, the older ones are drawn once onto the head
 // canvas and dropped from the tail (keeping LIVE_KEEP, with OVERLAP points shared so the pieces
-// join inside the line). Per-frame work is therefore bounded by LIVE_MAX + OVERLAP points
+// join inside the line; see piece). Per-frame work is therefore bounded by LIVE_MAX + OVERLAP points
 // however long the stroke. On release the
 // stroke goes to the host, which draws its outline (refitted, as the file has it) into the
 // page bitmap, and both overlays are cleared: that swap is the stroke settling.
@@ -81,13 +82,13 @@
 // canvas hidden, the shape drawn translucent on the tail canvas) until the pen lifts, when it
 // is given to the host's commitShape with the freehand stroke; moving more than HOLD_SLOP
 // again drops it and the freehand stroke is drawn again, its points continuing.
-import { LiveFit, strokePath } from '../format/outline';
+import { isStroked, LiveFit, outlinePath, refitStep, strokePath } from '../format/outline';
 import { roundP, roundXY, type HighlighterStroke, type PenStroke, type Point, type Size } from '../format/page';
 import { fmt, median, yn } from '../debug/util';
 import type { EraserMode, EraserSettings, PenSettings } from './pen';
 import { EDGE_REACH, projectOnto, type Edge } from './ruler';
 import { recognize, type Shape, type ShapeKind } from './shapes';
-import { HIGHLIGHT_ALPHA, pixelRatio } from './renderer';
+import { canvasPath, HIGHLIGHT_ALPHA, paintPath, pixelRatio } from './renderer';
 import { bandNeed, type Band } from './layout';
 
 /** A lasso gesture staying within this many CSS px of its start is a tap (#12). */
@@ -107,6 +108,11 @@ export const LIVE_MAX = 192;
 export const LIVE_KEEP = 64;
 /** Points shared by a frozen piece and the piece after it. */
 export const OVERLAP = 16;
+/**
+ * Drawn points a stroked centreline's piece (#60) starts before where the previous one ended:
+ * the pieces overlap by that many segments, their round caps meeting inside the line.
+ */
+export const STROKE_OVERLAP = 2;
 /**
  * A stroke or erase whose pointer is cancelled (pointercancel) stays open this long, ms (#52): a
  * pointerdown of the same pointer type within CANCEL_REACH CSS px of its last sample in that time
@@ -646,7 +652,7 @@ export class PenInput {
     map.edge = this.rulerEdge(target, map, e);
     const live: Live = this.live = {
       pointerId: e.pointerId, pointerType: e.pointerType, target, map, pen,
-      style, color: this.host.drawColor(style.color), trace: newTrace(), fit: new LiveFit(), predicted: [], frozen: 0, pieces: 0,
+      style, color: this.host.drawColor(style.color), trace: newTrace(), fit: new LiveFit(refitStep(style)), predicted: [], frozen: 0, pieces: 0,
       events: 0, handler: [], frames: [], maxPredicted: 0, tailBox: null, head: false,
       hold: null, len: 0, lenCount: 1, shape: null,
     };
@@ -855,8 +861,7 @@ export class PenInput {
     if (d) {
       ctx.save();
       ctx.globalAlpha = (live.style.tool === 'highlighter' ? HIGHLIGHT_ALPHA : 1) * SHAPE_PREVIEW_ALPHA;
-      ctx.fillStyle = live.color;
-      ctx.fill(new Path2D(d));
+      paintPath(ctx, live.style, canvasPath(live.style, d), live.color);
       ctx.restore();
     }
     this.livePath = d;
@@ -864,54 +869,63 @@ export class PenInput {
   }
 
   /**
-   * Fills the part of a pen stroke from drawn point `from` to `to` as the whole stroke's outline
-   * would draw it (#52). perfect-freehand's outline of a slice differs from the whole's near
-   * the slice's ends (it drops the first `size` px, restarts its streamline and the spacing of
-   * its outline points, and drops the last 3 px), which showed as thin slivers along the edges
-   * where frozen pieces met. So the outline is computed over the piece plus SEAM_CONTEXT of
-   * points on each side (of arc length), where it has converged to the whole's, and drawn
-   * clipped to the piece's own neighbourhood: a wider outline of the piece's points alone.
-   * Returns the path `d` drawn.
+   * Draws the part of a pen stroke from drawn point `from` to `to` as the whole stroke would draw
+   * it (#52). A stroked centreline (the uniform nib, #60) is the same curve in pieces: each
+   * piece starts STROKE_OVERLAP points before `from`, so consecutive pieces overlap by a segment
+   * or two and their round caps join inside the line; nothing is clipped. perfect-freehand's
+   * outline of a slice differs from the whole's near the slice's ends (it drops the first `size`
+   * px, restarts its streamline and the spacing of its outline points, and drops the last 3 px),
+   * which showed as thin slivers along the edges where frozen pieces met. So a filled outline
+   * (the pressure nib) is computed over the piece plus SEAM_CONTEXT of points on each side (of
+   * arc length), where it has converged to the whole's, and drawn clipped to the piece's own
+   * neighbourhood: a wider outline of the piece's points alone. Returns the path `d` drawn.
    */
   private piece(ctx: CanvasRenderingContext2D, live: Live, from: number, to: number, count: number, extra: Point[] = []): string {
     const a = this.contextStart(live, from), b = this.contextEnd(live, to, count);
     const d = strokePath({ ...live.style, points: this.drawn(live, a, b).concat(extra) }, true);
     if (!d) return d;
     const size = live.style.size;
-    const own = this.drawn(live, from, to).concat(extra);
     ctx.save();
-    if (a < from || b > to) ctx.clip(new Path2D(strokePath({ tool: 'pen', nib: 'uniform', size: size * 1.5 + 2, points: own }, true)));
-    ctx.fillStyle = live.color;
-    ctx.fill(new Path2D(d));
+    if (!isStroked(live.style) && (a < from || b > to)) {
+      const own = this.drawn(live, from, to).concat(extra);
+      ctx.clip(new Path2D(outlinePath({ tool: 'pen', nib: 'uniform', size: size * 1.5 + 2, points: own }, true)));
+    }
+    paintPath(ctx, live.style, canvasPath(live.style, d), live.color);
     ctx.restore();
     return d;
   }
 
-  /** The drawn point SEAM_CONTEXT (twice the size plus 8 px of arc length) before point i, or 0. */
+  /**
+   * The drawn point a piece from point i starts at: for a stroked centreline, STROKE_OVERLAP
+   * points before it; for a filled outline, SEAM_CONTEXT (twice the size plus 8 px of arc
+   * length) before it; or 0.
+   */
   private contextStart(live: Live, i: number): number {
     if (i <= 0) return 0;
+    if (isStroked(live.style)) return Math.max(0, i - STROKE_OVERLAP);
     const pts = this.drawn(live, Math.max(0, i - 400), i + 1), want = 2 * live.style.size + 8;
     let len = 0, j = pts.length - 1;
     for (; j > 0 && len < want; j--) len += Math.hypot(pts[j].x - pts[j - 1].x, pts[j].y - pts[j - 1].y);
     return Math.max(0, i - 400) + j;
   }
 
-  /** The drawn point after point i by the context and 3 px more (the outline drops a stroke's last 3 px), or `count`. */
+  /**
+   * The drawn point a piece to point i ends at: i itself for a stroked centreline; after it by
+   * the context and 3 px more for a filled outline (it drops a stroke's last 3 px); or `count`.
+   */
   private contextEnd(live: Live, i: number, count: number): number {
     if (i >= count) return count;
+    if (isStroked(live.style)) return i;
     const pts = this.drawn(live, i, Math.min(count, i + 400)), want = 2 * live.style.size + 11;
     let len = 0, j = 0;
     for (; j < pts.length - 1 && len < want; j++) len += Math.hypot(pts[j + 1].x - pts[j].x, pts[j + 1].y - pts[j].y);
     return j < pts.length - 1 ? i + j + 1 : count;
   }
 
-  /** Fills the outline of these points in the stroke's settings; returns the path `d`. */
+  /** Draws the path of these points in the stroke's settings (filled, or stroked, #60); returns the path `d`. */
   private fill(ctx: CanvasRenderingContext2D, live: Live, points: Point[]): string {
     const d = strokePath({ ...live.style, points }, true);
-    if (d) {
-      ctx.fillStyle = live.color;
-      ctx.fill(new Path2D(d));
-    }
+    if (d) paintPath(ctx, live.style, canvasPath(live.style, d), live.color);
     return d;
   }
 

@@ -1,5 +1,7 @@
-// Stroke outlines: each stroke is drawn as one filled path computed from its points with
-// perfect-freehand. The paths are derived data; a page's <metadata> is the source of truth.
+// Stroke paths: each stroke is drawn as one path computed from its points. The pressure nib and
+// the highlighter are filled outlines computed with perfect-freehand; the uniform nib (#60) is
+// its refitted centreline, stroked `size` wide with round caps and joins (isStroked). The paths
+// are derived data; a page's <metadata> is the source of truth.
 import { getStroke, type StrokeOptions } from 'perfect-freehand';
 import type { HighlighterStroke, Nib, PenStroke, Point } from './page';
 
@@ -80,6 +82,26 @@ export type OutlineInput = Pick<PenStroke, 'tool' | 'nib' | 'size' | 'points'> |
 export const outlineOptions = (s: OutlineInput): Readonly<StrokeOptions> =>
   s.tool === 'pen' ? NIB_OPTIONS[s.nib] : HIGHLIGHTER_OPTIONS;
 
+/**
+ * The uniform nib as a stroked centreline (#60). perfect-freehand's filled outline offsets each
+ * point sideways along the direction of the segments around it; at the smallest sizes those
+ * segments are the Pencil's 0.5 px steps and hand tremor, so the outline's width wobbled and its
+ * edges zigzagged (and the outline was rounded to 0.1 px, a fifth of a 0.5 px width). A
+ * centreline stroked `size` wide is exactly that wide everywhere, at any zoom, and its shape is
+ * the smoothed centreline, as Notability's standard pen draws. true: uniform strokes are
+ * centrelines everywhere (editor, file, thumbnails, PDF); false: back to the filled outline
+ * (the pre-#60 drawing), to compare. The pressure nib and the highlighter are always filled.
+ */
+export const UNIFORM_STROKED = true;
+
+/**
+ * Whether a stroke's path (strokePath) is a centreline to be stroked `size` wide with round caps
+ * and joins and no fill (the uniform pen, #60), rather than an outline to be filled.
+ */
+export function isStroked(s: { tool: string; nib?: string }): boolean {
+  return UNIFORM_STROKED && s.tool === 'pen' && s.nib === 'uniform';
+}
+
 /** Rounds to 0.1 and formats without a trailing `.0` or `-0`. */
 export function fmt1(n: number): string {
   const r = Math.round(n * 10) / 10;
@@ -87,12 +109,22 @@ export function fmt1(n: number): string {
 }
 
 /**
- * The SVG path `d` for a stroke's filled outline, with coordinates rounded to 0.1 px. The pen's
- * outline is drawn with quadratic curves through its points (smoothCurve), so its edges are
- * curved rather than a polygon's straight segments; the highlighter's stays a polygon, to keep
- * its flat ends square.
+ * The SVG path `d` of a stroke. For the uniform pen (isStroked, #60) the centreline of its
+ * refitted points (of the points as given with `live`), an open curve to stroke; otherwise its
+ * filled outline, with coordinates rounded to 0.1 px. The pressure pen's outline is drawn with
+ * quadratic curves through its points (smoothCurve), so its edges are curved rather than a
+ * polygon's straight segments; the highlighter's stays a polygon, to keep its flat ends square.
  */
 export function strokePath(stroke: OutlineInput, live = false): string {
+  if (isStroked(stroke)) return centreline(live ? stroke.points : refit(stroke.points, refitStep(stroke)));
+  return outlinePath(stroke, live);
+}
+
+/**
+ * The SVG path `d` of a stroke's filled outline, whatever UNIFORM_STROKED says: strokePath of
+ * the pressure pen and the highlighter, and the uniform pen's drawing before #60.
+ */
+export function outlinePath(stroke: OutlineInput, live = false): string {
   const { points, size } = stroke;
   if (points.length === 0) return '';
   if (points.length === 1) return dot(points[0].x, points[0].y, size / 2);
@@ -124,11 +156,26 @@ const REFIT_RADIUS = 1.5;
 const REFIT_STEP = 0.3;
 
 /**
- * The points a finished pen stroke is drawn from: smoothed and thinned (see REFIT_RADIUS),
- * first and last points unchanged, pressure smoothed the same way. Fewer than 3 points are
- * returned as they are. Linear in the number of points for a given sample spacing.
+ * How far apart a refit keeps its points for this stroke (refit's `step`, LiveFit's too). A
+ * filled outline is computed from points REFIT_STEP apart; perfect-freehand then spaces the
+ * outline's own points about `size / 2` apart, which smooths a large stroke's edges more than a
+ * small one's. A stroked centreline (#60) is the curve through the refit points themselves, so
+ * they are spaced 0.6 × size apart, but at least 0.6 px (so the Pencil's 0.5 px steps and 0.1 px
+ * storage grid don't show at the smallest sizes, while tiny loops keep their shape within about
+ * 0.15 px) and at most 1 px (as smooth as the outline was at 2.5 px, the default size). Measured
+ * at 400% (test/run_view_test.py, section 32).
  */
-export function refit(points: readonly Point[]): Point[] {
+export function refitStep(s: { tool: string; nib?: string; size: number }): number {
+  return isStroked(s) ? Math.min(1, Math.max(0.6, Math.round(6 * s.size) / 10)) : REFIT_STEP;
+}
+
+/**
+ * The points a finished pen stroke is drawn from: smoothed and thinned to points at least `step`
+ * apart (see REFIT_RADIUS and refitStep), first and last points unchanged, pressure smoothed the
+ * same way. Fewer than 3 points are returned as they are. Linear in the number of points for a
+ * given sample spacing.
+ */
+export function refit(points: readonly Point[], step = REFIT_STEP): Point[] {
   const n = points.length;
   if (n < 3 || REFIT_RADIUS <= 0) return points.slice();
   // Arc length at each point.
@@ -152,11 +199,11 @@ export function refit(points: readonly Point[]): Point[] {
     }
     smooth[i] = w > 0 ? { x: x / w, y: y / w, p: p / w, t: points[i].t } : points[i];
   }
-  // Thin: keep points at least REFIT_STEP from the last kept one; always keep the last.
+  // Thin: keep points at least `step` from the last kept one; always keep the last.
   const out: Point[] = [smooth[0]];
   for (let i = 1; i < n - 1; i++) {
     const a = out[out.length - 1], b = smooth[i];
-    if (Math.hypot(b.x - a.x, b.y - a.y) >= REFIT_STEP) out.push(b);
+    if (Math.hypot(b.x - a.x, b.y - a.y) >= step) out.push(b);
   }
   out.push(smooth[n - 1]);
   return out;
@@ -186,6 +233,9 @@ export class LiveFit {
   private lo = 0;
   private hi = 0;
 
+  /** `step`: refit's, refitStep of the stroke. */
+  constructor(private readonly step = REFIT_STEP) {}
+
   /** Brings the fit up to date with `points`; returns the number of points to draw. */
   update(points: readonly Point[]): number {
     const n = points.length, s = this.s;
@@ -203,7 +253,7 @@ export class LiveFit {
       const i = this.next++;
       const b = this.smooth(points, i, total);
       const a = fitted[fitted.length - 1];
-      if (Math.hypot(b.x - a.x, b.y - a.y) >= REFIT_STEP) fitted.push(b);
+      if (Math.hypot(b.x - a.x, b.y - a.y) >= this.step) fitted.push(b);
     }
     // The rest as refit would give it now (windows narrowed toward the tip), thinned on from the
     // last settled point, and the last sample. The window bounds are put back afterwards.
@@ -212,7 +262,7 @@ export class LiveFit {
     const lo = this.lo, hi = this.hi;
     for (let i = this.next; i < n - 1; i++) {
       const b = this.smooth(points, i, total);
-      if (Math.hypot(b.x - a.x, b.y - a.y) >= REFIT_STEP) rest.push(a = b);
+      if (Math.hypot(b.x - a.x, b.y - a.y) >= this.step) rest.push(a = b);
     }
     this.lo = lo;
     this.hi = hi;
@@ -286,6 +336,42 @@ export function smoothCurve(pts: readonly (readonly number[])[]): string {
   let d = 'M' + mid(q[q.length - 1], q[0]);
   for (let i = 0; i < q.length; i++) d += 'Q' + fmt1(q[i][0]) + ' ' + fmt1(q[i][1]) + ' ' + mid(q[i], q[(i + 1) % q.length]);
   return d + 'Z';
+}
+
+/**
+ * An open curve through a stroke's points, for stroking (#60): smoothCurve's conversion without
+ * closing. The midpoints between consecutive points are on the curve and each inner point is the
+ * control point of a quadratic; the curve starts at the first point and ends at the last
+ * (`M p0 Q p1 m1 … Q p(n-2) p(n-1)`). Coordinates are rounded to 0.01 px, not 0.1 like the
+ * outlines: a centreline's rounding moves both edges together, and 0.05 px is a tenth of a
+ * 0.5 px line (at 10× zoom on a 2× display, a device pixel). Points that round onto the previous
+ * one are dropped. Two points give a line; a single point (or points that all round onto one)
+ * a zero-length line, which round caps draw as a dot `size` wide.
+ */
+export function centreline(pts: readonly { x: number; y: number }[]): string {
+  const q: number[][] = [];
+  let last = '';
+  for (const { x, y } of pts) {
+    const xy = fmt2(x) + ' ' + fmt2(y);
+    if (xy === last) continue;
+    q.push([Math.round(x * 100) / 100, Math.round(y * 100) / 100]);
+    last = xy;
+  }
+  const n = q.length;
+  if (n === 0) return '';
+  const at = (p: number[]) => fmt2(p[0]) + ' ' + fmt2(p[1]);
+  if (n === 1) return `M${at(q[0])}L${at(q[0])}`;
+  if (n === 2) return `M${at(q[0])}L${at(q[1])}`;
+  const mid = (a: number[], b: number[]) => fmt2((a[0] + b[0]) / 2) + ' ' + fmt2((a[1] + b[1]) / 2);
+  let d = 'M' + at(q[0]);
+  for (let i = 1; i < n - 2; i++) d += 'Q' + at(q[i]) + ' ' + mid(q[i], q[i + 1]);
+  return d + 'Q' + at(q[n - 2]) + ' ' + at(q[n - 1]);
+}
+
+/** Rounds to 0.01 and formats without trailing zeros or `-0`. */
+export function fmt2(n: number): string {
+  const r = Math.round(n * 100) / 100;
+  return r === 0 ? '0' : String(r);
 }
 
 /** A filled circle of radius `r` as two arcs. */

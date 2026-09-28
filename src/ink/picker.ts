@@ -13,7 +13,7 @@ import {
   COLOR_PRESETS, DEFAULT_PEN, ERASER_SIZES, HIGHLIGHTER_COLORS, HIGHLIGHTER_SIZES, MAX_PRESETS, SIZE_PRESETS, stepSize,
   type ColorPreset, type EraserMode, type EraserSettings, type HighlighterSettings, type PenPreset, type PenSettings, type ToolKind,
 } from './pen';
-import { HIGHLIGHT_ALPHA, type Theme } from './renderer';
+import { canvasPath, HIGHLIGHT_ALPHA, paintPath, type Theme } from './renderer';
 
 export type PickerKind = ToolKind | 'page' | 'import';
 
@@ -336,10 +336,10 @@ export class Picker {
     ctx.fillStyle = theme.paper;
     ctx.fillRect(0, 0, PREVIEW_W, PREVIEW_H);
     const points = previewPoints();
-    const d = kind === 'pen' ? strokePath({ tool: 'pen', nib, size, points }) : strokePath({ tool: 'highlighter', size, points });
-    ctx.fillStyle = color === DEFAULT_PEN.color ? theme.ink : color;
+    const style = kind === 'pen' ? { tool: 'pen' as const, nib, size } : { tool: 'highlighter' as const, size };
+    const d = strokePath({ ...style, points });
     if (kind === 'highlighter') ctx.globalAlpha = HIGHLIGHT_ALPHA;
-    ctx.fill(new Path2D(d));
+    paintPath(ctx, style, canvasPath(style, d), color === DEFAULT_PEN.color ? theme.ink : color);
     ctx.globalAlpha = 1;
     this.previews++;
   }

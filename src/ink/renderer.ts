@@ -12,7 +12,7 @@
 // as before. Everything is drawn in page px through pageTransform, so strokes, images and the
 // highlighter layer outside the band are simply clipped.
 import { DEFAULT_INK, prepareSave, type Page, type PageImage, type Size, type Stroke } from '../format/page';
-import { strokePathCached } from '../format/outline';
+import { isStroked, strokePathCached } from '../format/outline';
 import { fixedPaper, renderTemplate, type PdfTemplate, type Template } from '../format/template';
 import type { Band } from './layout';
 
@@ -55,18 +55,130 @@ export function pixelRatio(cssWidth: number, cssHeight: number, dpr = window.dev
   return area * dpr * dpr > MAX_CANVAS_PIXELS ? Math.sqrt(MAX_CANVAS_PIXELS / area) : dpr;
 }
 
-// Outlines are computed once per stroke object and kept while it lives; the `d` they're made
-// from is cached by strokePathCached, which writePage shares.
-const outlines = new WeakMap<Stroke, Path2D>();
+/** What decides how a stroke's path is painted: its tool, nib and size. */
+export type PaintStyle = { tool: string; nib?: string; size: number };
 
-export function strokePath2D(stroke: Stroke): Path2D {
-  let p = outlines.get(stroke);
+/**
+ * The Path2D of a stroke's path `d` (strokePath). A stroked centreline of zero length (a dot:
+ * one point, or points that round onto one) is given a 0.001 px segment, since canvas may prune
+ * zero-length segments where SVG and PDF draw their round caps.
+ */
+export function canvasPath(style: PaintStyle, d: string): Path2D {
+  if (isStroked(style)) {
+    const m = /^M(-?[\d.]+) (-?[\d.]+)L\1 \2$/.exec(d);
+    if (m) {
+      const p = new Path2D(), x = Number(m[1]), y = Number(m[2]);
+      p.moveTo(x, y);
+      p.lineTo(x + 0.001, y);
+      return p;
+    }
+  }
+  return new Path2D(d);
+}
+
+/**
+ * Paints a stroke's path (canvasPath of its strokePath) in `color`, in the current transform:
+ * a uniform pen's centreline stroked `size` wide with round caps and joins (#60), any other
+ * stroke's outline filled.
+ */
+export function paintPath(ctx: CanvasRenderingContext2D, style: PaintStyle, path: Path2D, color: string) {
+  if (isStroked(style)) {
+    ctx.lineWidth = style.size;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = color;
+    ctx.stroke(path);
+  } else {
+    ctx.fillStyle = color;
+    ctx.fill(path);
+  }
+}
+
+// Paths are computed once per stroke object and kept while it lives; the `d` they're made from
+// is cached by strokePathCached, which writePage shares.
+const paths = new WeakMap<Stroke, Path2D>();
+
+/** The Path2D a stroke is painted with (paintStroke): its centreline or its outline. */
+export function strokeDrawPath(stroke: Stroke): Path2D {
+  let p = paths.get(stroke);
   if (!p) {
-    p = new Path2D(strokePathCached(stroke));
-    outlines.set(stroke, p);
+    p = canvasPath(stroke, strokePathCached(stroke));
+    paths.set(stroke, p);
     // And its points as the file stores them, so the next save only encodes new strokes (#37).
     prepareSave(stroke);
   }
+  return p;
+}
+
+/** Paints a stroke as the page bitmap draws it, in the current transform. */
+export function paintStroke(ctx: CanvasRenderingContext2D, stroke: Stroke, color: string) {
+  paintPath(ctx, stroke, strokeDrawPath(stroke), color);
+}
+
+// The area a stroked centreline covers, as a path to fill (see strokePath2D), per stroke object.
+const areas = new WeakMap<Stroke, Path2D>();
+
+/**
+ * A stroke's inked area as a Path2D to fill (nonzero). For a filled outline this is its drawn
+ * path. For a stroked centreline (#60) it's the same area as the stroke paints: the centreline
+ * (its quadratics flattened to within 0.01 px) as a union of one rectangle `size` wide per
+ * segment and round discs at the ends and where the line turns, all wound the same way. For
+ * callers that fill strokes (the lasso's drag preview, selection.ts); built on first use.
+ */
+export function strokePath2D(stroke: Stroke): Path2D {
+  if (!isStroked(stroke)) return strokeDrawPath(stroke);
+  let p = areas.get(stroke);
+  if (!p) {
+    p = centrelineArea(strokePathCached(stroke), stroke.size / 2);
+    areas.set(stroke, p);
+  }
+  return p;
+}
+
+/** The area within `r` of the centreline `d` (M, L and Q commands, as strokePath writes). */
+export function centrelineArea(d: string, r: number): Path2D {
+  const nums = (d.match(/[MLQ]|-?[\d.]+/g) ?? []);
+  const pts: number[][] = [];
+  let i = 0, cmd = '';
+  const n = () => Number(nums[i++]);
+  while (i < nums.length) {
+    if (/^[MLQ]$/.test(nums[i])) cmd = nums[i++];
+    if (cmd === 'Q') {
+      const [x0, y0] = pts[pts.length - 1], cx = n(), cy = n(), x1 = n(), y1 = n();
+      // Enough pieces that the chord is within 0.01 px of the curve.
+      const bend = Math.hypot(x0 - 2 * cx + x1, y0 - 2 * cy + y1) / 4;
+      const k = Math.max(1, Math.min(16, Math.ceil(Math.sqrt(bend / 0.01))));
+      for (let j = 1; j <= k; j++) {
+        const t = j / k, u = 1 - t;
+        pts.push([u * u * x0 + 2 * u * t * cx + t * t * x1, u * u * y0 + 2 * u * t * cy + t * t * y1]);
+      }
+    } else pts.push([n(), n()]);
+  }
+  const p = new Path2D();
+  const disc = (x: number, y: number) => {
+    p.moveTo(x + r, y);
+    p.arc(x, y, r, 0, 2 * Math.PI);
+  };
+  if (!pts.length) return p;
+  disc(pts[0][0], pts[0][1]);
+  let prev: number[] | null = null;
+  for (let j = 1; j < pts.length; j++) {
+    const [ax, ay] = pts[j - 1], [bx, by] = pts[j], len = Math.hypot(bx - ax, by - ay);
+    if (len < 1e-6) continue;
+    const ux = (bx - ax) / len, uy = (by - ay) / len;
+    // A turn of more than 10 degrees gets a disc; a smaller one leaves a wedge under 0.004 r.
+    if (prev && prev[0] * ux + prev[1] * uy < 0.985) disc(ax, ay);
+    prev = [ux, uy];
+    // (-uy, ux) is to the right on screen (y down); this order winds as arc() does.
+    const nx = -uy * r, ny = ux * r;
+    p.moveTo(ax - nx, ay - ny);
+    p.lineTo(bx - nx, by - ny);
+    p.lineTo(bx + nx, by + ny);
+    p.lineTo(ax + nx, ay + ny);
+    p.closePath();
+  }
+  const last = pts[pts.length - 1];
+  disc(last[0], last[1]);
   return p;
 }
 
@@ -99,9 +211,9 @@ export function strokeBounds(stroke: Stroke): [number, number, number, number] {
  */
 export function warmOutlines(page: Page, deadline: number): boolean {
   for (const s of page.strokes) {
-    if (outlines.has(s)) continue;
+    if (paths.has(s)) continue;
     if (performance.now() >= deadline) return false;
-    strokePath2D(s);
+    strokeDrawPath(s);
   }
   return true;
 }
@@ -546,10 +658,7 @@ export class PageBitmap {
     if (highlights.length) {
       const hctx = scratchCanvas(w, h);
       this.pageTransform(hctx, page.size);
-      for (const s of highlights) {
-        hctx.fillStyle = strokeColor(s, theme);
-        hctx.fill(strokePath2D(s));
-      }
+      for (const s of highlights) paintStroke(hctx, s, strokeColor(s, theme));
       ctx.globalAlpha = HIGHLIGHT_ALPHA;
       ctx.drawImage(scratch!, 0, 0);
       ctx.globalAlpha = 1;
@@ -588,8 +697,7 @@ export class PageBitmap {
   }
 
   private fill(s: Stroke, theme: Theme) {
-    this.ctx.fillStyle = strokeColor(s, theme);
-    this.ctx.fill(strokePath2D(s));
+    paintStroke(this.ctx, s, strokeColor(s, theme));
   }
 
   /** Frees the bitmap's memory now (iOS keeps it until the canvas is shrunk). */

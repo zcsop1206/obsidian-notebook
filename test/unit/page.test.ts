@@ -74,19 +74,28 @@ test('SVG layout: header, style, metadata, the four layers in order', () => {
   const svg = writePage(page);
   const lines = svg.split('\n');
   assert.equal(lines[0], '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 816 1056" width="816" height="1056">');
-  assert.match(lines[1], /^<style>\.i\{fill:#1f1f1f\}\.t\{stroke:#c9c9c9\}@media \(prefers-color-scheme:dark\)\{\.i\{fill:#e6e3de\}\.t\{stroke:#3c3c3c\}\}<\/style>$/);
+  // With default-ink uniform strokes (#60), `.u` gives their stroke colour, following dark mode too.
+  const u = page.strokes.some(s => s.tool === 'pen' && s.nib === 'uniform' && s.color === '#000000');
+  assert.ok(u, 'the seeded page has a default-ink uniform stroke');
+  assert.equal(lines[1], '<style>.i{fill:#1f1f1f}.t{stroke:#c9c9c9}.u{stroke:#1f1f1f}@media (prefers-color-scheme:dark){.i{fill:#e6e3de}.t{stroke:#3c3c3c}.u{stroke:#e6e3de}}</style>');
   assert.match(lines[2], /^<metadata><!\[CDATA\[\{"format":"notebook-ink\/1","id":"p-[0-9a-f]{6}","size":\{"width":816,"height":1056\},"template":\{"kind":"blank"\},"strokes":\[$/);
   const order = ['<g id="template">', '<g id="highlight" opacity="0.4">', '<g id="ink">', '<g id="objects">'].map(g => svg.indexOf(g));
   assert.ok(order.every(i => i > 0) && order.every((v, i) => i === 0 || v > order[i - 1]), 'layers in order');
   assert.ok(svg.endsWith('</svg>\n'));
-  // One path per line; default black uses the dark-mode class, other colours a literal fill.
+  // One path per line; default black uses the dark-mode class, other colours a literal fill, or
+  // for a uniform pen stroke (#60, a centreline) a literal stroke, with no fill, `size` wide.
   const paths = lines.filter(l => l.startsWith('<path'));
   assert.equal(paths.length, 6);
   for (const s of page.strokes) {
     const line = paths.find(l => l.includes(`data-id="${s.id}"`))!;
     assert.ok(line, s.id);
-    if (s.color === '#000000') assert.ok(line.includes('class="i"') && !line.includes('fill='), line);
-    else assert.ok(line.includes(`fill="${s.color}"`) && !line.includes('class='), line);
+    const width = ` stroke-width="${readPage(svg).strokes.find(r => r.id === s.id)!.size}" stroke-linecap="round" stroke-linejoin="round" d="`;
+    if (s.tool === 'pen' && s.nib === 'uniform') {
+      if (s.color === '#000000') assert.ok(line.startsWith(`<path data-id="${s.id}" class="u" fill="none"${width}`), line);
+      else assert.ok(line.startsWith(`<path data-id="${s.id}" fill="none" stroke="${s.color}"${width}`), line);
+      assert.ok(!line.includes('Z"'), 'an open path');
+    } else if (s.color === '#000000') assert.ok(line.includes('class="i"') && !line.includes('fill=') && !line.includes('stroke'), line);
+    else assert.ok(line.includes(`fill="${s.color}"`) && !line.includes('class=') && !line.includes('stroke'), line);
   }
   // Highlighter paths sit in the highlight layer, pen paths in the ink layer.
   const hl = svg.slice(svg.indexOf('<g id="highlight"'), svg.indexOf('<g id="ink"'));
@@ -131,17 +140,42 @@ test('a one-point stroke is a dot of diameter size', () => {
 });
 
 test('pressure nib width follows pressure; uniform nib and highlighter widths do not', () => {
+  const points = (p: number) => Array.from({ length: 30 }, (_, i) => ({ x: 100 + i * 4, y: 100, p, t: i * 4 }));
   const width = (s: { tool: 'pen'; nib: 'uniform' | 'pressure' } | { tool: 'highlighter' }, p: number) => {
-    const points = Array.from({ length: 30 }, (_, i) => ({ x: 100 + i * 4, y: 100, p, t: i * 4 }));
-    const ys = strokePath({ ...s, size: 10, points }).match(/-?[\d.]+ -?[\d.]+/g)!.map(v => Number(v.split(' ')[1]));
+    const ys = strokePath({ ...s, size: 10, points: points(p) }).match(/-?[\d.]+ -?[\d.]+/g)!.map(v => Number(v.split(' ')[1]));
     return Math.max(...ys) - Math.min(...ys);
   };
   const pressure = { tool: 'pen', nib: 'pressure' } as const;
   assert.ok(width(pressure, 0.9) > width(pressure, 0.5) + 1.5 && width(pressure, 0.5) > width(pressure, 0.1) + 2);
   assert.ok(Math.abs(width(pressure, 0.5) - 10) < 0.5, 'pressure nib at 0.5 is `size` wide');
-  for (const s of [{ tool: 'pen', nib: 'uniform' }, { tool: 'highlighter' }] as const) {
-    for (const p of [0, 0.1, 0.5, 0.9, 1]) assert.ok(Math.abs(width(s, p) - 10) < 0.5, `${s.tool} at ${p}: ${width(s, p)}`);
+  for (const p of [0, 0.1, 0.5, 0.9, 1]) assert.ok(Math.abs(width({ tool: 'highlighter' }, p) - 10) < 0.5, `highlighter at ${p}: ${width({ tool: 'highlighter' }, p)}`);
+  // The uniform nib (#60): its centreline (no width of its own), stroked `size` wide, the same whatever the pressure.
+  const uniform = { tool: 'pen', nib: 'uniform' } as const;
+  for (const p of [0, 0.1, 0.5, 0.9, 1]) {
+    assert.equal(width(uniform, p), 0);
+    assert.equal(strokePath({ ...uniform, size: 10, points: points(p) }), strokePath({ ...uniform, size: 10, points: points(0.5) }));
+    const page = newPage('p-0000b0');
+    page.strokes.push({ id: '000000b0', ...uniform, color: '#000000', size: 10, points: points(p) });
+    assert.match(writePage(page), /<path data-id="000000b0" class="u" fill="none" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" d="M100 100[^"]* 216 100"\/>/);
   }
+});
+
+test('the uniform nib\'s drawing (#60) is only in the paths: the metadata is the same bytes as with any other nib', () => {
+  const page = randomPage(seeded(21), 40, 'mixed');
+  const pens = page.strokes.filter(s => s.tool === 'pen');
+  assert.ok(pens.some(s => s.nib === 'uniform') && pens.some(s => s.nib === 'pressure'));
+  const meta = (svg: string) => /<metadata>[\s\S]*<\/metadata>/.exec(svg)![0];
+  const asPressure: Page = { ...page, strokes: page.strokes.map(s => (s.tool === 'pen' ? { ...s, nib: 'pressure' as const } : s)) };
+  // Nib for nib: the uniform strokes' metadata lines differ from the pressure ones only in the nib.
+  const a = meta(writePage(page)).split('\n'), b = meta(writePage(asPressure)).split('\n');
+  assert.equal(a.length, b.length);
+  a.forEach((l, i) => assert.equal(l.replace('"nib":"uniform"', '"nib":"pressure"'), b[i]));
+  // Pages with no default-ink uniform stroke keep the pre-#60 style, byte for byte.
+  const style = (svg: string) => svg.split('\n')[1];
+  assert.equal(style(writePage(asPressure)), '<style>.i{fill:#1f1f1f}.t{stroke:#c9c9c9}@media (prefers-color-scheme:dark){.i{fill:#e6e3de}.t{stroke:#3c3c3c}}</style>');
+  const coloured: Page = { ...page, strokes: page.strokes.map(s => ({ ...s, color: '#d0312d' })) };
+  assert.equal(style(writePage(coloured)), style(writePage(asPressure)));
+  assert.ok(!writePage(asPressure).includes('stroke-width'));
 });
 
 test('size takes any positive number, stored to 0.1 px', () => {

@@ -84,12 +84,14 @@ test('highlighter: constant width and flat ends, where the pen\'s ends are round
   assert.equal(HIGHLIGHTER_OPTIONS.thinning, 0);
   const points = line(100, 400, 200, 300);
   const hl = xs(strokePath({ tool: 'highlighter', size: 18, points }));
-  const pen = xs(strokePath({ tool: 'pen', nib: 'uniform', size: 18, points }));
+  // A filled pen outline (the pressure nib); the uniform nib's centreline (#60) ends at the end
+  // points and is given its round caps by stroke-linecap (see outline.test.ts).
+  const pen = xs(strokePath({ tool: 'pen', nib: 'pressure', size: 18, points }));
   const extent = (pts: number[][]) => [Math.min(...pts.map(p => p[0])), Math.max(...pts.map(p => p[0]))];
   const [h0, h1] = extent(hl), [p0, p1] = extent(pen);
   // Flat: the outline stops at the first and last points; a round cap reaches size / 2 beyond.
   assert.ok(h0 > 99 && h1 < 401, `highlighter spans ${h0}..${h1}`);
-  assert.ok(p0 < 92 && p1 > 408, `pen spans ${p0}..${p1}`);
+  assert.ok(p0 < 97 && p1 > 403, `pen spans ${p0}..${p1}`);
   // Each end is a straight edge across the full width: points at the end x span 18 px in y.
   const atEnd = (x: number) => hl.filter(p => Math.abs(p[0] - x) < 0.6).map(p => p[1]);
   for (const x of [h0, h1]) {

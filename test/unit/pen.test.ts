@@ -3,7 +3,7 @@
 // from the refit points, LiveFit).
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { LiveFit, pressureCurve, strokePath } from '../../src/format/outline';
+import { LiveFit, pressureCurve, refitStep, strokePath } from '../../src/format/outline';
 import { newPage, readPage, writePage, type PenStroke, type Point } from '../../src/format/page';
 import {
   addSamples, blockStylusTouch, LIVE_KEEP, LIVE_MAX, livePlan, MIN_STEP, newTrace, OVERLAP, predictedPoints, samplesOf,
@@ -157,7 +157,7 @@ test('live: the live outline of finished points is the saved stroke\'s outline (
   for (const nib of ['uniform', 'pressure'] as const) {
     const points = sampled(150);
     assert.ok(points.length < LIVE_MAX);
-    const fit = new LiveFit(), n = fit.update(points);
+    const fit = new LiveFit(refitStep({ tool: 'pen', nib, size: 2.5 })), n = fit.update(points);
     const plan = livePlan(n, 0);
     const live = strokePath({ tool: 'pen', nib, size: 2.5, points: fit.slice(plan.tail) }, true);
     const stroke: PenStroke = { id: '0000abcd', tool: 'pen', nib, color: '#1e6fff', size: 2.5, points };
@@ -185,7 +185,8 @@ test('outline: the uniform nib ignores pressure; the pressure nib follows it; si
   const varying = line(i => 0.02 + 0.96 * i / 199), flat = line(() => 0.5);
   const u = strokePath({ tool: 'pen', nib: 'uniform', size: 4, points: varying });
   assert.equal(u, strokePath({ tool: 'pen', nib: 'uniform', size: 4, points: flat }), 'uniform: identical whatever the pressure');
-  assert.ok(Math.abs(widthAt(u, 150) - 4) < 0.25 && Math.abs(widthAt(u, 450) - 4) < 0.25);
+  // #60: the uniform nib is its centreline, stroked `size` wide (page.test.ts checks the file's stroke-width).
+  assert.ok(widthAt(u, 150) < 0.01 && widthAt(u, 450) < 0.01 && u.startsWith('M100 300') && u.endsWith(' 498 300'), u.slice(0, 40));
   const pr = strokePath({ tool: 'pen', nib: 'pressure', size: 4, points: varying });
   const lo = widthAt(pr, 150), hi = widthAt(pr, 450);
   assert.ok(hi > lo * 1.4, `pressure: ${lo} at low pressure, ${hi} at high`);
