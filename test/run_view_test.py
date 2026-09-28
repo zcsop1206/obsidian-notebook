@@ -1568,7 +1568,7 @@ try:
             out.push(view.zoom);
             off = Math.max(off, T.off(T.screenPoint(before), [cx, cy]));
           }
-          view.setZoom(9);
+          view.setZoom(12);
           const max = view.zoom;
           view.setZoom(0.1);
           const min = view.zoom;
@@ -1576,8 +1576,8 @@ try:
           const shown = [commands['zoom-in'].checkCallback(true), commands['zoom-out'].checkCallback(true), commands['zoom-reset'].checkCallback(true)];
           return { out, off, max, min, shown };
         }""")
-        check('zoom commands: in and out by 25%, reset to 100%, clamped to 50-400%',
-              r['out'] == [1.25, 1.5, 1.25, 1, 0.75, 1] and r['max'] == 4 and r['min'] == 0.5 and r['shown'] == [True, True, True], r)
+        check('zoom commands: in and out by 25%, reset to 100%, clamped to 50-1000% (#60)',
+              r['out'] == [1.25, 1.5, 1.25, 1, 0.75, 1] and r['max'] == 10 and r['min'] == 0.5 and r['shown'] == [True, True, True], r)
         check('zoom commands: the page point at the middle of the view stays there (within 1 px each time)', r['off'] < 1, r['off'])
         r = ev("""async () => {
           const sc = T.sc(), pagesEl = view.contentEl.querySelector('.nb-ink-pages'), r0 = sc.getBoundingClientRect();
@@ -1596,10 +1596,10 @@ try:
               and r['during']['transform'].startswith('scale(') and r['during']['off'] < 1, r)
         check('wheel: ... then committed, the point under the cursor kept', abs(r['zoom'] - r['expected']) < 1e-6 and r['off'] < 1, r)
 
-        # (4) strokes land under the pointer at 50%, 100% and 400%
+        # (4) strokes land under the pointer at 50%, 100%, 400% and 1000% (#60)
         r = ev("""async () => {
           const out = {};
-          for (const z of [0.5, 1, 4]) {
+          for (const z of [0.5, 1, 4, 10]) {
             view.setZoom(z);
             // the middle of page 1 in the middle of the view
             const sc = T.sc(), pg = T.pages()[1];
@@ -1616,8 +1616,8 @@ try:
           return out;
         }""")
         print('strokes at zoom (worst distance from the pointer, page px):', {k: round(v['worst'], 3) for k, v in r.items()})
-        check('zoom: strokes at 50%, 100% and 400% land under the pointer (within 0.2 page px)',
-              all(0 <= v['worst'] <= 0.2 for v in r.values()) and len(r) == 3, r)
+        check('zoom: strokes at 50%, 100%, 400% and 1000% land under the pointer (within 0.2 page px)',
+              all(0 <= v['worst'] <= 0.2 for v in r.values()) and len(r) == 4, r)
 
         # (5) the pen keeps writing while a finger pans or two fingers pinch
         r = ev("""async () => {

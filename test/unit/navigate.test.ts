@@ -25,6 +25,10 @@ test('layout at a zoom: boxes scale, margins and gaps stay, the layer widens abo
   assert.equal(two.pages[1].left, MARGIN + Math.round((1632 - 1588) / 2)); // the narrower page centred in the layer
   const four = layoutPages([LETTER], 848, LETTER, 4);
   assert.deepEqual([four.pages[0].width, four.pages[0].height, four.width], [3264, 4224, 3264 + 2 * MARGIN]);
+  // 1000% (#60): a Letter page fitted to 816 CSS px is 8160 wide; the layer scrolls sideways.
+  const ten = layoutPages([LETTER, LETTER], 848, LETTER, 10);
+  assert.deepEqual([ten.pages[0].width, ten.pages[0].height, ten.width], [8160, 10560, 8160 + 2 * MARGIN]);
+  assert.equal(ten.pages[1].top, MARGIN + 10560 + GAP);
 });
 
 test('layout at a zoom: below 100% the pages stay centred in the view width', () => {
@@ -35,16 +39,29 @@ test('layout at a zoom: below 100% the pages stay centred in the view width', ()
   assert.equal(half.pages[1].top, MARGIN + 528 + GAP);
 });
 
-test('zoom: clamped to 50-400%, commands step by 25%', () => {
+test('zoom: clamped to 50-1000% (#60), commands step by 25% up to 400%, then 500, 600, 800, 1000%', () => {
   assert.equal(clampZoom(0.1), MIN_ZOOM);
-  assert.equal(clampZoom(9), MAX_ZOOM);
+  assert.equal(MAX_ZOOM, 10);
+  assert.equal(clampZoom(9), 9);
+  assert.equal(clampZoom(12), MAX_ZOOM);
   assert.equal(zoomStep(1, 1), 1.25);
   assert.equal(zoomStep(1, -1), 0.75);
   assert.equal(zoomStep(1.1, 1), 1.25); // to the next step, not 1.35
   assert.equal(zoomStep(1.1, -1), 1);
-  assert.equal(zoomStep(4, 1), 4);
   assert.equal(zoomStep(0.5, -1), 0.5);
   assert.equal(zoomStep(0.6, -1), 0.5);
+  assert.equal(zoomStep(3.75, 1), 4);
+  const up = [4];
+  while (up[up.length - 1] < MAX_ZOOM) up.push(zoomStep(up[up.length - 1], 1));
+  assert.deepEqual(up, [4, 5, 6, 8, 10]);
+  assert.equal(zoomStep(10, 1), 10);
+  const down = [10];
+  while (down[down.length - 1] > 3) down.push(zoomStep(down[down.length - 1], -1));
+  assert.deepEqual(down, [10, 8, 6, 5, 4, 3.75, 3.5, 3.25, 3]);
+  assert.equal(zoomStep(4.2, 1), 5); // off a step: to the next one
+  assert.equal(zoomStep(4.2, -1), 4);
+  assert.equal(zoomStep(7, -1), 6);
+  assert.equal(zoomStep(7, 1), 8);
 });
 
 test('momentum: release velocity over the last 100 ms', () => {
@@ -91,8 +108,9 @@ test('pinch: the preview scale is the distance ratio, clamped to the zoom range'
   assert.equal(pinchScale(1, 100, 200), 2);
   assert.equal(pinchScale(1, 100, 50), 0.5);
   assert.equal(pinchScale(1, 100, 20), 0.5); // 20% clamps to 50%
-  assert.equal(pinchScale(2, 100, 400), 2); // 800% clamps to 400%
-  assert.equal(pinchScale(4, 100, 150), 1);
+  assert.equal(pinchScale(2, 100, 400), 4); // 800%
+  assert.equal(pinchScale(4, 100, 400), 2.5); // 1600% clamps to 1000%
+  assert.equal(pinchScale(10, 100, 150), 1);
   assert.equal(pinchScale(1, 0, 100), 1);
 });
 
@@ -103,7 +121,7 @@ test('pinch: after the zoom the same page point is under the pinch centre', () =
   const scroll = { left: 0, top: 2300 }, v = { x: 300, y: 250 };
   const a = anchorAt(before, scroll.left + v.x, scroll.top + v.y)!;
   assert.equal(a.index, 2);
-  for (const zoom of [0.5, 2, 4]) {
+  for (const zoom of [0.5, 2, 4, 10]) {
     const after = layoutPages(sizes, 848, LETTER, zoom);
     const to = scrollToKeep(after, a, v.x, v.y);
     // Seen through the new scroll position, the point is at v and is the same page point.
