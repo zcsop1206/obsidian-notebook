@@ -20,6 +20,12 @@ Write with the Apple Pencil (or the mouse on desktop); fingers never draw, and a
 
 Drag with one or two fingers to scroll; flick and it keeps going. Pinch to zoom from 50% to 400% around your fingers (100% fits the page to the width of the view; zoomed in, you can scroll sideways too). The Pencil keeps writing while your fingers move the page, and swipes over the pages never open Obsidian's sidebars. Tap with two fingers to undo, three to redo. On desktop, use Ctrl/Cmd + the mouse wheel (or pinch the trackpad) or the commands **Zoom in**, **Zoom out** and **Reset zoom to 100%**. The zoom and position are kept while the note is open; another note opens at 100%.
 
+## Renaming and moving notes
+
+A note is a markdown file plus a folder of page files with the same name next to it (`lecture.md` and `lecture/`). Rename or move the note in Obsidian and its folder follows; you can also move the two together, or rename the folder yourself. The page links in the note are kept as paths relative to the note (`![](lecture/p-7f3a0c.svg)`), so they work on GitHub and on a website.
+
+Obsidian rewrites links when files move, and by default it shortens them to the bare file name, which only Obsidian can resolve. The plugin reads those and writes the relative paths back, but it's better to stop Obsidian shortening them: in **Settings → Files and links**, set **New link format** to **Relative path to file**, on every device.
+
 ## Install on the iPad
 
 1. Install **BRAT** from Community plugins and enable it.
