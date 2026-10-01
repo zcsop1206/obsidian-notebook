@@ -34,12 +34,62 @@ export async function pdfPageImage(pg: PdfPageProxy): Promise<{ size: { width: n
   let image = '';
   try {
     const canvas = await renderPdfPage(pg, IMPORT_DPI / 72, MAX_IMAGE_PIXELS);
-    image = canvas.toDataURL('image/jpeg', JPEG_QUALITY);
+    image = await jpegDataUrl(canvas);
     canvas.width = canvas.height = 0;
   } catch (e) {
     console.warn('[notebook] PDF page did not render', e);
   }
   return { size: { width: pointsToPx(one.width), height: pointsToPx(one.height) }, image };
+}
+
+/**
+ * The canvas as a JPEG data URL. Encoded through toBlob, which works off the main thread, so a
+ * long import leaves Obsidian usable (#63); toDataURL, which doesn't, only if that fails.
+ */
+function jpegDataUrl(canvas: HTMLCanvasElement): Promise<string> {
+  return new Promise(resolve => {
+    const sync = () => resolve(canvas.toDataURL('image/jpeg', JPEG_QUALITY));
+    try {
+      canvas.toBlob(blob => {
+        if (!blob) return sync();
+        const reader = new FileReader();
+        reader.onload = () => (typeof reader.result === 'string' ? resolve(reader.result) : sync());
+        reader.onerror = sync;
+        reader.readAsDataURL(blob);
+      }, 'image/jpeg', JPEG_QUALITY);
+    } catch (e) {
+      sync();
+    }
+  });
+}
+
+/** Set `cancelled` to stop an import after the page it is on (#63). */
+export interface ImportCancel {
+  cancelled: boolean;
+}
+
+/**
+ * A notice that stays up during an import, with a Cancel button (#63). `say` sets its text;
+ * `cancel.cancelled` is set by the button; `total` is the page count once known.
+ */
+export function importNotice(text: string): { say(text: string): void; hide(): void; cancel: ImportCancel } {
+  const notice = new Notice(text, 0);
+  const cancel: ImportCancel = { cancelled: false };
+  const el = notice.noticeEl as HTMLElement | undefined;
+  const button = el?.ownerDocument.createElement('button');
+  if (button) {
+    button.className = 'nb-import-cancel';
+    button.textContent = 'Cancel';
+    button.addEventListener('click', e => {
+      e.stopPropagation(); // a click on a notice closes it
+      cancel.cancelled = true;
+      button.disabled = true;
+      button.textContent = 'Stopping…';
+    });
+  }
+  const place = () => { if (el && button) el.appendChild(button); }; // setMessage replaces the notice's content
+  place();
+  return { say: t => { notice.setMessage?.(t); place(); }, hide: () => notice.hide(), cancel };
 }
 
 /** A PDF's name without its extension. */
@@ -48,10 +98,11 @@ export const stripPdf = (name: string) => name.replace(/\.pdf$/i, '');
 /**
  * Creates the note from a PDF's bytes and returns its path. `progress(done, total)` is called
  * after each page. Pages are written before the index, as createInkNote does. Throws if pdf.js
- * can't read the PDF (then nothing is written).
+ * can't read the PDF (then nothing is written). If `cancel.cancelled` is set meanwhile, the
+ * import stops after the page it is on and the note holds the pages done so far.
  */
 export async function importPdf(app: App, folder: string, name: string, pdfName: string, bytes: ArrayBuffer,
-  paper: Paper, progress: (done: number, total: number) => void = () => {}): Promise<string> {
+  paper: Paper, progress: (done: number, total: number) => void = () => {}, cancel?: ImportCancel): Promise<string> {
   const doc = await openPdf(bytes);
   try {
     const vault = app.vault;
@@ -67,7 +118,7 @@ export async function importPdf(app: App, folder: string, name: string, pdfName:
     // Pages added later are blank at the note's paper size.
     const note = newNote(base, paper, 'blank');
     const total = doc.numPages;
-    for (let n = 1; n <= total; n++) {
+    for (let n = 1; n <= total && !cancel?.cancelled; n++) {
       const pg = await doc.getPage(n);
       const { size, image } = await pdfPageImage(pg);
       pg.cleanup?.();
@@ -90,11 +141,11 @@ export async function importPdf(app: App, folder: string, name: string, pdfName:
  * `progress(done, total)` after each (#54: a PDF imported into the open note). Throws if pdf.js
  * can't read the PDF.
  */
-export async function renderPdfPages(bytes: ArrayBuffer, progress: (done: number, total: number) => void = () => {}): Promise<RenderedPdfPage[]> {
+export async function renderPdfPages(bytes: ArrayBuffer, progress: (done: number, total: number) => void = () => {}, cancel?: ImportCancel): Promise<RenderedPdfPage[]> {
   const doc = await openPdf(bytes);
   try {
     const out: RenderedPdfPage[] = [];
-    for (let n = 1; n <= doc.numPages; n++) {
+    for (let n = 1; n <= doc.numPages && !cancel?.cancelled; n++) {
       const pg = await doc.getPage(n);
       out.push(await pdfPageImage(pg));
       pg.cleanup?.();
