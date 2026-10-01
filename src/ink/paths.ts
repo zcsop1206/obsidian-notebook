@@ -33,6 +33,29 @@ export function relative(dir: string, target: string): string {
   return [...from.slice(common).map(() => '..'), ...to.slice(common)].join('/');
 }
 
+/** What locatePages asks of the vault. */
+export interface PageLookup {
+  isFile(path: string): boolean;
+  /** The vault path of the file with this name, as Obsidian resolves a bare link; null if none. */
+  find(name: string): string | null;
+}
+
+/**
+ * The folder holding a note's pages, found the way Obsidian resolves the embeds (#62): `folder`
+ * (the embeds' folder as written) from the note's folder `noteDir`, then from the vault root,
+ * then wherever the file `<page>.svg` is. Null if the page file is in none of them (or sits in
+ * the vault root, where pages can't be).
+ */
+export function locatePages(noteDir: string, folder: string, page: string, lookup: PageLookup): string | null {
+  const name = `${page}.svg`;
+  const candidates: (string | null)[] = [];
+  if (folder && !folder.startsWith('/')) candidates.push(resolve(noteDir, folder));
+  if (folder) candidates.push(resolve('', folder));
+  for (const c of candidates) if (c && lookup.isFile(`${c}/${name}`)) return c;
+  const found = lookup.find(name);
+  return found && dirOf(found) ? dirOf(found) : null;
+}
+
 /** Whether `path` is `folder` or inside it. */
 export const within = (path: string, folder: string) => path === folder || path.startsWith(folder + '/');
 
