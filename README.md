@@ -20,6 +20,10 @@ Write with the Apple Pencil (or the mouse on desktop); fingers never draw, and a
 
 Drag with one or two fingers to scroll; flick and it keeps going. Pinch to zoom from 50% to 400% around your fingers (100% fits the page to the width of the view; zoomed in, you can scroll sideways too). The Pencil keeps writing while your fingers move the page, and swipes over the pages never open Obsidian's sidebars. Tap with two fingers to undo, three to redo. On desktop, use Ctrl/Cmd + the mouse wheel (or pinch the trackpad) or the commands **Zoom in**, **Zoom out** and **Reset zoom to 100%**. The zoom and position are kept while the note is open; another note opens at 100%.
 
+## Long notes and PDFs
+
+**Import PDF as ink note** makes a page per PDF page; the notice that shows its progress has a **Cancel** button, which stops after the page under way and keeps the pages done so far. A note with more than 48 pages (an imported textbook, say) opens straight away: a page is read from the vault when you scroll near it, and pages you haven't written on are dropped from memory again when you move on. Changing the template of every page and exporting to PDF read the whole note first, which takes a while on a long one.
+
 ## Renaming and moving notes
 
 A note is a markdown file plus a folder of page files with the same name next to it (`lecture.md` and `lecture/`). Rename or move the note in Obsidian and its folder follows; you can also move the two together, or rename the folder yourself. The page links in the note are kept as paths relative to the note (`![](lecture/p-7f3a0c.svg)`), so they work on GitHub and on a website.
