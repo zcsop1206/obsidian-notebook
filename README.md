@@ -22,7 +22,7 @@ Drag with one or two fingers to scroll; flick and it keeps going. Pinch to zoom 
 
 ## Long notes and PDFs
 
-**Import PDF as ink note** makes a page per PDF page; the notice that shows its progress has a **Cancel** button, which stops after the page under way and keeps the pages done so far. A note with more than 48 pages (an imported textbook, say) opens straight away: a page is read from the vault when you scroll near it, and pages you haven't written on are dropped from memory again when you move on. Changing the template of every page and exporting to PDF read the whole note first, which takes a while on a long one.
+**Import PDF as ink note** makes a page per PDF page; the notice that shows its progress has a **Cancel** button, which stops after the page under way and keeps the pages done so far. A note with more than 48 pages (an imported textbook, say) opens straight away: a page is read from the vault when you scroll near it, and pages you haven't written on are dropped from memory again when you move on. Changing the template of every page and exporting to PDF read the whole note first, which takes a while on a long one. The toolbar shows the current page and the page count ("37 / 812"); tap it, or run **Go to page…**, type a page number and press Enter to jump there.
 
 ## Renaming and moving notes
 

@@ -806,3 +806,28 @@
 .nb-import-cancel {
   margin-left: 12px;
 }
+
+/* The page indicator in the toolbar ("37 / 812", #64): a text button; a tap asks for a page. */
+.nb-ink-toolbar button.nb-ink-page-indicator {
+  width: auto;
+  min-width: 36px;
+  padding: 0 8px;
+  font-size: var(--font-ui-small, 13px);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.nb-ink-toolbar button.nb-ink-page-indicator.is-empty {
+  display: none;
+}
+
+.nb-goto-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.nb-goto-input {
+  width: 7em;
+  font-size: 16px; /* no zoom on focus on the iPad */
+}

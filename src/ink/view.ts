@@ -28,6 +28,7 @@ import { PagesPanel } from './pages-panel';
 import { NoteStore, type NoteFiles, type PageSlot, type TemplatesBefore } from './store';
 import { VIEW_TYPE_INK } from './takeover';
 import { linkUpdatesDone } from './links';
+import { GoToPageModal, pageLabel, parsePageNumber } from './go-to-page';
 import { confirm, NameModal, TemplateChooser, templateItems } from './template-chooser';
 import { pdfCopyName, pdfPages, resizeAllMessage, resizedCount, resizeMessage, sameSize, type RenderedPdfPage } from './template-changes';
 import { isFavourite } from './favourites';
@@ -643,6 +644,28 @@ export class InkView extends FileView {
     if (this.sel && !this.selDrag) this.showSelection();
     this.placeRuler(); // #20
     if (this.pagesPanel?.isOpen) this.pagesPanel.setCurrent(this.currentPageIndex());
+    this.toolbar?.setPage(this.pageLabel());
+  }
+
+  /** The page indicator's text (#64): the page taking up most of the viewport and the page count. */
+  pageLabel(): string {
+    return this.store ? pageLabel(this.currentPageIndex(), this.pages.length) : '';
+  }
+
+  /**
+   * Goes to page `number` (1-based; clamped to the note), or asks for one in a dialog (#64).
+   * Returns the 0-based page gone to, or null if it asked or there are no pages.
+   */
+  goToPage(number?: number): number | null {
+    const total = this.pages.length;
+    if (!this.store || total === 0) return null;
+    if (number === undefined) {
+      new GoToPageModal(this.app, Math.max(0, this.currentPageIndex()), total, index => this.store && this.scrollToPage(index)).open();
+      return null;
+    }
+    const index = parsePageNumber(String(number), total);
+    if (index !== null) this.scrollToPage(index);
+    return index;
   }
 
   /**
@@ -1896,6 +1919,8 @@ export class InkView extends FileView {
       paperLabel: () => this.paperLabel(),
       pagesOpen: () => this.pagesPanelOpen,
       togglePages: () => this.togglePagesPanel(),
+      pageLabel: () => this.pageLabel(),
+      goToPage: () => this.goToPage(),
       theme: () => this.theme,
       canPaste: () => this.canPaste,
       paste: () => this.pasteStrokes(),
