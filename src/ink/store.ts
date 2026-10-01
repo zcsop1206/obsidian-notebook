@@ -420,11 +420,8 @@ export class NoteStore {
   /** Takes a page file's text: the size now, the strokes when first needed. */
   private setText(slot: PageSlot, text: string) {
     // Only the fingerprint is kept of a text that was read: keeping the text of every page of
-    // a long note took as much memory as the note has bytes (#63). A long text's fingerprint
-    // is computed over later tasks, off the frame the page arrives in.
-    const path = slot.path;
-    if (text.length > FINGERPRINT_CHUNK) void fingerprintLater(text).then(f => { if (slot.path === path && !this.lastText.has(path)) this.rememberPrint(path, f, null); });
-    else this.rememberPrint(path, fingerprint(text), null);
+    // a long note took as much memory as the note has bytes (#63).
+    this.rememberPrint(slot.path, fingerprint(text), null);
     slot.page = null;
     slot.error = null;
     slot.text = text;
