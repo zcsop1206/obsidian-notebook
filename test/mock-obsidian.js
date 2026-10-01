@@ -204,6 +204,121 @@
     return { frontmatter };
   };
 
+  // ---- links, as Obsidian resolves and updates them (#62). Taken from Obsidian 1.13.7's
+  // app.js: getLinkpathDest, fileToLinktext, FileManager.renameFile/runAsyncLinkUpdate/
+  // updateAllLinks. Only markdown links and embeds (`[..](..)`) are handled.
+  const config = { newLinkFormat: 'shortest', alwaysUpdateLinks: true };
+  vault.getConfig = key => config[key];
+  vault.setConfig = (key, value) => { config[key] = value; };
+  metadataCache.getLinkpathDest = (link, source) => {
+    const n0 = link.toLowerCase();
+    const named = [...fs.keys()].filter(p => basename(p).toLowerCase() === basename(n0)).map(p => vault.getFile(p));
+    if (!named.length) return [];
+    if (basename(n0) === n0 && named.length === 1) return named.slice();
+    let n = n0, o = dirname(source).toLowerCase();
+    if (n.startsWith('./') || n.startsWith('../')) {
+      if (n.startsWith('./../')) n = n.slice(2);
+      if (n.startsWith('./')) n = (o ? o + '/' : '') + n.slice(2);
+      else {
+        while (n.startsWith('../')) { n = n.slice(3); o = dirname(o); }
+        n = (o ? o + '/' : '') + n;
+      }
+      const hit = named.find(f => f.path.toLowerCase() === n);
+      if (hit) return [hit];
+    }
+    if (n.startsWith('/')) n = n.slice(1);
+    const exact = named.find(f => f.path.toLowerCase() === n);
+    if (exact) return [exact];
+    if (link.startsWith('/')) return [];
+    return named.filter(f => f.path.toLowerCase().endsWith('/' + n));
+  };
+  metadataCache.getFirstLinkpathDest = (link, source) => metadataCache.getLinkpathDest(link, source)[0] ?? null;
+  metadataCache.fileToLinktext = (file, source) => {
+    const format = config.newLinkFormat;
+    if (format === 'absolute') return file.path;
+    if (format === 'relative') {
+      let up = '', dir = dirname(source);
+      while (dir !== '' && file.path.indexOf(dir + '/') !== 0) { up = '../' + up; dir = dirname(dir); }
+      return file.path.indexOf(dir + '/') === 0 ? up + file.path.slice(dir.length + 1) : up + file.path;
+    }
+    const dests = metadataCache.getLinkpathDest(file.name, source);
+    return dests.length === 1 && dests[0] === file ? file.name : file.path;
+  };
+  /** Every markdown link and embed in the vault's `.md` files: { sourceFile, link, start, end, original }. */
+  const allRefs = () => {
+    const refs = [];
+    for (const [path, text] of fs) {
+      if (typeof text !== 'string' || !path.endsWith('.md')) continue;
+      const re = /!?\[([^\]\n]*)\]\(([^)\n]*)\)/g;
+      for (let m; (m = re.exec(text));) {
+        let dest = m[2].trim();
+        if (dest.startsWith('<') && dest.endsWith('>')) dest = dest.slice(1, -1);
+        if (/^[a-z][a-z0-9+.-]*:/i.test(dest)) continue;
+        let link = dest;
+        try { link = decodeURIComponent(dest); } catch (e) { /* as written */ }
+        refs.push({ sourceFile: vault.getFile(path), link, start: m.index, end: m.index + m[0].length, original: m[0], alt: m[1] });
+      }
+    }
+    return refs;
+  };
+  const encodeLink = s => s.replace(/[\\\x00\x08\x0B\x0C\x0E-\x1F ]/g, c => encodeURIComponent(c));
+  const fileManager = {
+    inProgressUpdates: null,
+    updateQueue: { promise: Promise.resolve(), queue(fn) { const t = this.promise.then(fn, fn); this.promise = t; return t; } },
+    /** Renames as the file explorer does: the rename, then the link update. */
+    renameFile(file, newPath) { return this.runAsyncLinkUpdate(() => vault.rename(file, newPath)); },
+    async runAsyncLinkUpdate(run) {
+      if (this.inProgressUpdates) { this.inProgressUpdates.push(run); return; }
+      return this.updateQueue.queue(async () => {
+        const refs = [];
+        for (const ref of allRefs()) {
+          const dests = metadataCache.getLinkpathDest(ref.link, ref.sourceFile.path);
+          if (dests.length) refs.push({ ...ref, resolvedFile: dests[0], resolvedPaths: dests.map(f => f.path) });
+        }
+        try {
+          this.inProgressUpdates = [];
+          await run();
+          while (this.inProgressUpdates.length) {
+            const more = this.inProgressUpdates;
+            this.inProgressUpdates = [];
+            await Promise.all(more.map(f => f()));
+          }
+        } finally {
+          this.inProgressUpdates = null;
+        }
+        await this.updateAllLinks(refs);
+      });
+    },
+    /** While the "update links?" dialog is up (alwaysUpdateLinks off): call with true or false. */
+    answer: null,
+    /** Number of links rewritten so far (for tests). */
+    updated: 0,
+    async updateAllLinks(refs) {
+      const changes = new Map();
+      for (const ref of refs) {
+        const source = ref.sourceFile.path;
+        const now = metadataCache.getLinkpathDest(ref.link, source).map(f => f.path);
+        if (now.length && now.length === ref.resolvedPaths.length && now.every((p, i) => p === ref.resolvedPaths[i])) continue;
+        const link = metadataCache.fileToLinktext(ref.resolvedFile, source);
+        if (link === ref.link) continue;
+        const bang = ref.original.startsWith('!') ? '!' : '';
+        if (!changes.has(source)) changes.set(source, []);
+        changes.get(source).push({ start: ref.start, end: ref.end, text: `${bang}[${ref.alt}](${encodeLink(link)})` });
+      }
+      if (!changes.size) return;
+      if (!config.alwaysUpdateLinks && !(await new Promise(resolve => { this.answer = resolve; }))) return;
+      this.answer = null;
+      for (const [source, list] of changes) {
+        if (!fs.has(source)) continue;
+        // By the offsets the links had before the rename, as Obsidian does.
+        let text = fs.get(source);
+        for (const c of list.sort((a, b) => b.start - a.start)) text = text.substring(0, c.start) + c.text + text.substring(c.end);
+        this.updated += list.length;
+        await vault.modify(vault.getFile(source), text);
+      }
+    },
+  };
+
   // ---- components and views
   class Component {
     constructor() { this._cleanups = []; this._children = []; }
@@ -349,7 +464,7 @@
     getMostRecentLeaf() { return this.activeLeaf; }
   }
 
-  const app = { vault, metadataCache };
+  const app = { vault, metadataCache, fileManager };
   app.workspace = new Workspace(app);
   window.app = app;
 
