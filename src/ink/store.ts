@@ -5,8 +5,8 @@
 // the index, and the text of our own writes is remembered so their modify events are ignored.
 // Changes made on disk by others (a sync) reload the file unless it has unsaved changes here.
 import { newPageId } from '../format/ids';
-import { readNote, writeNote, type NoteIndex } from '../format/note';
-import { dirOf, nameOf, rebase, relative, resolve, within } from './paths';
+import { isRelativeFolder, readNote, writeNote, type NoteIndex } from '../format/note';
+import { dirOf, locatePages, nameOf, rebase, relative, resolve, within } from './paths';
 import { newPage, paperSize, readPage, writePage, type Page, type Size, type Stroke } from '../format/page';
 import { parseTemplate, parseTemplateName, sameTemplate, templateName, templateSize, type Template } from '../format/template';
 import type { PageImage } from '../format/page';
@@ -31,6 +31,10 @@ export interface NoteFiles {
   delete?(path: string): Promise<void>;
   /** Whether a folder exists (#26: tells a page folder moved from a page file moved). */
   isFolder?(path: string): boolean;
+  /** Whether a file exists (#62: finds the pages when Obsidian has rewritten the embeds). */
+  isFile?(path: string): boolean;
+  /** The vault path of the file with this name, as Obsidian resolves a bare link; null if none (#62). */
+  find?(name: string): string | null;
 }
 
 export interface StoreListener {
@@ -63,6 +67,11 @@ export interface StoreOptions {
   maxDelay?: number;
   /** Page ids for new pages; defaults to random ones. */
   newId?: (taken: Set<string>) => string;
+  /**
+   * Resolves when Obsidian has finished updating links after a rename (#62); the index isn't
+   * written until then. Without it the index is written at once.
+   */
+  linksSettled?: () => Promise<void>;
   /**
    * Resolves a `template:` name that isn't built in, such as `pdf:<name>` (#21, a PDF template
    * from the templates folder): its template and page size, or null if unknown (then blank).
@@ -166,6 +175,12 @@ export class NoteStore {
   private pagesAt: string | null = null;
   /** While movePages moves the page folder: saves wait for it, and changes on disk are ignored. */
   private moving: Promise<void> | null = null;
+  /**
+   * While Obsidian may still update links after a rename (#62): the index isn't written, since
+   * Obsidian replaces links at the offsets they had before the rename and a rewritten index
+   * would be garbled. Pages are still saved.
+   */
+  private indexHold: Promise<void> | null = null;
 
   /**
    * `notePath` is the index's vault path; its pages are in the folder named after `basename`
@@ -213,9 +228,21 @@ export class NoteStore {
     return `${this.folder}/${id}.svg`;
   }
 
-  /** The page folder a read index names, as a vault path (the default one if it leaves the vault). */
-  private pagesOf(index: NoteIndex): string {
-    return resolve(dirOf(this.notePath), index.folder) ?? this.dir + this.basename;
+  /**
+   * The page folder of a read index as a vault path: where its first page file is (#62: found
+   * as Obsidian resolves the embed, whichever form it rewrote it to), else the folder the
+   * embeds name from the note's folder (the default one if that leaves the vault). `found`
+   * says the page file was seen there.
+   */
+  private pagesOf(index: NoteIndex): { at: string; found: boolean } {
+    const dir = dirOf(this.notePath);
+    const { isFile, find } = this.files;
+    if (index.pages.length && isFile && find) {
+      const at = locatePages(dir, index.folder, index.pages[0], { isFile: p => isFile.call(this.files, p), find: n => find.call(this.files, n) });
+      if (at) return { at, found: true };
+    }
+    const named = isRelativeFolder(index.folder) ? resolve(dir, index.folder) : null;
+    return { at: named ?? this.dir + this.basename, found: false };
   }
 
   /** Reads the index (from `text` if given) and every page file. Throws if the index can't be read. */
@@ -223,8 +250,11 @@ export class NoteStore {
     const md = text ?? await this.files.read(this.notePath);
     if (md === null) throw new Error(`${this.notePath} not found`);
     this.index = readNote(md, this.basename);
-    this.pagesAt = this.pagesOf(this.index);
+    const pages = this.pagesOf(this.index);
+    this.pagesAt = pages.at;
     this.remember(this.notePath, md);
+    // Embeds in another form (rewritten by Obsidian, #62) are written back as relative paths.
+    this.setFolder(pages.at, pages.found);
     this.slots = await Promise.all(this.index.pages.map(id => this.loadSlot(id)));
   }
 
@@ -491,7 +521,7 @@ export class NoteStore {
     }
     this.dirtyPages.clear();
     let done: Promise<unknown> = Promise.all(pageWrites);
-    if (this.indexDirty) {
+    if (this.indexDirty && !this.indexHold) {
       this.indexDirty = false;
       const text = writeNote(this.index);
       // After the pages, so the index never embeds a page file that isn't written yet.
@@ -577,16 +607,38 @@ export class NoteStore {
     if (!this.index) return;
     this.index.basename = this.basename;
     this.pagesAt = pages;
+    this.holdIndex();
     this.setFolder(pages);
   }
 
-  /** Sets the index's relative folder for pages at `pages`, marking the index changed if it differs. */
-  private setFolder(pages: string) {
+  /**
+   * Sets the index's relative folder for pages at `pages`, marking the index changed if it
+   * differs (unless `dirty` is false: a guess at where missing pages are isn't written).
+   */
+  private setFolder(pages: string, dirty = true) {
     const rel = relative(dirOf(this.notePath), pages);
     if (rel === this.index.folder) return;
     this.index.folder = rel;
+    if (!dirty) return;
     this.indexDirty = true;
     this.schedule();
+  }
+
+  /** After a rename: holds the index back until Obsidian's link update is done, then saves (#62). */
+  private holdIndex() {
+    const settled = this.options.linksSettled?.();
+    if (!settled) return;
+    const hold: Promise<void> = settled.then(() => undefined, () => undefined).then(() => {
+      if (this.indexHold !== hold) return;
+      this.indexHold = null;
+      if (this.indexDirty && !this.closed) void this.flush();
+    });
+    this.indexHold = hold;
+  }
+
+  /** Resolves once the index is no longer held back after a rename. */
+  async indexReleased(): Promise<void> {
+    while (this.indexHold) await this.indexHold;
   }
 
   /**
@@ -608,6 +660,7 @@ export class NoteStore {
     for (const slot of this.slots) move(slot);
     for (const { slot } of this.detached.values()) move(slot);
     this.pagesAt = to;
+    this.holdIndex();
     this.setFolder(to);
   }
 
@@ -687,6 +740,7 @@ export class NoteStore {
     if (this.closed || this.moving || !this.owns(path)) return;
     // Checked after the read, so a stroke added meanwhile isn't lost.
     if (this.hasUnsaved(path)) {
+      if (path === this.notePath && text !== null && this.samePages(text)) return; // only the embeds' form differs (#62)
       const key = text === null ? 'deleted' : fingerprint(text);
       if (this.noticed.get(path) !== key) {
         this.noticed.set(path, key);
@@ -713,6 +767,16 @@ export class NoteStore {
     this.listener.pageChanged(slot);
   }
 
+  /** Whether an index text lists the pages this one does, in order. */
+  private samePages(text: string): boolean {
+    try {
+      const pages = readNote(text, this.basename).pages;
+      return pages.length === this.index.pages.length && pages.every((id, i) => id === this.index.pages[i]);
+    } catch (e) {
+      return false;
+    }
+  }
+
   private async reloadIndex(text: string) {
     let index: NoteIndex;
     try {
@@ -723,7 +787,7 @@ export class NoteStore {
     }
     this.remember(this.notePath, text);
     // The embeds name another folder (edited by hand): its pages are other files, read afresh.
-    const pages = this.pagesOf(index);
+    const { at: pages, found } = this.pagesOf(index);
     const moved = pages !== this.folder;
     if (moved) {
       if (this.dirtyPages.size) await this.flush();
@@ -736,6 +800,7 @@ export class NoteStore {
     if (this.closed) return;
     this.index = index;
     this.slots = slots;
+    this.setFolder(this.folder, found); // embeds rewritten by Obsidian go back to relative paths (#62)
     this.listener.indexChanged();
   }
 
