@@ -4,7 +4,7 @@
 import { newPageId } from '../src/format/ids';
 import { newNote, readNote, writeNote } from '../src/format/note';
 import { centreline, isStroked, outlinePath, polygon, refit, smoothCurve, strokeOutline, strokePath } from '../src/format/outline';
-import { readPage, writePage } from '../src/format/page';
+import { newPage, readPage, writePage } from '../src/format/page';
 import { parseTemplateName, templateName } from '../src/format/template';
 import { densePage } from './fixture';
 import { seeded } from './seeded';
@@ -28,5 +28,26 @@ function largeNote(folder: string, name: string, pages: number, strokes: number)
   return files;
 }
 
-(window as unknown as { ink: unknown }).ink = { readPage, writePage, readNote, writeNote, templateName, parseTemplateName, largeNote, strokePath, strokeOutline, polygon,
+/**
+ * The files of a note like an imported PDF (#63): `pages` pages of `size`, each a pdf template
+ * with `image(n)` embedded (a JPEG data URL), the first `written` of them with `strokes` strokes.
+ */
+function pdfNote(folder: string, name: string, pages: number, size: { width: number; height: number }, image: (n: number) => string,
+  written = 0, strokes = 0): Record<string, string> {
+  const r = seeded(6363);
+  const dir = folder ? folder + '/' : '';
+  const note = newNote(name, 'letter', 'blank');
+  const files: Record<string, string> = {};
+  for (let i = 0; i < pages; i++) {
+    const id = newPageId(note.pages, r.bytes);
+    const page = newPage(id, size, { kind: 'pdf', source: `${name}.pdf`, page: i + 1, image: image(i + 1) });
+    if (i < written) page.strokes = densePage(r, id, strokes).strokes;
+    note.pages.push(id);
+    files[`${dir}${name}/${id}.svg`] = writePage(page);
+  }
+  files[`${dir}${name}.md`] = writeNote(note);
+  return files;
+}
+
+(window as unknown as { ink: unknown }).ink = { readPage, writePage, readNote, writeNote, templateName, parseTemplateName, largeNote, pdfNote, strokePath, strokeOutline, polygon,
   outlinePath, centreline, isStroked, refit, smoothCurve, canvasPath, paintPath, centrelineArea };
