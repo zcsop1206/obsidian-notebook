@@ -15,6 +15,18 @@ const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 export const SAVE_DELAY = 2000;
 export const MAX_SAVE_DELAY = 10000;
+/**
+ * A note with more pages than this is loaded lazily (#63): a page's file is read when the view
+ * asks for it (NoteStore.request), not when the note opens. An imported textbook is hundreds of
+ * pages, each with an embedded image of a few hundred KB.
+ */
+export const LAZY_OVER = 48;
+/**
+ * In a lazily loaded note, at most this many pages that weren't changed here are kept in memory;
+ * past it the ones asked for longest ago are released. Not below LAZY_OVER, so a note loaded
+ * whole never releases a page.
+ */
+export const MAX_LOADED = 48;
 
 /** The file access the store needs. Paths are vault paths. */
 export interface NoteFiles {
@@ -47,6 +59,10 @@ export interface StoreListener {
   saved(path: string): void;
   /** A page's model was changed here (strokes or template), e.g. to redraw its thumbnail (#17). */
   pageEdited?(slot: PageSlot): void;
+  /** Pages' sizes became known or were re-estimated (#63): lay the pages out again. */
+  pagesSized?(): void;
+  /** A page asked for with request() is now in memory (or its error is): draw it (#63). */
+  pageLoaded?(slot: PageSlot): void;
 }
 
 export interface PageSlot {
@@ -60,6 +76,12 @@ export interface PageSlot {
   text: string | null;
   /** Why the page can't be shown (missing or unreadable file). Such a page is never written. */
   error: string | null;
+  /**
+   * Whether the page's file has been read (or the page was made here). In a note loaded lazily
+   * (#63) a page is read when NoteStore.request asks for it, and until then (and after it is
+   * released again) it has no page, text or error, and `size` is an estimate.
+   */
+  loaded: boolean;
 }
 
 export interface StoreOptions {
@@ -255,39 +277,164 @@ export class NoteStore {
     this.remember(this.notePath, md);
     // Embeds in another form (rewritten by Obsidian, #62) are written back as relative paths.
     this.setFolder(pages.at, pages.found);
-    this.slots = await Promise.all(this.index.pages.map(id => this.loadSlot(id)));
+    this.lazy = this.index.pages.length > LAZY_OVER;
+    this.slots = await this.openSlots(this.index.pages);
+  }
+
+  // ---- loading pages (#63)
+  // A note of up to LAZY_OVER pages is read whole when it opens. A longer one is lazy: its slots
+  // start unloaded, the view asks for the pages near the viewport (request), and pages that
+  // weren't changed here are released again once more than MAX_LOADED are in memory, the ones
+  // asked for longest ago first. A page changed here stays (undo and redo refer to it). Until a
+  // page is read its size is an estimate: the note's paper, or the size of the last page read
+  // (the pages of an imported PDF are mostly one size).
+
+  /** Whether pages are read on request rather than when the note opens. */
+  lazy = false;
+  /** Pages changed here since the note opened: never released. */
+  private edited = new Set<string>();
+  /** Reads under way, per page id. */
+  private loading = new Map<string, Promise<void>>();
+  /** When each loaded page was last asked for (a counter), for releasing the oldest. */
+  private used = new Map<string, number>();
+  private uses = 0;
+  /** While set (loadAll), no page is released. */
+  private keepAll = 0;
+  /** The size given to pages not read yet, once a page has been read. */
+  private estimate: Size | null = null;
+
+  /** Slots for these page ids: read now, or unloaded in a lazy note. */
+  private openSlots(ids: readonly string[]): Promise<PageSlot[]> {
+    if (!this.lazy) return Promise.all(ids.map(id => this.loadSlot(id)));
+    return Promise.resolve(ids.map(id => this.newSlot(id)));
+  }
+
+  private newSlot(id: string): PageSlot {
+    return { id, path: this.pagePath(id), size: this.estimate ?? this.paperSize, page: null, text: null, error: null, loaded: false };
   }
 
   private async loadSlot(id: string): Promise<PageSlot> {
-    const path = this.pagePath(id);
-    const slot: PageSlot = { id, path, size: this.paperSize, page: null, text: null, error: null };
+    const slot = this.newSlot(id);
+    await this.read(slot);
+    return slot;
+  }
+
+  /** Reads the slot's file into it (or the error). */
+  private async read(slot: PageSlot): Promise<void> {
+    const path = slot.path;
     let text: string | null;
     try {
       text = await this.files.read(path);
     } catch (e) {
       slot.error = `Couldn't read ${path}: ${errorText(e)}`;
-      return slot;
+      slot.loaded = true;
+      return;
     }
+    if (slot.loaded) return; // made or read meanwhile
     if (text === null) {
       slot.error = `Page file missing: ${path}`;
-      return slot;
+      slot.loaded = true;
+      return;
     }
     this.setText(slot, text);
-    return slot;
+  }
+
+  /**
+   * Asks for a page of a lazy note: reads its file if it isn't in memory and tells the listener
+   * (pagesSized if its size wasn't the estimate, then pageLoaded) when it is. Call it for every page that should stay in memory (the ones near
+   * the viewport), each time the view moves: the pages asked for longest ago are released.
+   * Resolves when the page is loaded (at once if it is).
+   */
+  request(slot: PageSlot): Promise<void> {
+    this.used.set(slot.id, ++this.uses);
+    if (slot.loaded) return Promise.resolve();
+    let job = this.loading.get(slot.id);
+    if (!job) {
+      const size = slot.size;
+      job = this.read(slot).then(() => {
+        this.loading.delete(slot.id);
+        if (this.closed || (!this.slots.includes(slot) && !this.detached.has(slot.id))) return;
+        if (slot.size.width !== size.width || slot.size.height !== size.height) this.resize(slot);
+        (this.listener.pageLoaded ?? this.listener.pageChanged).call(this.listener, slot);
+        this.trim();
+      });
+      this.loading.set(slot.id, job);
+    }
+    return job;
+  }
+
+  /** A page was read at a size that wasn't expected: the pages not read yet are taken to have it too. */
+  private resize(slot: PageSlot) {
+    this.estimate = { ...slot.size };
+    for (const s of this.slots) if (!s.loaded && !this.loading.has(s.id)) s.size = { ...slot.size };
+    this.listener.pagesSized?.();
+  }
+
+  /**
+   * Reads every page (for a change or an export of the whole note) and keeps them all until
+   * `release` is called. `progress(done, total)` is called as pages are read.
+   */
+  async loadAll(progress?: (done: number, total: number) => void): Promise<() => void> {
+    this.keepAll++;
+    const slots = [...this.slots];
+    let done = 0;
+    for (const slot of slots) {
+      if (!slot.loaded) await this.request(slot);
+      progress?.(++done, slots.length);
+    }
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.keepAll--;
+      this.trim();
+    };
+  }
+
+  /** Whether a loaded page may be released: unchanged here, with nothing of it being written. */
+  private releasable(slot: PageSlot): boolean {
+    return slot.loaded && !this.edited.has(slot.id) && !this.dirtyPages.has(slot.id) && !this.writes.has(slot.path);
+  }
+
+  /** Releases the pages asked for longest ago while more than MAX_LOADED unchanged ones are in memory. */
+  private trim() {
+    if (!this.lazy || this.keepAll) return;
+    const free = this.slots.filter(s => this.releasable(s));
+    if (free.length <= MAX_LOADED) return;
+    free.sort((a, b) => (this.used.get(a.id) ?? 0) - (this.used.get(b.id) ?? 0));
+    for (const slot of free.slice(0, free.length - MAX_LOADED)) {
+      slot.page = null;
+      slot.text = null;
+      slot.error = null;
+      slot.loaded = false;
+      this.used.delete(slot.id);
+      this.lastText.delete(slot.path);
+    }
+  }
+
+  /** Pages in memory (for tests and stats). */
+  get pagesInMemory(): number {
+    return this.slots.filter(s => s.loaded && !s.error).length;
   }
 
   /** Takes a page file's text: the size now, the strokes when first needed. */
   private setText(slot: PageSlot, text: string) {
-    this.remember(slot.path, text);
+    // Only the fingerprint is kept of a text that was read: keeping the text of every page of
+    // a long note took as much memory as the note has bytes (#63).
+    this.rememberPrint(slot.path, fingerprint(text), null);
     slot.page = null;
     slot.error = null;
     slot.text = text;
+    slot.loaded = true;
     const size = peekSize(text);
     if (size) slot.size = size;
     else this.page(slot); // not laid out as writePage does, or not a page: parse now for the size or the error
   }
 
-  /** The slot's page, parsed from its text on first use; null if the page can't be read. */
+  /**
+   * The slot's page, parsed from its text on first use; null if the page can't be read, or
+   * isn't loaded (a lazy note: see request).
+   */
   page(slot: PageSlot): Page | null {
     if (slot.page || slot.error) return slot.page;
     if (slot.text === null) return null;
@@ -317,6 +464,7 @@ export class NoteStore {
 
   /** Marks a page as changed after editing its model in place. */
   changed(slot: PageSlot) {
+    this.edited.add(slot.id);
     this.dirtyPages.add(slot.id);
     this.schedule();
     this.listener.pageEdited?.(slot);
@@ -572,12 +720,14 @@ export class NoteStore {
    */
   private lastText = new Map<string, { text: string; f: string }>();
 
-  private rememberPrint(path: string, f: string, text: string) {
+  /** `text` is kept for a text written here; null for one that was read (only `f` is kept, #63). */
+  private rememberPrint(path: string, f: string, text: string | null) {
     const list = this.known.get(path) ?? [];
     if (list[list.length - 1] !== f) list.push(f);
     if (list.length > 4) list.shift();
     this.known.set(path, list);
-    this.lastText.set(path, { text, f });
+    if (text === null) this.lastText.delete(path);
+    else this.lastText.set(path, { text, f });
   }
 
   private isKnown(path: string, text: string): boolean {
@@ -728,6 +878,9 @@ export class NoteStore {
   async external(path: string, kind: 'modify' | 'create' | 'delete'): Promise<void> {
     if (this.closed || this.moving || !this.owns(path)) return;
     if (kind === 'delete' && this.ownDeletes.has(path)) return; // deletePage's own delete (#17)
+    // A page of a lazy note that isn't in memory: it is read when it's asked for (#63).
+    const unloaded = path === this.notePath ? undefined : this.slots.find(s => s.path === path && !s.loaded);
+    if (unloaded) return;
     let text: string | null = null;
     if (kind !== 'delete') {
       try {
@@ -756,6 +909,7 @@ export class NoteStore {
     }
     const slot = this.slots.find(s => s.path === path);
     if (!slot) return;
+    if (!slot.loaded) return; // released meanwhile
     if (text === null) {
       slot.page = null;
       slot.text = null;
@@ -796,7 +950,10 @@ export class NoteStore {
     // A page removed elsewhere that has changes here: save them now, so nothing is lost.
     if (this.slots.some(s => !index.pages.includes(s.id) && this.dirtyPages.has(s.id))) await this.flush();
     const old = new Map(moved ? [] : this.slots.map(s => [s.id, s] as const));
-    const slots = await Promise.all(index.pages.map(id => old.get(id) ?? this.loadSlot(id)));
+    if (index.pages.length > LAZY_OVER) this.lazy = true; // a note that grew; one loaded lazily stays so
+    const fresh = await this.openSlots(index.pages.filter(id => !old.has(id)));
+    const made = new Map(fresh.map(s => [s.id, s] as const));
+    const slots = index.pages.map(id => old.get(id) ?? made.get(id)!);
     if (this.closed) return;
     this.index = index;
     this.slots = slots;
@@ -829,6 +986,7 @@ export class NoteStore {
     const at = Math.max(0, Math.min(Math.floor(index) || 0, this.slots.length));
     this.slots.splice(at, 0, slot);
     this.index.pages.splice(at, 0, slot.id);
+    this.edited.add(slot.id);
     this.dirtyPages.add(slot.id);
     this.indexDirty = true;
     this.schedule();
@@ -846,7 +1004,7 @@ export class NoteStore {
     const t = template ? parseTemplate(template) : def!.template;
     const page = newPage(id, size ?? def?.size ?? this.paperSize, t);
     if (t.kind === 'pdf') this.options.templateUsed?.(t, this.folder);
-    const slot: PageSlot = { id, path: this.pagePath(id), size: page.size, page, text: null, error: null };
+    const slot: PageSlot = { id, path: this.pagePath(id), size: page.size, page, text: null, error: null, loaded: true };
     this.placeSlot(slot, index);
     return slot;
   }
@@ -882,7 +1040,7 @@ export class NoteStore {
     const id = this.freshId();
     const copy = JSON.parse(JSON.stringify(source)) as Page;
     copy.id = id;
-    const slot: PageSlot = { id, path: this.pagePath(id), size: copy.size, page: copy, text: null, error: null };
+    const slot: PageSlot = { id, path: this.pagePath(id), size: copy.size, page: copy, text: null, error: null, loaded: true };
     this.placeSlot(slot, from + 1);
     return slot;
   }
@@ -900,7 +1058,8 @@ export class NoteStore {
     const out = this.removePageFromIndex(pageId);
     this.detached.set(pageId, { slot, dirty: !slot.error });
     const del = this.files.delete?.bind(this.files);
-    if (!del) return out;
+    // A page that isn't in memory (#63) couldn't be written again if the delete were undone: its file stays.
+    if (!del || !slot.loaded) return out;
     const path = slot.path;
     const indexWritten = this.flush();
     const prev = this.writes.get(path) ?? Promise.resolve();

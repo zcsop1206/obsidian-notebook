@@ -801,3 +801,8 @@
 .nb-confirm-text {
   user-select: text;
 }
+
+/* The Cancel button in the "Importing PDF" notice (#63). */
+.nb-import-cancel {
+  margin-left: 12px;
+}

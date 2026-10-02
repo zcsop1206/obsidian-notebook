@@ -43,7 +43,11 @@
   } catch (e) { /* left as the browser has it */ }
 
   window.notices = [];
-  class Notice { constructor(m) { notices.push(m); } hide() {} setMessage(m) { notices.push(m); return this; } }
+  class Notice {
+    constructor(m) { notices.push(m); this.noticeEl = document.createElement('div'); this.noticeEl.textContent = m; window.lastNotice = this; }
+    hide() { this.hidden = true; }
+    setMessage(m) { notices.push(m); this.noticeEl.textContent = m; return this; }
+  }
 
   // ---- files
   window.fs = new Map();

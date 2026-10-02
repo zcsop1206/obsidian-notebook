@@ -32,7 +32,7 @@ import { confirm, NameModal, TemplateChooser, templateItems } from './template-c
 import { pdfCopyName, pdfPages, resizeAllMessage, resizedCount, resizeMessage, sameSize, type RenderedPdfPage } from './template-changes';
 import { isFavourite } from './favourites';
 import { addImageTemplateFlow, addPdfTemplateFlow } from './pdf-template';
-import { ImageSourceModal, PdfSourceModal, renderPdfPages, stripPdf, type PdfChoice } from './pdf-import';
+import { ImageSourceModal, importNotice, PdfSourceModal, renderPdfPages, stripPdf, type PdfChoice } from './pdf-import';
 import { cleanName } from './names';
 import type { ImportKind } from './picker';
 import { centreOn, encodeClip, isIdentity, lassoSelect, moveBy, resizeBy, resizeScale, strokesBounds, transformStroke, withIds, type Box, type Transform } from './lasso';
@@ -69,6 +69,8 @@ const BAND_SETTLE = 100;
 export interface InkStats {
   /** Pages of the open note whose file was read (or that were added here). */
   pagesLoaded: number;
+  /** Pages whose file is in memory (#63): all of them in a short note, the ones near the viewport and the changed ones in a long one. */
+  pagesInMemory?: number;
   /** Pages that currently have a bitmap. */
   pagesRendered: number;
   /** Device pixels of the page bitmaps (those shown and those being drawn for a new band, #52). */
@@ -403,6 +405,19 @@ export class InkView extends FileView {
       notice: message => new Notice(message),
       saved: () => { this.stats.saves++; this.stats.saveMs = store.writeMs; },
       pageEdited: slot => this.store === store && this.pagesPanel?.changed(slot.id),
+      pagesSized: () => {
+        if (this.store !== store) return;
+        this.relayout();
+        this.update();
+      },
+      pageLoaded: slot => {
+        if (this.store !== store) return;
+        const pv = this.pages.find(p => p.slot === slot);
+        if (!pv) return;
+        this.pagesPanel?.changed(slot.id);
+        this.showError(pv);
+        this.update();
+      },
     }, { ...templateRegistry()?.storeOptions(), linksSettled: () => linkUpdatesDone(this.app) });
     void templateRegistry()?.load(); // PDF templates (#21), for `pdf:` names and the chooser
     try {
@@ -610,6 +625,7 @@ export class InkView extends FileView {
     this.pages.forEach((pv, i) => {
       if (!near.has(i)) this.dropBitmap(pv);
     });
+    this.requestNear(near);
     for (const i of visible) {
       const pv = this.pages[i];
       if (!pv.bitmap || pv.pending != null) this.renderPage(pv);
@@ -627,6 +643,20 @@ export class InkView extends FileView {
     if (this.sel && !this.selDrag) this.showSelection();
     this.placeRuler(); // #20
     if (this.pagesPanel?.isOpen) this.pagesPanel.setCurrent(this.currentPageIndex());
+  }
+
+  /**
+   * Asks the store for the pages near the viewport (#63): in a long note a page's file is read
+   * only then (pageChanged draws it when it's there), and the pages asked for longest ago are
+   * released, so this is called whenever the view moves and after anything else asks for pages.
+   */
+  private requestNear(near: Iterable<number> = this.layout ? this.band().near : []) {
+    const store = this.store;
+    if (!store) return;
+    for (const i of near) {
+      const pv = this.pages[i];
+      if (pv) void store.request(pv.slot);
+    }
   }
 
   /**
@@ -662,7 +692,7 @@ export class InkView extends FileView {
 
   /** Whether the pump has drawing to do for a page: a bitmap to make or finish, or a band to move (#52). */
   private needsDrawing(pv: PageView): boolean {
-    if (pv.slot.error) return false;
+    if (pv.slot.error || !pv.slot.loaded) return false; // not read yet (#63): drawn when it is
     if (!pv.bitmap || pv.pending != null) return true;
     if (pv.next) return !pv.next.waiting;
     const need = this.rebandTo(pv);
@@ -796,7 +826,7 @@ export class InkView extends FileView {
   /** Draws a page's bitmap from scratch, creating it at the page's current size if needed. */
   private renderPage(pv: PageView) {
     const store = this.store, layout = this.layout;
-    if (!store || !layout) return;
+    if (!store || !layout || !pv.slot.loaded) return;
     const page = store.page(pv.slot);
     if (!page) {
       this.showError(pv);
@@ -829,6 +859,7 @@ export class InkView extends FileView {
     this.stats.pagesRendered = this.pages.filter(pv => pv.bitmap).length;
     this.stats.bitmapPixels = this.pages.reduce((n, pv) => n + (pv.bitmap?.pixels ?? 0) + (pv.next?.bitmap.pixels ?? 0), 0);
     this.stats.pagesLoaded = this.store ? this.store.pagesLoaded : 0;
+    this.stats.pagesInMemory = this.store ? this.store.pagesInMemory : 0;
   }
 
   private themeChanged() {
@@ -1200,16 +1231,29 @@ export class InkView extends FileView {
   async changeAllTemplates(template: Template, size?: Size, name?: string): Promise<boolean> {
     const store = this.store;
     if (!store) return false;
-    const sizes = store.slots.filter(s => !s.error).map(s => s.size);
-    const changed = size ? resizedCount(sizes, size) : 0;
-    if (size && changed) {
-      const ok = await confirm(this.app, {
-        title: changed === 1 ? 'Resize a page?' : `Resize ${changed} pages?`, text: resizeAllMessage(changed, sizes.length, size), ok: 'Resize',
-        cls: 'nb-resize-confirm',
-      });
-      if (!ok || this.store !== store) return false;
+    // Every page is changed, so every page is read first and kept until it is (#63); changed
+    // pages then stay in memory.
+    const notice = store.lazy ? new Notice('Reading the pages…', 0) : null;
+    let release = () => {};
+    try {
+      release = await store.loadAll((done, total) => notice?.setMessage?.(`Reading the pages: ${done} of ${total}`));
+      notice?.hide();
+      if (this.store !== store) return false;
+      const sizes = store.slots.filter(s => !s.error).map(s => s.size);
+      const changed = size ? resizedCount(sizes, size) : 0;
+      if (size && changed) {
+        const ok = await confirm(this.app, {
+          title: changed === 1 ? 'Resize a page?' : `Resize ${changed} pages?`, text: resizeAllMessage(changed, sizes.length, size), ok: 'Resize',
+          cls: 'nb-resize-confirm',
+        });
+        if (!ok || this.store !== store) return false;
+      }
+      return this.setAllTemplates(template, size, name) !== null;
+    } finally {
+      notice?.hide();
+      this.requestNear(); // if nothing was changed, the pages in view are the last to go
+      release();
     }
-    return this.setAllTemplates(template, size, name) !== null;
   }
 
   /**
@@ -1312,10 +1356,10 @@ export class InkView extends FileView {
   async importPdfIntoNote(choice: PdfChoice): Promise<string[] | null> {
     const store = this.store;
     if (!store) return null;
-    const notice = new Notice('Importing PDF…', 0);
+    const notice = importNotice('Importing PDF…'); // Cancel keeps the pages done so far (#63)
     let rendered: RenderedPdfPage[];
     try {
-      rendered = await renderPdfPages(choice.bytes, (done, total) => notice.setMessage?.(`Importing PDF: page ${done} of ${total}`));
+      rendered = await renderPdfPages(choice.bytes, (done, total) => notice.say(`Importing PDF: page ${done} of ${total}`), notice.cancel);
       if (this.store !== store) return null;
       const vault = this.app.vault, folder = store.folder;
       const file = pdfCopyName(cleanName(stripPdf(choice.basename)), n => !!vault.getAbstractFileByPath(`${folder}/${n}`));
@@ -1675,7 +1719,14 @@ export class InkView extends FileView {
       pages: () => this.pages.map(pv => ({ id: pv.slot.id, size: pv.slot.size })),
       page: id => {
         const pv = this.pages.find(p => p.slot.id === id);
-        return pv && this.store ? this.store.page(pv.slot) : null;
+        if (!pv || !this.store) return null;
+        if (!pv.slot.loaded) {
+          // Read for its thumbnail (#63), which pageChanged redraws; the pages in view stay the newest asked for.
+          void this.store.request(pv.slot);
+          this.requestNear();
+          return null;
+        }
+        return this.store.page(pv.slot);
       },
       bitmap: id => {
         const pv = this.pages.find(p => p.slot.id === id);
@@ -1718,6 +1769,7 @@ export class InkView extends FileView {
   duplicatePage(index: number) {
     const store = this.store, pv = this.pages[index];
     if (!store || !pv) return;
+    if (!pv.slot.loaded) return void store.request(pv.slot).then(() => this.store === store && pv.slot.loaded && this.duplicatePage(this.pages.indexOf(pv)));
     const slot = store.duplicatePage(pv.slot.id);
     if (!slot) {
       new Notice("This page can't be read, so it can't be duplicated");
@@ -1735,6 +1787,8 @@ export class InkView extends FileView {
   deletePage(index: number) {
     const store = this.store, pv = this.pages[index];
     if (!store || !pv) return;
+    // Read first (#63), so undo can write the page again.
+    if (!pv.slot.loaded) return void store.request(pv.slot).then(() => this.store === store && pv.slot.loaded && this.deletePage(this.pages.indexOf(pv)));
     const pageId = pv.slot.id;
     const at = store.deletePage(pageId).index;
     this.syncPageViews();
@@ -1860,9 +1914,21 @@ export class InkView extends FileView {
   }
 
   /** Exports the note as a PDF next to it (#18); returns its path, or null. */
-  exportPdf(): Promise<string | null> {
-    if (!this.store || !this.file) return Promise.resolve(null);
-    return exportNotePdf(this.app.vault, this.store, this.file.path, this.file.basename, { notice: (m, t) => new Notice(m, t), ios: Platform.isIosApp });
+  async exportPdf(): Promise<string | null> {
+    const store = this.store, file = this.file;
+    if (!store || !file) return null;
+    // Every page is exported, so every page is read first and kept until the export is done (#63).
+    const notice = store.lazy ? new Notice('Reading the pages…', 0) : null;
+    let release = () => {};
+    try {
+      release = await store.loadAll((done, total) => notice?.setMessage?.(`Reading the pages: ${done} of ${total}`));
+      notice?.hide();
+      return await exportNotePdf(this.app.vault, store, file.path, file.basename, { notice: (m, t) => new Notice(m, t), ios: Platform.isIosApp });
+    } finally {
+      notice?.hide();
+      this.requestNear(); // the pages in view are the last to go
+      release();
+    }
   }
 
   /** The favourite presets: MAX_PRESETS slots, null for an empty one. */

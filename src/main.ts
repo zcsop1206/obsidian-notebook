@@ -9,7 +9,7 @@ import type { PenStats } from './ink/input';
 import type { NavStats } from './ink/navigate';
 import { InkView, type InkClipboard } from './ink/view';
 import { RenameHandler } from './ink/rename';
-import { importPdf, PdfNameModal, PdfSourceModal, type PdfChoice } from './ink/pdf-import';
+import { importNotice, importPdf, PdfNameModal, PdfSourceModal, type PdfChoice } from './ink/pdf-import';
 import { PdfPages, type PdfNote } from './ink/pdf';
 import { setSharpPdfRenderer } from './ink/renderer';
 import type { PdfTemplate } from './format/template';
@@ -281,11 +281,13 @@ export default class NotebookPlugin extends Plugin {
 
   /** Imports a chosen PDF as the note `name` and opens it in a new tab; returns its path. Progress shows in a notice. */
   async importPdfAs(choice: PdfChoice, name: string, folder = targetFolder(this.app)): Promise<string | null> {
-    const notice = new Notice('Importing PDF…', 0);
+    const notice = importNotice('Importing PDF…');
     try {
+      let pages = 0, of = 0;
       const path = await importPdf(this.app, folder, name, choice.basename + '.pdf', choice.bytes, this.settings.paper,
-        (done, total) => notice.setMessage?.(`Importing PDF: page ${done} of ${total}`));
+        (done, total) => { pages = done; of = total; notice.say(`Importing PDF: page ${done} of ${total}`); }, notice.cancel);
       notice.hide();
+      if (notice.cancel.cancelled && pages < of) new Notice(`Import stopped: the note has the first ${pages} of ${of} pages`);
       const leaf = this.app.workspace.getLeaf('tab');
       await leaf.setViewState({ type: VIEW_TYPE_INK, state: { file: path }, active: true });
       this.app.workspace.revealLeaf(leaf);
