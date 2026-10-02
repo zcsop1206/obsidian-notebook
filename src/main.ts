@@ -44,6 +44,8 @@ export default class NotebookPlugin extends Plugin {
     // Renaming or moving an ink note moves its page folder along (#26).
     const renames = new RenameHandler(this.app);
     this.registerEvent(this.app.vault.on('rename', (file, oldPath) => void renames.onRename(file, oldPath)));
+    // Embeds rewritten by Obsidian's link update go back to relative paths (#62).
+    this.registerEvent(this.app.vault.on('modify', file => void renames.onModify(file)));
     this.addRibbonIcon('pencil', 'New ink note', () => this.newInkNote());
     this.addCommand({ id: 'new-ink-note', name: 'New ink note', callback: () => this.newInkNote() });
     this.addCommand({

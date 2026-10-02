@@ -10,12 +10,20 @@
 // rewritten index through its own save path, whose writes it recognises as its own. The view's
 // own rename listener lets the store follow a page folder moved by anyone (NoteStore.followRename);
 // notes that aren't open are rewritten on disk here.
-import { Notice, TFile, TFolder, type App, type TAbstractFile } from 'obsidian';
-import { isInkNote, readNote, writeNote } from '../format/note';
+//
+// Obsidian updates links itself after a rename from its file explorer (#62): with the default
+// "shortest path" link format a page embed becomes the bare `p-7f3a0c.svg`, with "absolute path"
+// a path from the vault root. Those are read (format/note.ts, locatePages), and put back as
+// relative paths here for notes that aren't open (the store does it for an open one), so GitHub
+// and the site still find the pages. Obsidian replaces links at the offsets they had before the
+// rename, so no index is written until its update is done (linkUpdatesDone).
+import { MarkdownView, Notice, TFile, TFolder, type App, type TAbstractFile } from 'obsidian';
+import { isInkNote, isRelativeFolder, readNote, writeNote, type NoteIndex } from '../format/note';
 import { cachedIsInk, VIEW_TYPE_INK } from './takeover';
-import { InkView } from './view';
+import { InkView, vaultFiles } from './view';
 import type { NoteStore } from './store';
-import { dirOf, planRename, rebase, relative, resolve, within } from './paths';
+import { dirOf, locatePages, planRename, relative, resolve, type PageLookup } from './paths';
+import { linkUpdatesDone } from './links';
 
 const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -36,7 +44,57 @@ export class RenameHandler {
     }
   }
 
+  /**
+   * For vault.on('modify'): an ink note that isn't open, changed on disk (as by Obsidian's link
+   * update), has its embeds put back as relative paths if they are in another form.
+   */
+  async onModify(file: TAbstractFile): Promise<void> {
+    if (!(file instanceof TFile) || file.extension !== 'md' || cachedIsInk(this.app, file) === false) return;
+    try {
+      await linkUpdatesDone(this.app);
+      await this.canonicalise(file);
+    } catch (e) {
+      console.error('[notebook] embeds', e);
+    }
+  }
+
   private isFolder = (path: string) => this.app.vault.getAbstractFileByPath(path) instanceof TFolder;
+
+  private lookup(): PageLookup {
+    const files = vaultFiles(this.app);
+    return { isFile: path => files.isFile!(path), find: name => files.find!(name) };
+  }
+
+  /** Where the pages of a read index are, seen from the note at `notePath`; null if not found. */
+  private pagesOf(index: NoteIndex, notePath: string): string | null {
+    return index.pages.length ? locatePages(dirOf(notePath), index.folder, index.pages[0], this.lookup()) : null;
+  }
+
+  /** Whether the note is open in a markdown editor, where a rewrite would change the text being edited. */
+  private inEditor(path: string): boolean {
+    return this.app.workspace.getLeavesOfType('markdown').some(leaf => leaf.view instanceof MarkdownView && leaf.view.file?.path === path);
+  }
+
+  /**
+   * Rewrites a note's embeds as relative paths to where its pages are, if it isn't open, is an
+   * ink note, its pages are found and the embeds are in another form or name another folder.
+   */
+  private async canonicalise(file: TFile) {
+    if (!(this.app.vault.getAbstractFileByPath(file.path) instanceof TFile)) return;
+    if (this.openStore(file.path) || this.inEditor(file.path)) return;
+    const text = await this.app.vault.read(file);
+    if (!isInkNote(text)) return;
+    let index: NoteIndex;
+    try {
+      index = readNote(text, file.basename);
+    } catch (e) {
+      return;
+    }
+    const pages = this.pagesOf(index, file.path);
+    if (!pages) return;
+    const folder = relative(dirOf(file.path), pages);
+    if (folder !== index.folder) await this.rewrite(file, text, folder);
+  }
 
   /** The store of an ink view showing this note, if any. */
   private openStore(...paths: string[]): NoteStore | null {
@@ -66,6 +124,7 @@ export class RenameHandler {
       const plan = planRename(oldPath, newPath, pages, this.isFolder);
       if (plan.kind === 'move') await this.move(plan.from, plan.to, to => store.movePages(to, () => this.renameFolder(plan.from, to)));
       if (plan.kind === 'collision') this.collision(plan.at, plan.to);
+      await store.indexReleased(); // not before Obsidian's own link update (#62)
       await store.flush();
       return;
     }
@@ -73,14 +132,13 @@ export class RenameHandler {
     const text = await this.app.vault.read(file);
     if (!isInkNote(text)) return;
     const index = readNote(text, file.basename);
-    const pages = this.locate(resolve(dirOf(oldPath), index.folder), oldPath, newPath);
+    const pages = this.pagesOf(index, newPath)
+      ?? this.locate(isRelativeFolder(index.folder) ? resolve(dirOf(oldPath), index.folder) : null, oldPath, newPath);
     const plan = planRename(oldPath, newPath, pages, this.isFolder);
-    let at = pages;
-    if (plan.kind === 'move' && await this.move(plan.from, plan.to, async to => { await this.renameFolder(plan.from, to); return true; })) at = plan.to;
+    if (plan.kind === 'move') await this.move(plan.from, plan.to, async to => { await this.renameFolder(plan.from, to); return true; });
     if (plan.kind === 'collision') this.collision(plan.at, plan.to);
-    if (at === null) return;
-    const folder = relative(dirOf(newPath), at);
-    if (folder !== index.folder) await this.rewrite(file, text, folder);
+    await linkUpdatesDone(this.app);
+    await this.canonicalise(file);
   }
 
   /** Runs a move of page folder `from` to `to`, whose own rename events are ignored here. */
@@ -115,27 +173,17 @@ export class RenameHandler {
 
   /**
    * A folder was renamed. If it was (or held) a page folder renamed by hand, the notes next to
-   * its old place whose embeds pointed into it follow. Open notes follow in their view.
+   * its old place whose embeds pointed into it follow (their pages are found by file name).
+   * Open notes follow in their view.
    */
   private async folderRenamed(folder: TFolder, oldPath: string) {
     if (this.moving.has(oldPath)) return;
     const parent = this.app.vault.getAbstractFileByPath(dirOf(oldPath) || '/');
     if (!(parent instanceof TFolder)) return;
-    for (const child of parent.children) {
-      if (!(child instanceof TFile) || child.extension !== 'md' || cachedIsInk(this.app, child) === false) continue;
-      if (this.openStore(child.path)) continue;
-      const text = await this.app.vault.read(child);
-      if (!isInkNote(text)) continue;
-      let index;
-      try {
-        index = readNote(text, child.basename);
-      } catch (e) {
-        continue;
-      }
-      const pages = resolve(dirOf(child.path), index.folder);
-      if (!pages || !within(pages, oldPath) || this.isFolder(pages)) continue;
-      await this.rewrite(child, text, relative(dirOf(child.path), rebase(pages, oldPath, folder.path)));
-    }
+    const notes = parent.children.filter((c): c is TFile => c instanceof TFile && c.extension === 'md' && cachedIsInk(this.app, c) !== false);
+    if (!notes.length) return;
+    await linkUpdatesDone(this.app);
+    for (const note of notes) await this.canonicalise(note);
   }
 }
 

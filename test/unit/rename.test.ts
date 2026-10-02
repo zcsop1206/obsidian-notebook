@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { newNote, readNote, writeNote } from '../../src/format/note';
 import { newPage, readPage, writePage } from '../../src/format/page';
-import { planRename, relative, resolve } from '../../src/ink/paths';
+import { locatePages, planRename, relative, resolve } from '../../src/ink/paths';
 import { NoteStore, type NoteFiles } from '../../src/ink/store';
 
 test('resolve and relative are inverse, with ../ where needed', () => {
@@ -51,6 +51,12 @@ class MemFiles implements NoteFiles {
   isFolder(path: string) {
     return this.list(path).length > 0;
   }
+  isFile(path: string) {
+    return this.files.has(path);
+  }
+  find(name: string) {
+    return [...this.files.keys()].find(k => k === name || k.endsWith('/' + name)) ?? null;
+  }
   /** Moves every file under `from` to `to`. */
   move(from: string, to: string) {
     for (const k of [...this.files.keys()]) {
@@ -77,6 +83,107 @@ async function setup() {
   await store.load();
   return { files, store, notices };
 }
+
+test('locatePages: from the note, then from the vault root, then by file name (#62)', () => {
+  const files = new Set(['B/lec/p-000001.svg', 'lec/p-000002.svg', 'p-000003.svg']);
+  const lookup = { isFile: (p: string) => files.has(p), find: (n: string) => [...files].find(k => k === n || k.endsWith('/' + n)) ?? null };
+  assert.equal(locatePages('B', 'lec', 'p-000001', lookup), 'B/lec', 'relative to the note');
+  assert.equal(locatePages('A', 'B/lec', 'p-000001', lookup), 'B/lec', 'from the vault root');
+  assert.equal(locatePages('A', '/B/lec', 'p-000001', lookup), 'B/lec', 'from the vault root, leading slash');
+  assert.equal(locatePages('A', '', 'p-000001', lookup), 'B/lec', 'a bare name');
+  assert.equal(locatePages('B', './lec', 'p-000001', lookup), 'B/lec');
+  assert.equal(locatePages('B/x', '../lec', 'p-000001', lookup), 'B/lec');
+  assert.equal(locatePages('A', 'gone', 'p-000001', lookup), 'B/lec', 'a folder that no longer holds the page: by name');
+  assert.equal(locatePages('B', 'lec', 'p-000002', lookup), 'lec', 'not in the folder next to the note: from the root');
+  assert.equal(locatePages('', '', 'p-000009', lookup), null, 'no such page');
+  assert.equal(locatePages('', '', 'p-000003', lookup), null, 'pages are never in the vault root');
+});
+
+/** A store over `files` for the note at `path`, with a link update that settles when `settle` is called. */
+async function open(files: MemFiles, path: string, held = false) {
+  const notices: string[] = [];
+  let settle = () => {};
+  const settled = held ? new Promise<void>(r => { settle = r; }) : null;
+  const store = new NoteStore(files, path, path.replace(/^.*\//, '').replace(/\.md$/, ''), {
+    pageChanged: () => {}, indexChanged: () => {}, notice: m => notices.push(m), saved: () => {},
+  }, { delay: 20, maxDelay: 100, linksSettled: settled ? () => settled : undefined });
+  await store.load();
+  return { store, notices, settle };
+}
+
+const FRONT = '---\nink: 1\npaper: letter\ntemplate: blank\n---\n';
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+test('store: opens a note whose embeds Obsidian rewrote and writes them back as relative paths (#62)', async () => {
+  for (const [form, embed] of [['shortest', 'p-000001.svg'], ['absolute', 'B/lec/p-000001.svg'], ['stale relative', 'lec/p-000001.svg'], ['./', './../B/lec/p-000001.svg']] as const) {
+    const files = new MemFiles();
+    files.files.set('A/lec.md', FRONT + `Text.\n\n![](${embed})\n`);
+    files.files.set('B/lec/p-000001.svg', writePage({ ...newPage('p-000001'), strokes: [dot('00000001')] }));
+    const { store, notices } = await open(files, 'A/lec.md');
+    assert.equal(store.folder, 'B/lec', form);
+    assert.equal(store.slots[0].error, null, form);
+    assert.equal(store.page(store.slots[0])!.strokes.length, 1, form);
+    await sleep(60);
+    assert.equal(files.files.get('A/lec.md'), FRONT + 'Text.\n\n![](../B/lec/p-000001.svg)\n', form);
+    assert.deepEqual(notices, [], form);
+    store.close();
+  }
+});
+
+test('store: pages that are nowhere give error slots, and the embeds are left as written', async () => {
+  const files = new MemFiles();
+  const md = FRONT + '![](p-000001.svg)\n';
+  files.files.set('lec.md', md);
+  const { store } = await open(files, 'lec.md');
+  assert.match(store.slots[0].error ?? '', /Page file missing: lec\/p-000001\.svg/);
+  await sleep(60);
+  assert.equal(files.files.get('lec.md'), md);
+  store.close();
+});
+
+test('store: Obsidian rewriting the open note\'s embeds is followed, and they are written back (#62)', async () => {
+  const { files, store, notices } = await setup();
+  // Shortest path: the index now names no folder; the pages are where they were.
+  files.files.set('lec.md', FRONT + '![](p-000001.svg)\n');
+  await store.external('lec.md', 'modify');
+  assert.equal(store.folder, 'lec');
+  assert.equal(store.slots.length, 1);
+  assert.equal(store.slots[0].error, null);
+  await sleep(60);
+  assert.equal(readNote(files.files.get('lec.md')!, 'lec').folder, 'lec');
+  assert.deepEqual(notices, []);
+  store.close();
+});
+
+test('store: after a rename the index waits for Obsidian\'s link update, pages do not (#62)', async () => {
+  const files = new MemFiles();
+  const note = newNote('lec');
+  note.pages = ['p-000001'];
+  files.files.set('A/lec.md', writeNote(note));
+  files.files.set('A/lec/p-000001.svg', writePage(newPage('p-000001')));
+  const { store, notices, settle } = await open(files, 'A/lec.md', true);
+  // The note and its folder are moved together; Obsidian will rewrite the embeds afterwards.
+  files.move('A/lec', 'B/lec');
+  files.files.set('B/lec.md', files.files.get('A/lec.md')!);
+  files.files.delete('A/lec.md');
+  store.renamed('B/lec.md');
+  assert.equal(store.followRename('B/lec', 'A/lec', true), true, 'the page folder moved');
+  store.addStroke(store.slots[0], dot('00000001'));
+  await store.flush();
+  assert.equal(readPage(files.files.get('B/lec/p-000001.svg')!).strokes.length, 1, 'the page is saved meanwhile');
+  const before = files.files.get('B/lec.md')!;
+  // Obsidian's update, at the old offsets, on the index as it was.
+  files.files.set('B/lec.md', before.replace('lec/p-000001.svg', 'p-000001.svg'));
+  await store.external('B/lec.md', 'modify');
+  settle();
+  await store.indexReleased();
+  await store.flush();
+  await sleep(60);
+  assert.equal(files.files.get('B/lec.md'), before, 'relative embeds again');
+  assert.equal(store.folder, 'B/lec');
+  assert.deepEqual(notices, []);
+  store.close();
+});
 
 test('store: a rename then movePages writes the unsaved stroke and the index to the new place only', async () => {
   const { files, store, notices } = await setup();

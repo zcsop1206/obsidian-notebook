@@ -151,9 +151,26 @@ test('page embeds from a second folder are text; bad folders are rejected', () =
   assert.equal(writeNote(note), mixed);
   assert.throws(() => writeNote({ ...newNote('n'), folder: '/abs', pages: ['p-000001'] }), /Invalid page folder/);
   assert.throws(() => writeNote({ ...newNote('n'), folder: 'a//b', pages: ['p-000001'] }), /Invalid page folder/);
-  // Not page embeds (kept as text): a URL, an absolute path, a page next to the note.
-  const odd = FRONT + '![](https://x.org/a/p-000001.svg)\n![](/a/p-000002.svg)\n![](p-000003.svg)\n';
+  // Not page embeds (kept as text): a URL, a path with an empty part.
+  const odd = FRONT + '![](https://x.org/a/p-000001.svg)\n![](a//p-000002.svg)\n![](C:/a/p-000003.svg)\n';
   assert.deepEqual(readNote(odd, 'n').pages, []);
+});
+
+test('embeds as Obsidian rewrites them are read: bare, ./, ../, from the vault root (#62)', () => {
+  const read = (body: string) => { const n = readNote(FRONT + body, 'n'); return [n.folder, n.pages]; };
+  assert.deepEqual(read('![](p-000001.svg)\n\n![](p-000002.svg)\n'), ['', ['p-000001', 'p-000002']], 'shortest path');
+  assert.deepEqual(read('![](School/n/p-000001.svg)\n'), ['School/n', ['p-000001']], 'absolute path in vault');
+  assert.deepEqual(read('![](/School/n/p-000001.svg)\n'), ['/School/n', ['p-000001']], 'leading slash');
+  assert.deepEqual(read('![](./n/p-000001.svg)\n'), ['./n', ['p-000001']]);
+  assert.deepEqual(read('![](../My%20pages/p-000001.svg)\n'), ['../My pages', ['p-000001']]);
+  // A bare name is a page wherever the others are, before or after an embed with a folder.
+  assert.deepEqual(read('![](p-000001.svg)\n![](n/p-000002.svg)\n![](p-000003.svg)\n![](b/p-000004.svg)\n'),
+    ['n', ['p-000001', 'p-000002', 'p-000003']]);
+  // Only the relative form is written: the store finds the folder first.
+  const bare = readNote(FRONT + 'Text.\n\n![alt](p-000001.svg)\n', 'n');
+  assert.throws(() => writeNote(bare), /Invalid page folder/);
+  bare.folder = 'n';
+  assert.equal(writeNote(bare), FRONT + 'Text.\n\n![alt](n/p-000001.svg)\n');
 });
 
 // ---- custom paper (#27)

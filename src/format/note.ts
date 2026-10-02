@@ -2,7 +2,10 @@
 // whose body embeds each page in order with a standard markdown image link into the note's
 // folder: `![](lecture/p-7f3a0c.svg)`. Everything else in the file is kept verbatim. The pages'
 // folder is normally the note's basename, but any relative folder is read (a folder renamed by
-// hand, or one that couldn't follow a rename, #26), the folder of the first page embed; page-shaped embeds from other folders are text.
+// hand, or one that couldn't follow a rename, #26), the folder of the first page embed; page-shaped
+// embeds from other folders are text. Obsidian rewrites links when files move (#62), so the forms
+// it writes are read too: a bare `p-7f3a0c.svg`, `./` and `../` paths, and paths from the vault
+// root. Only the relative form is written; the store finds the folder and puts it back.
 import { isPageId } from './ids';
 import { parsePaper, type NotePaper, type Paper } from './page';
 
@@ -11,7 +14,9 @@ export interface NoteIndex {
   basename: string;
   /**
    * The folder holding the pages, relative to the note's own folder (`/`-separated, may start
-   * with `../`): the basename unless it was read otherwise.
+   * with `../`): the basename unless it was read otherwise. As read it is the embeds' folder
+   * as written, which may be '' (bare file names), start with `./` or `/`, or be a path from
+   * the vault root (#62); locatePages finds the folder, and writeNote takes only the relative form.
    */
   folder: string;
   /** `letter`, `a4`, or a custom size such as `288x288` (#27): the size of pages added later. */
@@ -82,15 +87,25 @@ export function isRelativeFolder(folder: string): boolean {
   return folder.split('/').every(part => part !== '' && part !== '.');
 }
 
-/** The page id and its folder if `line` is an embed of a page (`<folder>/p-xxxxxx.svg`). */
+/** Whether `folder` is an embed's folder part in any form read (#62): '' or a path with no empty parts. */
+function isLinkFolder(folder: string): boolean {
+  if (folder === '') return true;
+  if (/[\r\n:\\]/.test(folder)) return false;
+  return folder.replace(/^\//, '').split('/').every(part => part !== '');
+}
+
+/**
+ * The page id and its folder if `line` is an embed of a page (`<folder>/p-xxxxxx.svg`, or the
+ * bare `p-xxxxxx.svg` with folder '').
+ */
 function embedOf(line: string): { page: string; alt: string; folder: string } | null {
   const m = /^!\[([^\]]*)\]\((.*)\)\s*$/.exec(line);
   if (!m) return null;
   let url = m[2];
   if (url.startsWith('<') && url.endsWith('>')) url = url.slice(1, -1);
   for (const u of [safeDecode(url), url]) {
-    const e = /^(.+)\/(p-[^/]*)\.svg$/.exec(u);
-    if (e && isPageId(e[2]) && isRelativeFolder(e[1])) return { page: e[2], alt: m[1], folder: e[1] };
+    const e = /^(?:(.*)\/)?(p-[^/]*)\.svg$/.exec(u);
+    if (e && isPageId(e[2]) && isLinkFolder(e[1] ?? '')) return { page: e[2], alt: m[1], folder: e[1] ?? '' };
   }
   return null;
 }
@@ -98,8 +113,8 @@ function embedOf(line: string): { page: string; alt: string; folder: string } | 
 /**
  * Reads a note index. `noteBasename` is the note's file name without `.md`. Throws if the file
  * isn't an ink note (no frontmatter with `ink: 1`) or a page is embedded twice. The pages'
- * folder is the one the first page embed uses (the basename if there is none); page-shaped
- * embeds from other folders are kept as text.
+ * folder is the one the first page embed with a folder uses (the basename if there is no embed,
+ * '' if they are all bare file names); page-shaped embeds from other folders are kept as text.
  */
 export function readNote(markdown: string, noteBasename: string): NoteIndex {
   const eol = markdown.includes('\r\n') ? '\r\n' : '\n';
@@ -131,10 +146,11 @@ export function readNote(markdown: string, noteBasename: string): NoteIndex {
   let folder: string | null = null;
   const body: BodyLine[] = lines.slice(end + 1).map(line => {
     const embed = embedOf(line);
-    // The first page embed sets the folder; a page-shaped embed from another folder is text.
-    if (!embed || (folder !== null && embed.folder !== folder)) return line;
+    // The first page embed with a folder sets it; a page-shaped embed from another folder is
+    // text. A bare file name is a page wherever the others are.
+    if (!embed || (folder && embed.folder && embed.folder !== folder)) return line;
     if (pages.includes(embed.page)) throw new Error(`Page ${embed.page} is embedded twice in the note`);
-    folder = embed.folder;
+    folder = folder || embed.folder;
     pages.push(embed.page);
     return { page: embed.page, alt: embed.alt };
   });

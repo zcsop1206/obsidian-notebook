@@ -27,6 +27,7 @@ import { SpatialIndex } from './spatial';
 import { PagesPanel } from './pages-panel';
 import { NoteStore, type NoteFiles, type PageSlot, type TemplatesBefore } from './store';
 import { VIEW_TYPE_INK } from './takeover';
+import { linkUpdatesDone } from './links';
 import { confirm, NameModal, TemplateChooser, templateItems } from './template-chooser';
 import { pdfCopyName, pdfPages, resizeAllMessage, resizedCount, resizeMessage, sameSize, type RenderedPdfPage } from './template-changes';
 import { isFavourite } from './favourites';
@@ -166,6 +167,8 @@ export function vaultFiles(app: App): NoteFiles {
       if (f instanceof TFile) await vault.delete(f);
     },
     isFolder: path => vault.getAbstractFileByPath(path) instanceof TFolder,
+    isFile: path => vault.getAbstractFileByPath(path) instanceof TFile,
+    find: name => (app.metadataCache.getFirstLinkpathDest(name, '') ?? vault.getFiles().find(f => f.name === name))?.path ?? null,
   };
 }
 
@@ -400,7 +403,7 @@ export class InkView extends FileView {
       notice: message => new Notice(message),
       saved: () => { this.stats.saves++; this.stats.saveMs = store.writeMs; },
       pageEdited: slot => this.store === store && this.pagesPanel?.changed(slot.id),
-    }, templateRegistry()?.storeOptions());
+    }, { ...templateRegistry()?.storeOptions(), linksSettled: () => linkUpdatesDone(this.app) });
     void templateRegistry()?.load(); // PDF templates (#21), for `pdf:` names and the chooser
     try {
       await store.load(text);

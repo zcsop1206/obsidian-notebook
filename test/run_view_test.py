@@ -2229,6 +2229,127 @@ try:
         check('reopen: the renamed note lists its pages from the folder its embeds name', r == {'type': 'notebook-ink', 'loaded': 1, 'ids': [pid], 'strokes': 7}, r)
         # ======== end of 17. Renaming or moving a note keeps its pages (#26) ========
 
+        # ======== 17b. Obsidian's own link update after a move (#62) ========
+        # The note and its page folder are moved together from the file explorer (fileManager.renameFile,
+        # which rewrites the links afterwards, as Obsidian does), under each "New link format", with the
+        # note open and closed, in either order, and with the "update links?" dialog answered late.
+        ev("""() => {
+          const fm = app.fileManager;
+          // Moves note A/<name>.md and its folder into B together, then reports what is on disk and in the view.
+          T.moveBoth = async ({ name, format, open, folderFirst, dialog }) => {
+            app.vault.setConfig('newLinkFormat', format);
+            app.vault.setConfig('alwaysUpdateLinks', dialog === undefined);
+            const a = `${name} from`, b = `${name} to`;
+            await app.workspace.activeLeaf?.detach();
+            await app.vault.createFolder(a);
+            await app.vault.createFolder(b);
+            await p.createInkNote(name, a, 'letter', 'blank');
+            await T.sleep(150);
+            const id = view.store.slots[0].id;
+            await T.stroke(0, T.wave(100, 200), 'pen', 7, 0);
+            await view.save();
+            if (!open) { await app.workspace.activeLeaf.detach(); await T.sleep(30); }
+            const n0 = notices.length, u0 = fm.updated;
+            const note = () => fm.renameFile(app.vault.getFile(`${a}/${name}.md`), `${b}/${name}.md`);
+            // Moved second, the folder may already have followed the note (#26); Obsidian then has nothing to move.
+            const folder = async () => { if (dirs.has(`${a}/${name}`)) await fm.renameFile(app.vault.getFolder(`${a}/${name}`), `${b}/${name}`).catch(() => {}); };
+            const moves = folderFirst ? [folder(), note()] : [note(), folder()];
+            let asked = false;
+            if (dialog !== undefined) {
+              // The dialog stays up a while; an unsaved stroke is drawn meanwhile.
+              for (let i = 0; i < 50 && !fm.answer; i++) await T.sleep(20);
+              asked = !!fm.answer;
+              if (open) { await T.stroke(0, T.wave(100, 400), 'pen', 7, 0); await view.save(); }
+              await T.sleep(200);
+              fm.answer?.(dialog);
+            }
+            await Promise.all(moves);
+            await T.sleep(250);
+            if (open) await view.save();
+            await T.sleep(100);
+            const md = fs.get(`${b}/${name}.md`);
+            const r = { id, asked, updated: fm.updated - u0, md, embed: md.includes(`![](${name.replace(/ /g, '%20')}/${id}.svg)`), index: T.index(`${b}/${name}.md`),
+              files: T.under(`${b}/${name}`), old: T.under(a).length, notices: notices.slice(n0) };
+            if (!open) {
+              const leaf = app.workspace.getLeaf('tab');
+              await leaf.openFile(app.vault.getFile(`${b}/${name}.md`));
+              await T.sleep(150);
+            }
+            Object.assign(r, { type: view.getViewType(), file: view.file.path, folder: view.store.folder, error: view.store.slots[0]?.error ?? null,
+              slots: view.store.slots.length, strokes: view.store.slots[0] ? view.store.page(view.store.slots[0])?.strokes.length : -1, ink: T.ink(0) });
+            await T.stroke(0, T.wave(100, 600), 'pen', 7, 0);
+            await view.save();
+            r.after = { strokes: T.strokesIn(`${b}/${name}`), md: fs.get(`${b}/${name}.md`) === md };
+            return r;
+          };
+        }""")
+        n = 0
+        for fmt in ['shortest', 'relative', 'absolute']:
+            for is_open in [True, False]:
+                for folder_first in [True, False]:
+                    n += 1
+                    name = f'Moved {n}'
+                    r = page.evaluate('a => T.moveBoth(a)', {'name': name, 'format': fmt, 'open': is_open, 'folderFirst': folder_first})
+                    what = f"move both ({fmt}, {'open' if is_open else 'closed'}, {'folder' if folder_first else 'note'} first)"
+                    check(f'{what}: the note has its page, with its stroke, in the new place',
+                          r['type'] == 'notebook-ink' and r['file'] == f'{name} to/{name}.md' and r['folder'] == f'{name} to/{name}' and r['slots'] == 1
+                          and r['error'] is None and r['strokes'] == 1 and r['ink'] > 500 and r['old'] == 0 and r['files'] == [f"{name} to/{name}/{r['id']}.svg"], r)
+                    check(f'{what}: the embeds are relative paths again, with no notice',
+                          r['embed'] and r['index'] == {'folder': name, 'pages': [r['id']]} and r['notices'] == [], r)
+                    check(f'{what}: the view saves to the new place and leaves the index alone', r['after'] == {'strokes': [2], 'md': True}, r['after'])
+                    if fmt != 'relative' and folder_first:
+                        check(f'{what}: Obsidian did rewrite the embed', r['updated'] >= 1, r['updated'])
+        for answer in [True, False]:
+            for is_open in [True, False]:
+                n += 1
+                name = f'Moved {n}'
+                r = page.evaluate('a => T.moveBoth(a)', {'name': name, 'format': 'shortest', 'open': is_open, 'folderFirst': True, 'dialog': answer})
+                what = f"move both, dialog {'accepted' if answer else 'declined'} late ({'open' if is_open else 'closed'})"
+                check(f'{what}: the dialog was up, and the note keeps its page and strokes',
+                      r['asked'] and r['slots'] == 1 and r['error'] is None and r['strokes'] == (2 if is_open else 1) and r['folder'] == f'{name} to/{name}', r)
+                check(f'{what}: the index is intact, with relative embeds',
+                      r['embed'] and r['index'] == {'folder': name, 'pages': [r['id']]} and r['md'].count('.svg') == 1 and r['notices'] == [], r)
+        ev("() => { app.vault.setConfig('newLinkFormat', 'shortest'); app.vault.setConfig('alwaysUpdateLinks', true); }")
+
+        # A note already broken by the bug (bare embeds, written by hand or by an older version): it
+        # is repaired on disk while closed, and opens with its pages.
+        r = ev("""async () => {
+          await app.workspace.activeLeaf?.detach();
+          await app.vault.createFolder('Broken');
+          await p.createInkNote('Bare', 'Broken', 'letter', 'blank');
+          await T.sleep(150);
+          const id = view.store.slots[0].id;
+          await T.stroke(0, T.wave(100, 200), 'pen', 7, 0);
+          await view.save();
+          await app.workspace.activeLeaf.detach();
+          await T.sleep(30);
+          const good = fs.get('Broken/Bare.md');
+          externalWrite('Broken/Bare.md', good.replace(`Bare/${id}.svg`, `${id}.svg`));
+          const bare = T.index('Broken/Bare.md');
+          await T.sleep(100);
+          const repaired = fs.get('Broken/Bare.md') === good;
+          // Open in a markdown editor: left alone while it is being edited.
+          const leaf = app.workspace.getLeaf('tab');
+          await leaf.setViewState({ type: 'markdown', state: { file: 'Broken/Bare.md', mode: 'source' } });
+          await T.sleep(50);
+          const inEditor = leaf.view.getViewType();
+          externalWrite('Broken/Bare.md', good.replace(`Bare/${id}.svg`, `${id}.svg`));
+          await T.sleep(100);
+          const leftAlone = fs.get('Broken/Bare.md') !== good;
+          await leaf.detach();
+          const tab = app.workspace.getLeaf('tab');
+          await tab.openFile(app.vault.getFile('Broken/Bare.md'));
+          await T.sleep(150);
+          const opened = { type: view.getViewType(), slots: view.store.slots.length, error: view.store.slots[0]?.error ?? null, folder: view.store.folder };
+          await view.save();
+          return { bare, repaired, inEditor, leftAlone, opened, saved: fs.get('Broken/Bare.md') === good };
+        }""")
+        check('bare embeds: a closed note is rewritten with relative embeds', r['bare']['folder'] == '' and r['repaired'], r)
+        check('bare embeds: a note open in a markdown editor is left alone', r['leftAlone'], r)
+        check('bare embeds: the note opens with its page and saves relative embeds',
+              r['opened'] == {'type': 'notebook-ink', 'slots': 1, 'error': None, 'folder': 'Broken/Bare'} and r['saved'], r)
+        # ======== end of 17b. Obsidian's own link update after a move (#62) ========
+
         # ======== 18. Gestures across page edges (#35) ========
         # A gesture belongs to the page it started on and continues wherever the pointer goes.
         # Off-page samples are dispatched on another element (the pages layer, as in the gap
