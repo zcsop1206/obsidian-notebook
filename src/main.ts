@@ -126,6 +126,7 @@ export default class NotebookPlugin extends Plugin {
     this.register(setTemplateRegistry(templates));
     this.app.workspace.onLayoutReady(() => void templates.load());
     this.addInkCommand('copy-page-embed', 'Copy embed for this page', view => void view.copyPageEmbed());
+    this.addInkCommand('go-to-page', 'Go to page…', view => void view.goToPage()); // #64
     // Export (#18): all pages as one PDF next to the note; on the iPad also the share sheet.
     this.addCommand({
       id: 'export-pdf',

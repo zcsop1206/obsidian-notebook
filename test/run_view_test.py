@@ -2882,8 +2882,8 @@ try:
         print('toolbar:', {k: r[k] for k in ('groups', 'buttons', 'lasso', 'ruler', 'header')})
         check('toolbar: tools, presets and page actions in three groups; the provisional strip is gone',
               r['groups'] == ['nb-ink-tools', 'nb-ink-presets', 'nb-ink-page-actions'] and not r['strip'], r)
-        check('toolbar: 16 buttons (Import, #54, among them), each a 40 px target; all but the five presets have an icon',
-              r['buttons'] == 16 and r['icons'] == 11 and all(w >= 40 and h >= 40 for w, h in r['size']), r)
+        check('toolbar: 17 buttons (Import, #54, and the page indicator, #64, among them), each a 40 px target; all but the five presets and the page indicator have an icon',
+              r['buttons'] == 17 and r['icons'] == 11 and all(w >= 40 and h >= 40 for w, h in r['size']), r)
         check('toolbar: the lasso is a tool (#11); the ruler is a toggle (#20)', r['lasso'] == [False, 'Lasso'] and r['ruler'] == [False, 'Ruler'], r)
         check('toolbar: every tool is one tap from every other', r['taps'] == [True] * 6, r['taps'])
         check('toolbar: "Open as markdown" stays the header action', r['header'] == ['Open as markdown'], r['header'])
@@ -5013,7 +5013,7 @@ try:
         }""")
         print('controls audit:', {'base': r['base']['n'], 'kinds': r['base']['kinds'], 'pickers': {k: v['n'] for k, v in r['pickers'].items()}, 'selmenu': r['selmenu']['n']})
         check('controls audit: toolbar, preset slots, Pages panel thumbnails and buttons, footer and ruler label: Pencil never prevented, all marked',
-              r['base']['n'] >= 24 and r['base']['bad'] == [] and r['base']['kinds']['toolbar'] == 16 and r['base']['kinds']['panel'] >= 6
+              r['base']['n'] >= 24 and r['base']['bad'] == [] and r['base']['kinds']['toolbar'] == 17 and r['base']['kinds']['panel'] >= 6
               and r['base']['kinds']['footer'] == 2 and r['base']['kinds']['ruler'] == 1, r['base'])
         check('controls audit: every picker (pen with the ruler row, highlighter, eraser, lasso, page settings, Import #54): Pencil never prevented, all marked',
               all(v['bad'] == [] and v['n'] >= 1 and v['kind'] == k for k, v in r['pickers'].items()) and r['pickers']['pen']['n'] >= 20

@@ -4,7 +4,8 @@
 # keeps only the pages near the viewport and the changed ones in memory, that scrolling is as
 # smooth as in a 20-page note of the same kind, that a page far away is drawn soon after a
 # jump, that a change to a page survives the page leaving the viewport, that changing every
-# page's template and exporting read every page, and that a PDF import can be cancelled.
+# page's template and exporting read every page, that a PDF import can be cancelled, and going
+# to page n from the toolbar's page indicator (#64).
 # Run by `npm test`. NB_LARGE_PAGES sets the page count (default 800).
 # Exits non-zero if any check fails.
 import os, subprocess, sys, time
@@ -196,8 +197,57 @@ try:
         check('edit: unchanged pages far away are released meanwhile', not r['away']['first'] and r['away']['held'] <= 49, r['away'])
         check('edit: back on the page, the stroke is there and drawn', r['back'] == 1 and r['drawn'], r)
 
+        # ---- go to page n (#64): the indicator in the toolbar, its dialog, and the command
+        r = ev("""async () => {
+          const ind = view.contentEl.querySelector('.nb-ink-page-indicator');
+          const at500 = ind.textContent;
+          const sc = T.scroller();
+          sc.scrollTop += 3 * view.pages[500].el.offsetHeight;
+          await T.sleep(100);
+          const scrolled = ind.textContent;
+          // A tap opens the dialog at the current page; a number and Enter go there.
+          ind.click();
+          const m = modals[modals.length - 1], input = m.contentEl.querySelector('input');
+          const dialog = { title: m.titleEl.textContent, value: input.value, of: m.contentEl.querySelector('.nb-goto-total').textContent, type: input.type };
+          input.value = '650';
+          const t0 = performance.now();
+          input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+          for (let i = 0; i < 400 && !T.drawn(649); i++) await T.sleep(5);
+          const ms = performance.now() - t0;
+          await T.sleep(50);
+          const went = { modals: modals.length, at: view.currentPageIndex(), label: ind.textContent, drawn: T.drawn(649), ms,
+            page: view.store.page(view.store.slots[649])?.template.page, top: Math.round(view.pages[649].el.getBoundingClientRect().top - sc.getBoundingClientRect().top) };
+          // Past the end and before the start; text that isn't a number keeps the dialog open.
+          commands['go-to-page'].checkCallback(false);
+          const m2 = modals[modals.length - 1], in2 = m2.contentEl.querySelector('input');
+          in2.value = '';
+          m2.contentEl.querySelector('button.mod-cta').click();
+          const stays = modals.includes(m2);
+          in2.value = '99999';
+          m2.contentEl.querySelector('button.mod-cta').click();
+          await T.sleep(100);
+          const last = { at: view.currentPageIndex(), label: ind.textContent, modals: modals.length };
+          const first = view.goToPage(-3);
+          await T.sleep(100);
+          return { at500, scrolled, dialog, went, stays, last, first, firstLabel: ind.textContent, total: view.pages.length,
+            command: commands['go-to-page'].checkCallback(true), label: ind.getAttribute('aria-label') };
+        }""")
+        n = r['total']
+        check('go to page: the toolbar shows the current page and the count, and follows scrolling',
+              r['at500'] == f'501 / {n}' and r['scrolled'] == f'504 / {n}', r)
+        check('go to page: a tap opens a dialog at the current page with a number field',
+              r['dialog'] == {'title': 'Go to page', 'value': '504', 'of': f'of {n}', 'type': 'number'}, r['dialog'])
+        check('go to page: a number and Enter go there: page 650 at the top, drawn within a second',
+              r['went']['modals'] == 0 and r['went']['at'] == 649 and r['went']['label'] == f'650 / {n}' and r['went']['drawn'] and r['went']['ms'] < 1000
+              and r['went']['page'] == 650 and abs(r['went']['top']) <= 20, r['went'])
+        check('go to page: the command opens the dialog; no number keeps it open; past the end goes to the last page',
+              r['command'] and r['stays'] and r['last'] == {'at': n - 1, 'label': f'{n} / {n}', 'modals': 0}, r)
+        check('go to page: before the start goes to the first page', r['first'] == 0 and r['firstLabel'] == f'1 / {n}' and r['label'] == f'Page 1 of {n}: go to page', r)
+
         # ---- the first pages, released, are read again with their strokes
         r = ev("""async () => {
+          for (let i = 0; i < 60; i++) { view.scrollToPage(300 + i); await new Promise(r => requestAnimationFrame(r)); await T.sleep(0); }
+          await T.sleep(200);
           T.reads = 0;
           view.scrollToPage(0);
           for (let i = 0; i < 400 && !T.drawn(0); i++) await T.sleep(5);

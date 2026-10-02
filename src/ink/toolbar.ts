@@ -42,6 +42,9 @@ export interface ToolbarHost extends PickerHost {
   paperLabel(): string | null;
   pagesOpen(): boolean;
   togglePages(): void;
+  /** The page indicator's text, e.g. "37 / 812" ('' with no pages), and what a tap on it does (#64). */
+  pageLabel?(): string;
+  goToPage?(): void;
   /** The ruler (#20): whether it's shown, and showing or hiding it. */
   rulerOn?(): boolean;
   toggleRuler?(): void;
@@ -97,7 +100,24 @@ export class Toolbar {
     this.importButton(page);
     const pages = this.button(page, 'nb-ink-pages-toggle', 'layout-list', 'Toggle pages panel', () => host.togglePages());
     pages.setAttribute('aria-pressed', 'false');
+    // The current page and the page count; a tap asks for a page to go to (#64).
+    this.pageEl = this.button(page, 'nb-ink-page-indicator', null, 'Go to page', () => host.goToPage?.());
+    this.pageEl.setAttribute('aria-haspopup', 'dialog');
     this.render();
+  }
+
+  private pageEl: HTMLButtonElement;
+  private pageText = '';
+
+  /** Shows the page indicator's text (hidden when ''). Cheap to call on every scroll. */
+  setPage(text: string) {
+    if (text === this.pageText) return;
+    this.pageText = text;
+    this.pageEl.textContent = text;
+    this.pageEl.toggleClass('is-empty', !text);
+    const label = text ? `Page ${text.replace(' / ', ' of ')}: go to page` : 'Go to page';
+    this.pageEl.setAttribute('aria-label', label);
+    this.pageEl.title = label;
   }
 
   get pickerOpen(): string | null {
@@ -135,6 +155,7 @@ export class Toolbar {
     set('.nb-ink-add-page', h.hasNote());
     set('.nb-ink-page-settings', h.hasNote());
     this.mark(this.el.querySelector<HTMLElement>('.nb-ink-pages-toggle')!, h.pagesOpen());
+    this.setPage(h.pageLabel?.() ?? '');
     this.mark(this.el.querySelector<HTMLElement>('.nb-ink-ruler')!, !!h.rulerOn?.());
     // A command or a preset switched tools: the other tool's picker no longer applies.
     const open = this.picker.openFor;
