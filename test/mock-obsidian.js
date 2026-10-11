@@ -564,7 +564,12 @@
   // a marker square in its top-left corner, coloured by page number (red 40·n), and vertical
   // lines exactly 1 device px wide every 3 points, so a sharp render (all black or white) can be
   // told apart from a scaled image (grey edges). window.pdfjsStats counts calls.
-  window.pdfjsStats = { loads: 0, documents: 0, renders: [] };
+  // #68: render honours `transform` (pdf.js applies it before the viewport's; the view renders
+  // tiles with a translation) and records [page, viewport width, viewport height, canvas width,
+  // canvas height]; it takes window.fakePdfDelay ms (default 5) and, with window.fakePdfBusy,
+  // blocks the main thread that many ms when it draws. Its task has pdf.js's `cancel` (the
+  // promise rejects with a RenderingCancelledException), unless window.fakePdfNoCancel is set.
+  window.pdfjsStats = { loads: 0, documents: 0, renders: [], cancelled: 0 };
   window.fakePdf = sizes => new TextEncoder().encode('%PDF-FAKE\n' + sizes.map(([w, h]) => `${w}x${h}`).join('\n')).buffer;
   const fakePdfjs = {
     getDocument({ data }) {
@@ -579,19 +584,30 @@
             const [w, h] = sizes[n - 1];
             return {
               getViewport: ({ scale }) => ({ width: w * scale, height: h * scale, scale }),
-              render({ canvasContext: g, viewport }) {
+              render({ canvasContext: g, viewport, transform }) {
                 const s = viewport.scale;
-                pdfjsStats.renders.push([n, Math.round(viewport.width), Math.round(viewport.height)]);
-                return { promise: (async () => {
-                  await new Promise(r => setTimeout(r, 5));
+                pdfjsStats.renders.push([n, Math.round(viewport.width), Math.round(viewport.height), g.canvas.width, g.canvas.height]);
+                let cancelled = false, wake = null;
+                const promise = (async () => {
+                  await new Promise(r => { wake = r; setTimeout(r, window.fakePdfDelay ?? 5); });
+                  if (cancelled) {
+                    pdfjsStats.cancelled++;
+                    const e = new Error('Rendering cancelled, page ' + n);
+                    e.name = 'RenderingCancelledException';
+                    throw e;
+                  }
+                  if (window.fakePdfBusy) { const t = performance.now(); while (performance.now() - t < window.fakePdfBusy); }
                   g.save();
-                  g.setTransform(1, 0, 0, 1, 0, 0);
-                  g.fillStyle = '#ffffff'; g.fillRect(0, 0, g.canvas.width, g.canvas.height);
+                  g.setTransform(...(transform || [1, 0, 0, 1, 0, 0]));
+                  g.fillStyle = '#ffffff'; g.fillRect(0, 0, Math.round(viewport.width), Math.round(viewport.height));
                   g.fillStyle = `rgb(${(40 * n) % 256},0,0)`; g.fillRect(0, 0, Math.round(36 * s), Math.round(36 * s));
                   g.fillStyle = '#000000';
                   for (let x = 72; x < w; x += 3) g.fillRect(Math.round(x * s), Math.round(72 * s), 1, Math.round((h - 144) * s));
                   g.restore();
-                })() };
+                })();
+                const task = { promise };
+                if (!window.fakePdfNoCancel) task.cancel = () => { cancelled = true; if (wake) wake(); };
+                return task;
               },
               cleanup() {},
             };
