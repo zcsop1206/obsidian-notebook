@@ -877,3 +877,226 @@
   height: 36px;
   font-size: 16px; /* no zoom on focus on the iPad */
 }
+
+/*
+ * The notebook library (#73): a header (back, title, new note, import, new subject, search) and
+ * a scrolling list of subjects, each a header and a grid of note cards with first-page thumbnails.
+ */
+.nb-library {
+  display: flex;
+  flex-direction: column;
+  padding: 0 !important;
+  overflow: hidden;
+}
+
+.nb-lib-header {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.nb-lib-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.nb-lib-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-ui-large, 18px);
+  font-weight: 600;
+}
+
+.nb-lib-actions {
+  display: flex;
+  gap: 4px;
+}
+
+button.nb-lib-button {
+  width: 40px;
+  min-width: 40px;
+  height: 40px;
+  margin: 0;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--radius-s, 6px);
+  background: transparent;
+  box-shadow: none;
+  color: var(--icon-color, var(--text-muted, #666));
+  cursor: pointer;
+}
+
+button.nb-lib-button:hover {
+  background: var(--background-modifier-hover, rgba(0, 0, 0, 0.06));
+}
+
+button.nb-lib-button svg {
+  width: 20px;
+  height: 20px;
+}
+
+button.nb-lib-back.is-hidden {
+  display: none;
+}
+
+input.nb-lib-search {
+  width: 100%;
+  height: 36px;
+  font-size: 16px; /* no zoom on focus on the iPad */
+}
+
+.nb-lib-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 12px 24px;
+  -webkit-overflow-scrolling: touch;
+}
+
+.nb-lib-subject-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-top: 8px;
+  background: var(--background-primary, #fff);
+}
+
+button.nb-lib-subject-name {
+  flex: 1;
+  min-width: 0;
+  height: 40px;
+  margin: 0;
+  padding: 0 4px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  align-self: center;
+  color: var(--text-normal);
+  font-size: var(--font-ui-medium, 15px);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.nb-lib-subject-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nb-lib-subject-count {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small, 13px);
+  font-weight: normal;
+}
+
+.nb-lib-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(176px, 1fr));
+  gap: 12px;
+  padding: 8px 0;
+}
+
+.nb-lib-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 8px;
+  border-radius: var(--radius-m, 8px);
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.nb-lib-card:hover {
+  background: var(--background-modifier-hover, rgba(0, 0, 0, 0.04));
+}
+
+/* The thumbnail's box: a Letter page at 160 px until the picture arrives. */
+.nb-lib-thumb {
+  height: 207px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  overflow: hidden;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  background: var(--background-secondary, #f2f2f2);
+}
+
+.nb-lib-thumb[data-shown="yes"] {
+  border-color: transparent;
+  background: transparent;
+}
+
+img.nb-lib-thumb-img {
+  width: 100%;
+  height: auto;
+  max-height: 100%;
+  object-fit: contain;
+  box-sizing: border-box;
+  border: 1px solid var(--background-modifier-border, #e4e4e4);
+  pointer-events: none;
+}
+
+.nb-lib-info {
+  width: 160px;
+  margin-top: 6px;
+}
+
+.nb-lib-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-ui-small, 13px);
+  font-weight: 600;
+}
+
+.nb-lib-meta {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller, 12px);
+}
+
+button.nb-lib-more {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 36px;
+  min-width: 36px;
+  height: 36px;
+  background: var(--background-primary, #fff);
+  opacity: 0.9;
+}
+
+input.nb-lib-rename {
+  width: 160px;
+  font-size: 16px;
+}
+
+.nb-lib-empty {
+  padding: 12px 4px;
+  color: var(--text-muted);
+}
+
+/* Page folders in the file explorer (#73, setting "Hide page folders in the file explorer"). */
+.nav-folder.nb-ink-pages-folder {
+  display: none;
+}

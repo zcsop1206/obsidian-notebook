@@ -1,6 +1,7 @@
 // Plugin settings: the paper size and template of new ink notes, and the ink toolbar's tools and
 // favourite presets (#10), the templates folder (#21) and the favourite templates (#54); the name
-// pattern of one-tap new notes and the folder they go in (#72).
+// pattern of one-tap new notes and the folder they go in (#72); the library on startup and the
+// file explorer's page folders (#73).
 import { PluginSettingTab, Setting, type App, type Plugin } from 'obsidian';
 import type { Paper } from './format/page';
 import { BUILT_IN_TEMPLATES, isTemplateName } from './format/template';
@@ -35,11 +36,16 @@ export interface NotebookSettings {
   newNoteName: string;
   /** The vault folder new notes go in (#72), created on first use; '' is the vault root. */
   notesFolder: string;
+  /** Whether the file explorer hides ink notes' page folders (#73). */
+  hidePageFolders: boolean;
+  /** Whether the notebook library opens on startup when no ink note is open (#73). */
+  libraryOnStartup: boolean;
 }
 
 export const DEFAULT_SETTINGS: NotebookSettings = {
   paper: 'letter', template: 'blank', tools: DEFAULT_TOOL_STATE, presets: [...DEFAULT_PRESETS], templatesFolder: 'templates/ink',
   favouriteTemplates: [], favouriteDefault: true, newNoteName: DEFAULT_NAME_PATTERN, notesFolder: 'notebook',
+  hidePageFolders: true, libraryOnStartup: true,
 };
 
 /** Settings from saved data, ignoring unknown or invalid values (with a warning for a template). */
@@ -59,12 +65,16 @@ export function parseSettings(data: unknown): NotebookSettings {
     favouriteDefault: typeof d.favouriteDefault === 'boolean' ? d.favouriteDefault : DEFAULT_SETTINGS.favouriteDefault,
     newNoteName: typeof d.newNoteName === 'string' && d.newNoteName.trim() ? d.newNoteName : DEFAULT_SETTINGS.newNoteName,
     notesFolder: typeof d.notesFolder === 'string' ? cleanFolder(d.notesFolder) : DEFAULT_SETTINGS.notesFolder,
+    hidePageFolders: typeof d.hidePageFolders === 'boolean' ? d.hidePageFolders : DEFAULT_SETTINGS.hidePageFolders,
+    libraryOnStartup: typeof d.libraryOnStartup === 'boolean' ? d.libraryOnStartup : DEFAULT_SETTINGS.libraryOnStartup,
   };
 }
 
 interface SettingsHost extends Plugin {
   settings: NotebookSettings;
   saveSettings(): Promise<void>;
+  /** Marks or unmarks the file explorer's page folders again (#73). */
+  explorer?: { update(): Promise<void> };
 }
 
 export class NotebookSettingTab extends PluginSettingTab {
@@ -139,7 +149,7 @@ export class NotebookSettingTab extends PluginSettingTab {
     example();
     new Setting(containerEl)
       .setName('Notes folder')
-      .setDesc('Where new ink notes go. Created when the first note is. Empty: the vault root.')
+      .setDesc('Where new ink notes go (from the library: the subject open there). Created when the first note is. Empty: the vault root.')
       .addText(t => t
         .setPlaceholder('notebook')
         .setValue(s.notesFolder)
@@ -147,6 +157,21 @@ export class NotebookSettingTab extends PluginSettingTab {
           s.notesFolder = cleanFolder(value);
           await this.plugin.saveSettings();
         }));
+    new Setting(containerEl)
+      .setName('Hide page folders in the file explorer')
+      .setDesc("Each ink note's folder of page files is hidden; the note itself stays. Off: everything shows.")
+      .addToggle(t => t.setValue(s.hidePageFolders).onChange(async on => {
+        s.hidePageFolders = on;
+        await this.plugin.saveSettings();
+        await this.plugin.explorer?.update();
+      }));
+    new Setting(containerEl)
+      .setName('Open the notebook library on startup')
+      .setDesc('When no ink note is open.')
+      .addToggle(t => t.setValue(s.libraryOnStartup).onChange(async on => {
+        s.libraryOnStartup = on;
+        await this.plugin.saveSettings();
+      }));
   }
 
   /** Favourite templates (#54): a toggle per template; starred ones come first wherever templates are chosen. */

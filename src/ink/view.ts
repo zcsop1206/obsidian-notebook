@@ -35,6 +35,7 @@ import { isFavourite } from './favourites';
 import { addImageTemplateFlow, addPdfTemplateFlow } from './pdf-template';
 import { ImageSourceModal, importNotice, PdfSourceModal, renderPdfPages, stripPdf, type PdfChoice } from './pdf-import';
 import { cleanName } from './names';
+import { renameNote } from './note-actions';
 import type { ImportKind } from './picker';
 import { centreOn, encodeClip, isIdentity, lassoSelect, moveBy, resizeBy, resizeScale, strokesBounds, transformStroke, withIds, type Box, type Transform } from './lasso';
 import { hitSelection, SelectionMenu, SelectionOverlay } from './selection';
@@ -458,19 +459,7 @@ export class InkView extends FileView {
    * runs. The name is cleaned as a new note's is. Resolves to why it couldn't, or null.
    */
   async renameNote(name: string): Promise<string | null> {
-    const file = this.file;
-    if (!file) return null;
-    const base = cleanName(name);
-    if (base === file.basename) return null;
-    const dir = file.parent && !file.parent.isRoot() ? file.parent.path + '/' : '';
-    const path = `${dir}${base}.md`;
-    if (this.app.vault.getAbstractFileByPath(path)) return `There is already a note named "${base}" here.`;
-    try {
-      await this.app.fileManager.renameFile(file, path);
-    } catch (e) {
-      return `Couldn't rename the note: ${(e as Error).message}`;
-    }
-    return null;
+    return this.file ? renameNote(this.app, this.file, name) : null; // shared with the library's cards (#73)
   }
 
   /** Writes everything changed now. */

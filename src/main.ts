@@ -3,7 +3,7 @@ import type { Hotkey } from 'obsidian';
 import { Recorder } from './debug/recorder';
 import { DebugView, VIEW_TYPE_DEBUG } from './debug/view';
 import { LOG_PREFIX } from './debug/util';
-import { createInkNote, formatNow, nameTaken, NewNoteModal, targetFolder } from './ink/new-note';
+import { createInkNote, ensureFolder, formatNow, nameTaken, NewNoteModal, targetFolder } from './ink/new-note';
 import { patternName } from './ink/names';
 import { LONG_PRESS_MS } from './ink/toolbar';
 import { cachedIsInk, installTakeover, VIEW_TYPE_INK } from './ink/takeover';
@@ -22,11 +22,15 @@ import { setTemplateRegistry, TemplateRegistry } from './ink/templates';
 import { defaultTemplateName, settingsPrefs } from './ink/favourites';
 import { TemplateChooser } from './ink/template-chooser';
 import { DEFAULT_SETTINGS, NotebookSettingTab, parseSettings, type NotebookSettings } from './settings';
+import { LibraryView, VIEW_TYPE_LIBRARY } from './ink/library';
+import { NoteCatalog } from './ink/catalog';
+import { ThumbCache } from './ink/thumbs';
+import { ExplorerMarker } from './ink/explorer';
 
 /**
  * Notebook: handwritten notes with the Apple Pencil, stored as SVG pages in the vault.
- * Markdown files with `ink:` frontmatter open in the ink view. Also holds the spike's ink
- * debug view and test recorder.
+ * Markdown files with `ink:` frontmatter open in the ink view; the notebook library (#73) lists
+ * them as cards by subject. Also holds the spike's ink debug view and test recorder.
  */
 export default class NotebookPlugin extends Plugin {
   recorder!: Recorder;
@@ -37,6 +41,14 @@ export default class NotebookPlugin extends Plugin {
   inkClipboard: InkClipboard | null = null;
   /** Custom templates in the templates folder (#21, #54). */
   templates!: TemplateRegistry;
+  /** The vault's ink notes, for the library and the file explorer (#73). */
+  catalog!: NoteCatalog;
+  /** The library's first-page thumbnails, cached in the plugin's folder (#73). */
+  thumbs!: ThumbCache;
+  /** Hides page folders in the file explorer (#73). */
+  explorer!: ExplorerMarker;
+  /** Subjects collapsed in the library, while Obsidian runs (#73). */
+  collapsed = new Set<string>();
 
   async onload() {
     this.settings = parseSettings(await this.loadData());
@@ -123,6 +135,21 @@ export default class NotebookPlugin extends Plugin {
       menu.addItem(item => item.setTitle('Open as ink note').setIcon('pencil').onClick(() => void this.openAsInk(file, leaf)));
     }));
     this.addSettingTab(new NotebookSettingTab(this.app, this));
+
+    // The notebook library (#73): notes as cards by subject; page folders hidden in the file explorer.
+    const catalog = this.catalog = new NoteCatalog(this.app);
+    catalog.watch(this);
+    const dir = this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
+    this.thumbs = new ThumbCache(this.app, `${dir}/thumbs`);
+    this.register(() => this.thumbs.destroy());
+    this.registerView(VIEW_TYPE_LIBRARY, leaf => new LibraryView(leaf, this));
+    this.addRibbonIcon('library', 'Notebook library', () => void this.openLibrary());
+    this.addCommand({ id: 'open-library', name: 'Open notebook library', callback: () => void this.openLibrary() });
+    this.explorer = new ExplorerMarker(this.app, catalog, () => this.settings.hidePageFolders);
+    this.explorer.watch(this);
+    this.app.workspace.onLayoutReady(() => {
+      if (this.settings.libraryOnStartup && !this.app.workspace.getLeavesOfType(VIEW_TYPE_INK).length) void this.openLibrary();
+    });
     // PDF import (#14), and sharp rendering of PDF pages in the ink view.
     this.addCommand({ id: 'import-pdf', name: 'Import PDF as ink note', callback: () => this.importPdf() });
     const pdfPages = this.pdfPages = new PdfPages(this.app.vault, t => this.noteOfTemplate(t));
@@ -329,17 +356,31 @@ export default class NotebookPlugin extends Plugin {
     }
   }
 
-  /** Asks for a PDF (vault or device) and a name, then imports it into the active file's folder and opens it. */
-  importPdf() {
+  /**
+   * The folder an imported PDF goes in (#73): the subject open in the library, else the notes
+   * folder.
+   */
+  importFolder(): string {
+    const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_LIBRARY)[0];
+    return leaf?.view instanceof LibraryView ? leaf.view.folderForNew() : this.settings.notesFolder;
+  }
+
+  /** Asks for a PDF (vault or device) and a name, then imports it into `folder` (default importFolder()) and opens it. */
+  importPdf(folder = this.importFolder()) {
     new PdfSourceModal(this.app, choice => {
-      new PdfNameModal(this.app, choice.basename, name => void this.importPdfAs(choice, name)).open();
+      new PdfNameModal(this.app, choice.basename, name => void this.importPdfAs(choice, name, folder)).open();
     }).open();
   }
 
-  /** Imports a chosen PDF as the note `name` and opens it in a new tab; returns its path. Progress shows in a notice. */
-  async importPdfAs(choice: PdfChoice, name: string, folder = targetFolder(this.app)): Promise<string | null> {
+  /**
+   * Imports a chosen PDF as the note `name` into `folder` (default importFolder(), created if
+   * missing) and opens it in a new tab; returns its path. Progress shows in a notice. The
+   * library lists it as soon as it is written.
+   */
+  async importPdfAs(choice: PdfChoice, name: string, folder = this.importFolder()): Promise<string | null> {
     const notice = importNotice('Importing PDF…');
     try {
+      await ensureFolder(this.app, folder);
       let pages = 0, of = 0;
       const path = await importPdf(this.app, folder, name, choice.basename + '.pdf', choice.bytes, this.settings.paper,
         (done, total) => { pages = done; of = total; notice.say(`Importing PDF: page ${done} of ${total}`); }, notice.cancel);
@@ -395,6 +436,22 @@ export default class NotebookPlugin extends Plugin {
 
   async openAsInk(file: TFile, leaf: WorkspaceLeaf) {
     await leaf.setViewState({ type: VIEW_TYPE_INK, state: { file: file.path }, active: true });
+  }
+
+  /**
+   * Shows the notebook library (#73): its tab if it has one, else in the active tab if that is
+   * empty, else in a new tab. Returns the view.
+   */
+  async openLibrary(): Promise<LibraryView | null> {
+    const ws = this.app.workspace;
+    let leaf = ws.getLeavesOfType(VIEW_TYPE_LIBRARY)[0];
+    if (!leaf) {
+      const active = ws.getMostRecentLeaf();
+      leaf = active && active.view?.getViewType() === 'empty' ? active : ws.getLeaf('tab');
+      await leaf.setViewState({ type: VIEW_TYPE_LIBRARY, active: true });
+    }
+    ws.revealLeaf(leaf);
+    return leaf.view instanceof LibraryView ? leaf.view : null;
   }
 
   async openDebugView() {
