@@ -1,5 +1,6 @@
 // Pen settings (#5): the nib, colour and size the next stroke is written with. Held by the ink
-// view and saved in the plugin settings with the favourite presets (#10: see the end).
+// view and saved in the plugin settings with the favourite presets (#10: see the end), and the
+// uniform pen's advanced tunables (#69: smoothing, stabiliser, taper, thin-line boost).
 import { DEFAULT_INK, NIBS, type Nib } from '../format/page';
 
 /**
@@ -188,6 +189,67 @@ export function withEraser(eraser: Readonly<EraserSettings>, change: Partial<Era
 /** The eraser size after `size`, wrapping round. */
 export function nextEraserSize(size: number): number {
   return ERASER_SIZES.find(s => s > size) ?? ERASER_SIZES[0];
+}
+
+// ---- the advanced pen (#69)
+
+/**
+ * The uniform pen's tunables, set in the plugin settings ("Advanced pen") and saved into each new
+ * uniform stroke (see PenStroke in format/page.ts and outline.ts), so changing them never changes
+ * a stroke already written. `boost` is the editor's thin-line boost (renderer.ts), not a stroke's.
+ * The defaults are today's pen: every stroke written with them is byte-identical to before.
+ */
+export interface PenTuning {
+  /** The refit radius in px (Smoothing). */
+  smooth: number;
+  /** The stabiliser, 0..1. */
+  stab: number;
+  /** Each tapered end's length in multiples of the size (End taper). */
+  taper: number;
+  /** Thin-line boost in the editor's bitmaps. */
+  boost: boolean;
+}
+
+export const DEFAULT_TUNING: Readonly<PenTuning> = Object.freeze({ smooth: 1.5, stab: 0, taper: 0, boost: false });
+
+/** The settings' choices: value and label. Defaults (Normal, Off, Off) are today's pen. */
+export const SMOOTHING_LEVELS: readonly (readonly [number, string])[] = [[0, 'Off'], [1, 'Light (1 px)'], [1.5, 'Normal (1.5 px)'], [3, 'Strong (3 px)'], [5, 'Max (5 px)']];
+export const STABILISER_LEVELS: readonly (readonly [number, string])[] = [[0, 'Off'], [0.2, 'Light'], [0.35, 'Normal'], [0.6, 'Strong']];
+export const TAPER_LEVELS: readonly (readonly [number, string])[] = [[0, 'Off'], [2, 'Short (2 × size)'], [4, 'Long (4 × size)']];
+
+/** The tuning read from settings: each value one of its levels, else the default with a warning. */
+export function parseTuning(v: unknown): PenTuning {
+  const out: PenTuning = { ...DEFAULT_TUNING };
+  if (v === undefined) return out;
+  if (typeof v !== 'object' || v === null) {
+    console.warn('[notebook]', `Invalid advanced pen settings ${JSON.stringify(v)}; using the defaults`);
+    return out;
+  }
+  const d = v as Record<string, unknown>;
+  const level = (name: 'smooth' | 'stab' | 'taper', levels: readonly (readonly [number, string])[]) => {
+    const x = d[name];
+    if (x === undefined) return;
+    if (levels.some(([l]) => l === x)) out[name] = x as number;
+    else console.warn('[notebook]', `Invalid ${name} ${JSON.stringify(x)} in the advanced pen settings; using ${out[name]}`);
+  };
+  level('smooth', SMOOTHING_LEVELS);
+  level('stab', STABILISER_LEVELS);
+  level('taper', TAPER_LEVELS);
+  if (typeof d.boost === 'boolean') out.boost = d.boost;
+  else if (d.boost !== undefined) console.warn('[notebook]', `Invalid boost ${JSON.stringify(d.boost)} in the advanced pen settings; off`);
+  return out;
+}
+
+/**
+ * The fields a new uniform stroke gets from the tuning: only those that differ from the
+ * defaults, so a stroke written with the default settings is exactly as before #69.
+ */
+export function tuningFields(t: Readonly<PenTuning>): { smooth?: number; stab?: number; taper?: number } {
+  const out: { smooth?: number; stab?: number; taper?: number } = {};
+  if (t.smooth !== DEFAULT_TUNING.smooth) out.smooth = t.smooth;
+  if (t.stab !== DEFAULT_TUNING.stab) out.stab = t.stab;
+  if (t.taper !== DEFAULT_TUNING.taper) out.taper = t.taper;
+  return out;
 }
 
 // ---- the toolbar (#10): size stepping, favourite presets and the saved tool state

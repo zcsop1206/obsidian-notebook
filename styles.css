@@ -831,3 +831,50 @@
   width: 7em;
   font-size: 16px; /* no zoom on focus on the iPad */
 }
+
+/* The pen lab (#69), in the ink debug view: variants of the uniform pen side by side. */
+.nbspike-lab {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.nbspike-lab-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.nbspike-lab-size.is-active {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+.nbspike-lab-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.nbspike-lab-cell {
+  padding: 4px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+}
+
+.nbspike-lab-name {
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+
+.nbspike-lab-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
