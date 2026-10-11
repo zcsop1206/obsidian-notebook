@@ -1724,12 +1724,21 @@ export class InkView extends FileView {
   togglePagesPanel(open = !this.pagesPanelOpen) {
     const panel = this.pagesPanel;
     if (!panel) return;
-    // Below the toolbar; the pages area narrows beside it (relaid out through the ResizeObserver).
-    const bar = this.toolbar?.el;
-    panel.el.style.top = bar ? `${bar.offsetTop + bar.offsetHeight}px` : '0';
+    this.placePagesPanel();
     this.contentEl.toggleClass('nb-pages-open', open);
     panel.setOpen(open);
     this.toolbar?.render();
+  }
+
+  /**
+   * The Pages panel's top: below the toolbar and the first-run hint (#71), level with the pages,
+   * which narrow beside it (relaid out through the ResizeObserver).
+   */
+  private placePagesPanel() {
+    const panel = this.pagesPanel, bar = this.toolbar?.el, hint = this.toolbar?.hintEl;
+    if (!panel) return;
+    const above = hint ?? bar;
+    panel.el.style.top = above ? `${above.offsetTop + above.offsetHeight}px` : '0';
   }
 
   /** The panel's stats (thumbnails drawn, frame times), for tests. */
@@ -1935,7 +1944,20 @@ export class InkView extends FileView {
       setRulerAngle: a => this.setRulerAngle(a),
       rulerUnit: () => this.rulerUnit,
       setRulerUnit: u => this.setRulerUnit(u),
+      // #71: the button size, and the first-run hint until it is dismissed.
+      toolbarSize: () => this.settingsHost?.settings.toolbarSize ?? 'comfortable',
+      showHint: () => !!this.settingsHost && !this.settingsHost.settings.hintsShown,
+      dismissHint: () => this.dismissHint(),
     });
+  }
+
+  /** The first-run hint was dismissed (#71): not shown again; the Pages panel moves up with the pages. */
+  private dismissHint() {
+    if (this.settingsHost) {
+      this.settingsHost.settings.hintsShown = true;
+      this.settingsHost.saveSettings().catch(e => console.error('[notebook]', 'saving settings', e));
+    }
+    if (this.pagesPanelOpen) this.placePagesPanel();
   }
 
   /** Exports the note as a PDF next to it (#18); returns its path, or null. */
