@@ -8,6 +8,8 @@ import {
   centreline, followRate, LiveFit, liveFit, refit, refitRadius, refitStep, REFIT_RADIUS, stabilise, strokeGeometry, strokePath, TAPER_TIP,
 } from '../../src/format/outline';
 import { readPage, writePage, newPage, type PenStroke, type Point } from '../../src/format/page';
+import { getStroke } from 'perfect-freehand';
+import { strokeOutline, UNIFORM_PEN_OPTIONS, PEN_OPTIONS } from '../../src/format/outline';
 import { strokeOps } from '../../src/ink/export-pdf';
 import { DEFAULT_TUNING, parseTuning, tuningFields } from '../../src/ink/pen';
 import { BOOST_DEVICE_PX, paintPath, setThinLineBoost } from '../../src/ink/renderer';
@@ -38,6 +40,10 @@ test('#69 defaults: a stroke without the new fields, or with the default values,
   assert.equal(strokePath(pen(pts, { stab: 0, taper: 0 })), strokePath(s));
   assert.equal(strokeGeometry(s).ends, '');
   assert.equal(refitStep(pen(pts, { smooth: 1.5 })), refitStep(s));
+  // Filled outlines (the pressure nib, and the uniform nib's pre-#60 outline) refit 0.3 px apart as before.
+  const outline = (opts: object) => getStroke(refit(pts).map(q => [q.x, q.y, q.p]), { ...opts, size: 2.5 });
+  assert.deepEqual(strokeOutline(s), outline(UNIFORM_PEN_OPTIONS));
+  assert.deepEqual(strokeOutline({ ...s, nib: 'pressure' }), outline(PEN_OPTIONS));
   // The pressure nib (out of scope) is unaffected by the uniform pen's defaults.
   const p = { ...s, nib: 'pressure' as const };
   assert.equal(strokePath(p), strokePath({ tool: 'pen', nib: 'pressure', size: 2.5, points: pts }));

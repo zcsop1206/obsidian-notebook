@@ -188,10 +188,12 @@ export function outlinePath(stroke: OutlineInput, live = false): string {
 /**
  * The outline's points, as perfect-freehand computes them: of the refitted points for a
  * finished pen stroke, of the points as given with `live` (the pen's live overlay passes the
- * same refit, computed incrementally by LiveFit, #52) and for the highlighter.
+ * same refit, computed incrementally by LiveFit, #52) and for the highlighter. A filled
+ * outline's refit keeps points REFIT_STEP apart (scaled by the stroke's own radius, #69) for
+ * either nib: the uniform nib's outline (outlinePath, its pre-#60 drawing) too.
  */
 export function strokeOutline(stroke: OutlineInput, live = false): number[][] {
-  const points = stroke.tool === 'pen' && !live ? fitPoints(stroke) : stroke.points;
+  const points = stroke.tool === 'pen' && !live ? fitPoints(stroke, scaledStep(REFIT_STEP, stroke)) : stroke.points;
   return getStroke(points.map(pt => [pt.x, pt.y, pt.p]), { ...outlineOptions(stroke), size: stroke.size });
 }
 
@@ -257,9 +259,9 @@ export function stabilise(points: readonly Point[], stab: number): Point[] {
  * The points a finished pen stroke is drawn from: its samples stabilised (#69, if it has a
  * stabiliser) and refitted with its own radius and step.
  */
-export function fitPoints(s: OutlineInput): Point[] {
+export function fitPoints(s: OutlineInput, step = refitStep(s)): Point[] {
   const stab = stabOf(s);
-  return refit(stab ? stabilise(s.points, stab) : s.points, refitStep(s), refitRadius(s));
+  return refit(stab ? stabilise(s.points, stab) : s.points, step, refitRadius(s));
 }
 
 /** The live overlay's refit of a stroke in progress (#52), with the stroke's radius, step and stabiliser (#69). */
@@ -279,7 +281,11 @@ export function liveFit(s: Tuned & { size: number }): LiveFit {
  * scales with it (radius / REFIT_RADIUS), so stronger smoothing also keeps fewer points.
  */
 export function refitStep(s: Tuned & { size: number }): number {
-  const base = isStroked(s) ? Math.min(1, Math.max(0.6, Math.round(6 * s.size) / 10)) : REFIT_STEP;
+  return scaledStep(isStroked(s) ? Math.min(1, Math.max(0.6, Math.round(6 * s.size) / 10)) : REFIT_STEP, s);
+}
+
+/** A refit step scaled by the stroke's own radius (#69); `base` itself at REFIT_RADIUS. */
+function scaledStep(base: number, s: Tuned): number {
   const r = refitRadius(s);
   return r > 0 && r !== REFIT_RADIUS ? base * r / REFIT_RADIUS : base;
 }
