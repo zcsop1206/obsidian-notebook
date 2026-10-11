@@ -197,7 +197,9 @@ try:
         page.goto(f'http://localhost:{port}/test/harness.html')
         page.add_script_tag(url=f'http://localhost:{port}/test/out/view-fixture.js')
         page.evaluate(HELPERS)
-        page.evaluate("async () => { window.original = obsidian.WorkspaceLeaf.prototype.setViewState; window.p = await loadPlugin(); }")
+        # The first-run hint (#71) is dismissed from the start, so it doesn't move the pages under the
+        # checks that measure them; section 21 shows it on purpose.
+        page.evaluate("async () => { window.original = obsidian.WorkspaceLeaf.prototype.setViewState; window.pluginData = { hintsShown: true }; window.p = await loadPlugin(); }")
         ev = page.evaluate
 
         # --- 1. New ink note, through the command's modal
@@ -2863,7 +2865,8 @@ try:
           T.activeSlots = () => [...T.bar().querySelectorAll('.nb-ink-preset.is-active')].map(b => Number(b.dataset.slot));
           const bar = T.bar(), groups = [...bar.children].map(g => g.classList[2]);
           const buttons = [...bar.querySelectorAll('button')];
-          const size = buttons.map(b => [b.offsetWidth, b.offsetHeight]);
+          // Shown buttons (#71: folded page actions are hidden); the inline swatches are narrower.
+          const size = buttons.filter(b => b.offsetParent !== null).map(b => [b.offsetWidth, b.offsetHeight, b.classList.contains('nb-ink-inline-swatch')]);
           const lasso = T.tb('.nb-ink-lasso'), ruler = T.tb('.nb-ink-ruler');
           // Every tool in one tap, from every tool.
           const taps = [];
@@ -2880,10 +2883,11 @@ try:
             strip: !!view.contentEl.querySelector('.nb-ink-strip, .nb-ink-provisional') };
         }""")
         print('toolbar:', {k: r[k] for k in ('groups', 'buttons', 'lasso', 'ruler', 'header')})
-        check('toolbar: tools, presets and page actions in three groups; the provisional strip is gone',
-              r['groups'] == ['nb-ink-tools', 'nb-ink-presets', 'nb-ink-page-actions'] and not r['strip'], r)
-        check('toolbar: 17 buttons (Import, #54, and the page indicator, #64, among them), each a 40 px target; all but the five presets and the page indicator have an icon',
-              r['buttons'] == 17 and r['icons'] == 11 and all(w >= 40 and h >= 40 for w, h in r['size']), r)
+        check('toolbar: tools, inline colours (#71), presets and page actions in four groups; the provisional strip is gone',
+              r['groups'] == ['nb-ink-tools', 'nb-ink-inline-colors', 'nb-ink-presets', 'nb-ink-page-actions'] and not r['strip'], r)
+        check('toolbar: 26 buttons (8 inline colours, Import #54, the page indicator #64 and "..." (more) #71 among them); every shown one 44 px high and 44 px wide '
+              '(the colours 26); all but the colours, presets and page indicator have an icon',
+              r['buttons'] == 26 and r['icons'] == 12 and all(h >= 44 and w >= (26 if sw else 44) for w, h, sw in r['size']), r)
         check('toolbar: the lasso is a tool (#11); the ruler is a toggle (#20)', r['lasso'] == [False, 'Lasso'] and r['ruler'] == [False, 'Ruler'], r)
         check('toolbar: every tool is one tap from every other', r['taps'] == [True] * 6, r['taps'])
         check('toolbar: "Open as markdown" stays the header action', r['header'] == ['Open as markdown'], r['header'])
@@ -2948,7 +2952,10 @@ try:
           const er = { ...view.eraser, open: view.toolbar.pickerOpen };
           T.bar().querySelector('.nb-ink-page-settings').click();
           const menu = { kind: view.toolbar.pickerOpen, items: [...view.contentEl.querySelectorAll('.nb-ink-picker .nb-ink-menu-item')].map(b => b.textContent),
-            paper: view.contentEl.querySelector('.nb-ink-picker .nb-ink-paper').textContent };
+            paper: view.contentEl.querySelector('.nb-ink-picker .nb-ink-paper').textContent, label: view.contentEl.querySelector('.nb-ink-picker').getAttribute('aria-label'),
+            headings: [...view.contentEl.querySelectorAll('.nb-ink-picker .nb-ink-menu-heading')].map(e => e.textContent),
+            seps: view.contentEl.querySelectorAll('.nb-ink-picker .nb-ink-menu-sep').length,
+            button: [T.tb('.nb-ink-page-settings').getAttribute('aria-label'), T.tb('.nb-ink-page-settings').dataset.icon] };
           view.toolbar.closePicker();
           return { opened, after, customed, closedByWriting, disk, reopened, byEscape, byToggle, byTapElsewhere, hl, hlClosed, er, menu };
         }""")
@@ -2969,9 +2976,10 @@ try:
               and r['hl']['nibs'] == 0 and r['hl']['preview'] > 100, r['hl'])
         check('picker: switching tool closes the other tool\'s picker; the eraser\'s has sizes and mode',
               r['hlClosed'] is None and r['er'] == {'size': 14, 'mode': 'stroke', 'open': 'eraser'}, r)
-        check('picker: page settings lists the template choices and the paper size', r['menu']['kind'] == 'page'
-              and r['menu']['items'][:3] == ['Template of this page…', 'Template of all pages…', 'Add page with template…']
-              and r['menu']['paper'] == 'Paper size: Letter, 8.5 × 11 in', r['menu'])
+        check('picker: the Page menu (#71: "Page", a page icon) lists the template choices in groups with separators, and the paper size', r['menu']['kind'] == 'page'
+              and r['menu']['items'] == ['Template of this page…', 'Template of all pages…', "Save this page's background as a template…", 'Add page with template…', 'Export as PDF…']
+              and r['menu']['headings'] == ['Template', 'Add page', 'Export'] and r['menu']['seps'] == 3 and r['menu']['label'] == 'Page'
+              and r['menu']['button'] == ['Page', 'file-text'] and r['menu']['paper'] == 'Paper size: Letter, 8.5 × 11 in', r['menu'])
 
         # Add page from the toolbar, and page settings' template change.
         r = ev("""async () => {
@@ -3106,33 +3114,320 @@ try:
               r['warned'] >= 3 and r['parsed']['tools']['pen'] == {'tool': 'pen', 'nib': 'uniform', 'color': '#000000', 'size': 3}
               and r['parsed']['presets'] == [{'tool': 'pen', 'color': '#000000', 'size': 2, 'nib': 'uniform'}, None], r['parsed'])
 
-        # Portrait and landscape iPad widths: at most two rows, nothing cut off; the picker fits.
+        # ---- #71: the toolbar at a glance
+        # The pen and highlighter buttons in their colour with a size bar, the eraser's badge, the chevron.
+        r = ev("""async () => {
+          T.rgb = hex => `rgb(${parseInt(hex.slice(1, 3), 16)}, ${parseInt(hex.slice(3, 5), 16)}, ${parseInt(hex.slice(5, 7), 16)})`;
+          T.toolLook = t => { const b = T.tool(t), bar = b.querySelector('.nb-ink-tool-bar'), icon = b.querySelector(':scope > svg');
+            return { icon: icon && getComputedStyle(icon).color, bar: bar && getComputedStyle(bar).backgroundColor, w: bar && bar.offsetWidth,
+              badge: b.querySelector('.nb-ink-tool-badge')?.textContent ?? null, chevron: getComputedStyle(b.querySelector('.nb-ink-tool-chevron')).display, title: b.title }; };
+          view.setTool('pen');
+          view.setPen({ color: '#000000', size: 2.5, nib: 'uniform' });
+          const black = T.toolLook('pen');
+          view.setPen({ color: '#1e6fff', size: 4 });
+          const blue = T.toolLook('pen');
+          view.setPen({ size: 1 });
+          const thin = T.toolLook('pen');
+          view.setPen({ size: 16 });
+          const thick = T.toolLook('pen');
+          view.setHighlighter({ color: '#3ddc84', size: 18 });
+          const hl = T.toolLook('highlighter');
+          view.setEraser({ mode: 'partial' });
+          const part = T.toolLook('eraser');
+          view.setEraser({ mode: 'stroke' });
+          const whole = T.toolLook('eraser');
+          const chevrons = ['pen', 'highlighter', 'eraser', 'lasso'].map(t => T.toolLook(t).chevron);
+          view.setTool('eraser');
+          const chevronsEraser = ['pen', 'highlighter', 'eraser', 'lasso'].map(t => T.toolLook(t).chevron);
+          document.body.classList.add('theme-dark'); app.workspace.trigger('css-change');
+          view.setTool('pen');
+          view.setPen({ color: '#000000', size: 2.5 });
+          const dark = T.toolLook('pen');
+          document.body.classList.remove('theme-dark'); app.workspace.trigger('css-change');
+          view.setEraser({ mode: 'partial' });
+          return { black, blue, thin, thick, hl, part, whole, chevrons, chevronsEraser, dark, blueRgb: T.rgb('#1e6fff'), greenRgb: T.rgb('#3ddc84') };
+        }""")
+        print('toolbar at a glance:', r)
+        check('glance: the pen button is drawn in the pen\'s colour (icon and bar; default black in the theme\'s ink colour, light in dark mode)',
+              r['black']['icon'] == 'rgb(31, 31, 31)' and r['black']['bar'] == 'rgb(31, 31, 31)' and r['blue']['icon'] == r['blueRgb']
+              and r['blue']['bar'] == r['blueRgb'] and r['dark']['icon'] == 'rgb(230, 227, 222)' and 'Blue, 4 px' in r['blue']['title'], r)
+        check('glance: the bar under the pen grows with its size (1 < 4 < 16 px)', r['thin']['w'] < r['blue']['w'] < r['thick']['w'] and r['thick']['w'] <= 26, r)
+        check('glance: the highlighter button in its colour', r['hl']['icon'] == r['greenRgb'] and r['hl']['bar'] == r['greenRgb'], r['hl'])
+        check('glance: the eraser shows Part / Whole', r['part']['badge'] == 'Part' and r['whole']['badge'] == 'Whole', r)
+        check('glance: a chevron only on the active tool', r['chevrons'] == ['block', 'none', 'none', 'none'] and r['chevronsEraser'] == ['none', 'none', 'block', 'none'], r)
+
+        # The inline colours (#71): one tap; the highlighter's while it is in use; from the eraser, the pen.
+        r = ev("""async () => {
+          T.strip = () => [...T.bar().querySelectorAll('.nb-ink-inline-swatch')];
+          T.swatch = c => T.strip().find(b => b.dataset.color === c);
+          view.toolbar.closePicker();
+          view.setTool('pen');
+          view.setPen({ color: '#000000' });
+          const width = T.bar().clientWidth, shown = getComputedStyle(T.bar().querySelector('.nb-ink-inline-colors')).display;
+          const pen = T.strip().map(b => b.dataset.color);
+          T.swatch('#e0301e').click();
+          const red = { color: view.pen.color, picker: view.toolbar.pickerOpen, active: T.strip().filter(b => b.classList.contains('is-active')).map(b => b.dataset.color) };
+          view.setTool('highlighter');
+          const hlColors = T.strip().map(b => b.dataset.color);
+          T.swatch('#ff5fa2').click();
+          const pink = { hl: view.highlighter.color, pen: view.pen.color, tool: view.pen.tool };
+          view.setTool('eraser');
+          const eraserColors = T.strip().length;
+          T.swatch('#1f9d55').click();
+          const fromEraser = { tool: view.pen.tool, color: view.pen.color };
+          const stripX = [T.bar().querySelector('.nb-ink-tools'), T.bar().querySelector('.nb-ink-inline-colors'), T.bar().querySelector('.nb-ink-presets')].map(e => Math.round(e.getBoundingClientRect().left));
+          view.setPen({ color: '#000000' });
+          view.setHighlighter({ color: '#ffd400' });
+          return { width, shown, pen, red, hlColors, pink, eraserColors, fromEraser, stripX };
+        }""")
+        print('inline colours:', r)
+        check('strip: at 900 px the 8 pen colours sit in the toolbar between the tools and the favourites',
+              r['width'] >= 900 and r['shown'] == 'flex' and len(r['pen']) == 8 and r['pen'][0] == '#000000' and r['stripX'][0] < r['stripX'][1] < r['stripX'][2], r)
+        check('strip: one tap sets the pen colour, without opening the picker; the swatch is marked',
+              r['red'] == {'color': '#e0301e', 'picker': None, 'active': ['#e0301e']}, r['red'])
+        check('strip: with the highlighter in use it holds the 5 highlighter colours; a tap sets the highlighter\'s',
+              len(r['hlColors']) == 5 and r['hlColors'][0] == '#ffd400' and r['pink'] == {'hl': '#ff5fa2', 'pen': '#e0301e', 'tool': 'highlighter'}, r)
+        check('strip: from the eraser a pen colour switches to the pen with it', r['eraserColors'] == 8 and r['fromEraser'] == {'tool': 'pen', 'color': '#1f9d55'}, r)
+
+        # The size slider (#71): finger and Pencil taps and drags, the arrow keys, ticks, the value and the preview.
+        r = ev("""async () => {
+          view.setTool('pen');
+          view.setPen({ size: 2.5, color: '#000000' });
+          const picker = T.picker(), slider = picker.querySelector('.nb-ink-slider'), track = slider.querySelector('.nb-ink-slider-track');
+          const tr = track.getBoundingClientRect(), y = tr.top + tr.height / 2;
+          const xAt = s => tr.left + tr.width * Math.log(s / 0.5) / Math.log(32);
+          const fire = (type, x, pointerType, id) => slider.dispatchEvent(new PointerEvent(type, { pointerId: id, pointerType, isPrimary: true, clientX: x, clientY: y,
+            bubbles: true, cancelable: true, button: 0, buttons: type === 'pointerup' ? 0 : 1, pressure: type === 'pointerup' ? 0 : 0.4 }));
+          const out = { role: slider.getAttribute('role'), tabindex: slider.tabIndex, range: [slider.getAttribute('aria-valuemin'), slider.getAttribute('aria-valuemax')] };
+          const p0 = view.toolbar['picker'].previews;
+          // A finger tap at the 4 px mark.
+          fire('pointerdown', xAt(4), 'touch', 31); fire('pointerup', xAt(4), 'touch', 31);
+          out.finger = [view.pen.size, picker.querySelector('.nb-ink-size-value').textContent, slider.getAttribute('aria-valuetext'), view.toolbar.pickerOpen];
+          // A Pencil drag from 1 px to 8 px: every step on the 0.5 grid, rising.
+          const seen = [];
+          fire('pointerdown', xAt(1), 'pen', 32);
+          seen.push(view.pen.size);
+          for (let i = 1; i <= 20; i++) { fire('pointermove', xAt(1) + (xAt(8) - xAt(1)) * i / 20, 'pen', 32); seen.push(view.pen.size); }
+          fire('pointerup', xAt(8), 'pen', 32);
+          out.pencil = { first: seen[0], last: seen[seen.length - 1], grid: seen.every(s => s * 2 === Math.round(s * 2)), rising: seen.every((s, i) => !i || s >= seen[i - 1]) };
+          // A move after the lift does nothing.
+          fire('pointermove', xAt(2), 'pen', 32);
+          out.afterLift = view.pen.size;
+          // The thumb follows.
+          const th = slider.querySelector('.nb-ink-slider-thumb').getBoundingClientRect();
+          out.thumb = Math.abs(th.left + th.width / 2 - xAt(8));
+          // Keys: arrows 0.5 px, Page Up/Down four steps, Home/End the ends.
+          const key = k => slider.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
+          const keys = [];
+          for (const k of ['ArrowRight', 'ArrowUp', 'ArrowLeft', 'ArrowDown', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'ArrowLeft', 'End', 'ArrowRight']) { key(k); keys.push(view.pen.size); }
+          out.keys = keys;
+          // The quick sizes as ticks under their positions, tappable.
+          const ticks = [...picker.querySelectorAll('.nb-ink-slider-ticks .nb-ink-size')];
+          out.ticks = ticks.map(b => { const q = b.getBoundingClientRect(); return [Number(b.dataset.size), Math.round(Math.abs(q.left + q.width / 2 - xAt(Number(b.dataset.size))))]; });
+          const gaps = ticks.slice(1).map((b, i) => b.getBoundingClientRect().left - ticks[i].getBoundingClientRect().right);
+          out.overlap = Math.min(...gaps);
+          ticks[0].click();
+          out.tick = view.pen.size;
+          out.previews = view.toolbar['picker'].previews - p0;
+          // The Pencil on the slider and its ticks is never blocked (#53).
+          out.pencilBlocked = [slider, slider.querySelector('.nb-ink-slider-thumb'), ticks[1]].flatMap(el => [T.touch(el, 'touchstart', 'stylus'), T.touch(el, 'touchmove', 'stylus')]);
+          out.keepsOpen = view.toolbar.pickerOpen;
+          // The highlighter's: 4 to 48.
+          view.toolbar.closePicker();
+          view.setTool('highlighter');
+          const hp = T.picker(), hs = hp.querySelector('.nb-ink-slider');
+          hs.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }));
+          const hEnd = view.highlighter.size;
+          hs.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true }));
+          const hHome = view.highlighter.size;
+          hs.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+          out.hl = [hEnd, hHome, view.highlighter.size, [...hp.querySelectorAll('.nb-ink-slider-ticks .nb-ink-hl-size')].map(b => Number(b.dataset.size))];
+          view.setHighlighter({ size: 18 });
+          view.toolbar.closePicker();
+          view.setTool('pen');
+          view.setPen({ size: 2.5 });
+          return out;
+        }""")
+        print('size slider:', r)
+        check('slider: a focusable role=slider over the pen\'s range', r['role'] == 'slider' and r['tabindex'] == 0 and r['range'] == ['0.5', '16'], r)
+        check('slider: a finger tap at a size sets it; the value label and aria-valuetext follow; the picker stays open',
+              r['finger'] == [4, '4 px', '4 px', 'pen'], r['finger'])
+        check('slider: a Pencil drag moves through 0.5 px steps (1 to 8 px) and stops at the lift; the thumb follows',
+              r['pencil'] == {'first': 1, 'last': 8, 'grid': True, 'rising': True} and r['afterLift'] == 8 and r['thumb'] < 1.5, r)
+        check('slider: arrow keys step 0.5 px, Page Up/Down 2 px, Home/End go to 0.5 and 16 px',
+              r['keys'] == [8.5, 9, 8.5, 8, 7.5, 9.5, 7.5, 0.5, 0.5, 16, 16], r['keys'])
+        check('slider: the quick sizes are ticks under their positions, apart, and a tap sets one',
+              [t[0] for t in r['ticks']] == [1.5, 2.5, 4] and all(t[1] <= 1 for t in r['ticks']) and r['overlap'] >= -1 and r['tick'] == 1.5, r)
+        check('slider: the preview is redrawn on every change', r['previews'] >= 15, r['previews'])
+        check('slider: the Pencil on the slider and its ticks is not prevented (#53)', r['pencilBlocked'] == [False] * 6 and r['keepsOpen'] == 'pen', r)
+        check('slider: the highlighter\'s runs 4 to 48 px, ticks 14 and 24', r['hl'] == [48, 4, 4.5, [14, 24]], r['hl'])
+
+        # One row at the iPad widths (768, 1024) and at 1366, in light and dark; the page actions fold into "..." (more) when they don't fit.
         fits = {}
-        for name, w, h in (('portrait', 768, 1024), ('landscape', 1024, 768)):
+        for w, h in ((768, 1024), (1024, 768), (1366, 1024)):
             page.set_viewport_size({'width': w, 'height': h})
             # The view as wide as the iPad screen (sidebars closed), less Obsidian's own bars in height.
             ev(f"() => {{ const s = document.getElementById('leaf').style; s.width = '{w}px'; s.height = '{h - 120}px'; s.boxSizing = 'border-box'; }}")
             page.wait_for_timeout(300)
-            fits[name] = ev("""async () => {
-              const bar = T.bar(), r = bar.getBoundingClientRect(), buttons = [...bar.querySelectorAll('button')];
+            fits[w] = ev("""async () => {
+              const bar = T.bar(), r = bar.getBoundingClientRect(), buttons = [...bar.querySelectorAll('button')].filter(b => b.offsetParent !== null);
               const rows = new Set(buttons.map(b => Math.round(b.getBoundingClientRect().top))).size;
               const inside = buttons.every(b => { const q = b.getBoundingClientRect(); return q.left >= r.left - 0.5 && q.right <= r.right + 0.5; });
+              const shown = sel => { const e = T.tb(sel); return !!e && e.offsetParent !== null; };
+              const out = { width: Math.round(r.width), height: Math.round(r.height), rows, inside, scroll: bar.scrollWidth <= bar.clientWidth, layout: { ...view.toolbar.layout },
+                undo: shown('.nb-ink-undo') && shown('.nb-ink-redo'), more: shown('.nb-ink-more'), strip: shown('.nb-ink-inline-swatch'),
+                pageActions: ['.nb-ink-add-page', '.nb-ink-page-settings', '.nb-ink-import', '.nb-ink-pages-toggle', '.nb-ink-page-indicator'].map(shown),
+                labels: [...bar.querySelectorAll('.nb-ink-button-label')].filter(e => e.offsetParent !== null).map(e => e.textContent) };
               T.tool(view.pen.tool).click();
               const p = view.contentEl.querySelector('.nb-ink-picker').getBoundingClientRect(), c = view.contentEl.getBoundingClientRect();
-              const picker = p.left >= c.left && p.right <= c.right;
-              return { width: Math.round(r.width), height: Math.round(r.height), rows, inside, scroll: bar.scrollWidth <= bar.clientWidth, picker };
+              out.picker = p.left >= c.left && p.right <= c.right;
+              view.toolbar.closePicker();
+              return out;
             }""")
-            page.locator('.nb-ink-toolbar').screenshot(path=os.path.join(OUT, f'toolbar_{name}.png'))
-            page.locator('#leaf').screenshot(path=os.path.join(OUT, f'toolbar_{name}_view.png'))
-            ev("() => view.toolbar.closePicker()")
+            for theme in ('light', 'dark'):
+                if theme == 'dark':
+                    ev("() => { document.body.classList.add('theme-dark'); app.workspace.trigger('css-change'); }")
+                    page.wait_for_timeout(100)
+                page.locator('.nb-ink-toolbar').screenshot(path=os.path.join(OUT, f'toolbar_{w}_{theme}.png'))
+            ev("() => { document.body.classList.remove('theme-dark'); app.workspace.trigger('css-change'); }")
+            page.locator('#leaf').screenshot(path=os.path.join(OUT, f'toolbar_{w}_view.png'))
+            if w != 1366:
+                # Every folded action through "..." (more): Add page, Page…, Import…, Pages panel, Go to page.
+                fits[w]['menu'] = ev("""async () => {
+                  const more = T.tb('.nb-ink-more'), out = {};
+                  const open = () => { if (view.toolbar.pickerOpen !== 'more') more.click(); return view.contentEl.querySelector('.nb-ink-picker'); };
+                  const item = cls => open().querySelector('.nb-ink-' + cls);
+                  let pk = open();
+                  out.items = [...pk.querySelectorAll('.nb-ink-menu-item')].map(b => b.textContent);
+                  out.expanded = more.getAttribute('aria-expanded');
+                  out.below = pk.getBoundingClientRect().top >= T.bar().getBoundingClientRect().bottom;
+                  out.pencil = [pk, ...pk.querySelectorAll("button")].some(el => T.touch(el, "touchstart", "stylus") || T.touch(el, "touchmove", "stylus"));
+                  const n0 = view.store.slots.length;
+                  item('more-add-page').click();
+                  await T.sleep(50);
+                  out.added = [view.store.slots.length - n0, view.toolbar.pickerOpen];
+                  view.undo();
+                  await T.sleep(50);
+                  item('more-page').click();
+                  out.page = [view.toolbar.pickerOpen, view.contentEl.querySelector('.nb-ink-picker').querySelectorAll('.nb-ink-menu-page-template').length,
+                    T.tb('.nb-ink-page-settings').getAttribute('aria-expanded'), more.getAttribute('aria-expanded')];
+                  more.click();
+                  out.closedByMore = view.toolbar.pickerOpen;
+                  item('more-import').click();
+                  out.import = [view.toolbar.pickerOpen, view.contentEl.querySelectorAll('.nb-ink-picker .nb-ink-menu-item').length];
+                  view.toolbar.closePicker();
+                  const was = view.pagesPanelOpen;
+                  item('more-pages').click();
+                  out.pages = [view.pagesPanelOpen !== was, open().querySelector('.nb-ink-more-pages').getAttribute('aria-pressed')];
+                  view.toolbar.closePicker();
+                  view.togglePagesPanel(was);
+                  const m0 = modals.length;
+                  item('more-go-to').click();
+                  out.goTo = [modals.length - m0, modals.length ? modals[modals.length - 1].titleEl.textContent : null];
+                  if (modals.length > m0) modals[modals.length - 1].close();
+                  // The toolbar's page buttons, tapped (as tests and commands do) while folded, hang their menus from "..." (more).
+                  T.tb('.nb-ink-import').click();
+                  const pr = view.contentEl.querySelector('.nb-ink-picker').getBoundingClientRect();
+                  out.anchored = [view.toolbar.pickerOpen, Math.round(pr.right) <= Math.round(view.contentEl.getBoundingClientRect().right), T.tb('.nb-ink-import').getAttribute('aria-expanded')];
+                  view.toolbar.closePicker();
+                  return out;
+                }""")
         page.set_viewport_size({'width': 1000, 'height': 700})
         ev("() => { const s = document.getElementById('leaf').style; s.width = s.height = s.boxSizing = ''; }")
         page.wait_for_timeout(200)
         print('toolbar fits:', fits)
-        for name in ('portrait', 'landscape'):
-            f = fits[name]
-            check(f'toolbar: fits the iPad {name} width in at most two rows, no overflow; the picker inside the view',
-                  f['width'] <= (768 if name == 'portrait' else 1024) and f['rows'] <= 2 and f['inside'] and f['scroll'] and f['picker'], f)
+        for w in (768, 1024, 1366):
+            f = fits[w]
+            check(f'toolbar: one row at {w} px, nothing cut off or scrolling sideways; undo and redo shown; the picker inside the view',
+                  f['width'] <= w and f['rows'] == 1 and f['height'] < 56 and f['inside'] and f['scroll'] and f['undo'] and f['picker'], f)
+        check('toolbar: at 768 px no colour strip; the page actions fold into "..." (more)',
+              not fits[768]['strip'] and fits[768]['more'] and fits[768]['pageActions'] == [False] * 5, fits[768])
+        check('toolbar: at 1024 px the colour strip is shown and the page actions fold into "..." (more)',
+              fits[1024]['strip'] and fits[1024]['more'] and fits[1024]['pageActions'] == [False] * 5, fits[1024])
+        check('toolbar: at 1366 px everything is shown, "Page" and "Import" labelled, no "..." (more)',
+              fits[1366]['strip'] and not fits[1366]['more'] and fits[1366]['pageActions'] == [True] * 5 and fits[1366]['labels'] == ['Page', 'Import'], fits[1366])
+        for w in (768, 1024):
+            m = fits[w]['menu']
+            check(f'overflow ({w} px): "..." (more) lists Add page, Page…, Import…, Pages panel and Go to page, under the toolbar; the Pencil reaches every entry',
+                  m['items'][:4] == ['Add page', 'Page…', 'Import…', 'Pages panel'] and m['items'][4].startswith('Go to page… (') and m['expanded'] == 'true'
+                  and m['below'] and m['pencil'] is False, m)
+            check(f'overflow ({w} px): each entry works: a page added (menu closed), the Page and Import menus from "..." (more), the Pages panel toggled, Go to page asks',
+                  m['added'] == [1, None] and m['page'] == ['page', 1, 'true', 'true'] and m['closedByMore'] is None and m['import'] == ['import', 6]
+                  and m['pages'][0] and m['goTo'] == [1, 'Go to page'] and m['anchored'] == ['import', True, 'true'], m)
+
+        # The first-run hint (#71): under the toolbar until dismissed, then never again; the Pages panel sits below it.
+        r = ev("""async () => {
+          // A view opened now (a new tab) shows it; the views already open don't.
+          const old = view, oldLeaf = view.leaf;
+          const openTab = async () => {
+            const leaf = app.workspace.getLeaf('tab');
+            await leaf.setViewState({ type: 'notebook-ink', state: { file: 'Toolbar.md' }, active: true });
+            app.workspace.revealLeaf(leaf);
+            await T.sleep(150);
+            window.view = leaf.view;
+            return leaf;
+          };
+          const probe = await openTab(), host = probe.view.settingsHost;  // the plugin instance that makes new views (a later loadPlugin may have taken over)
+          await probe.detach();
+          host.settings.hintsShown = false;
+          const leaf = await openTab();
+          const v = leaf.view, q = sel => v.contentEl.querySelector(sel);
+          const hint = q('.nb-ink-hint'), bar = q('.nb-ink-toolbar').getBoundingClientRect(), hr = hint && hint.getBoundingClientRect();
+          const out = { text: hint && hint.querySelector('.nb-ink-hint-text').textContent, under: !!hint && Math.abs(hr.top - bar.bottom) < 1.5,
+            pagesBelow: !!hr && q('.nb-ink-scroll').getBoundingClientRect().top >= hr.bottom - 0.5,
+            pencil: hint ? [hint, hint.querySelector('button')].map(el => T.touch(el, 'touchstart', 'stylus')) : null };
+          if (hint) {
+            v.togglePagesPanel(true);
+            await T.sleep(50);
+            out.panelBelowHint = Math.abs(q('.nb-pages-panel').getBoundingClientRect().top - hr.bottom) < 1.5;
+            hint.querySelector('.nb-ink-hint-close').click();
+            await T.sleep(50);
+            out.gone = !q('.nb-ink-hint');
+            out.panelUp = Math.abs(q('.nb-pages-panel').getBoundingClientRect().top - q('.nb-ink-toolbar').getBoundingClientRect().bottom) < 1.5;
+            v.togglePagesPanel(false);
+          }
+          out.setting = host.settings.hintsShown;
+          await T.sleep(50);
+          out.saved = pluginData.hintsShown;
+          const leaf2 = await openTab();
+          out.again = !!leaf2.view.contentEl.querySelector('.nb-ink-hint');
+          await leaf2.detach();
+          await leaf.detach();
+          app.workspace.revealLeaf(oldLeaf);
+          window.view = old;
+          await T.sleep(100);
+          return out;
+        }""")
+        print('hint:', r)
+        check('hint: shown under the toolbar with the issue\'s text, above the pages; the Pencil reaches it',
+              r['text'] == 'Tap a tool to use it, tap it again for colours and sizes. Fingers scroll and zoom; the Pencil writes.'
+              and r['under'] and r['pagesBelow'] and r['pencil'] == [False, False], r)
+        check('hint: the Pages panel opens below it, and moves up when it is dismissed', r.get('panelBelowHint') and r.get('panelUp'), r)
+        check('hint: dismissed, it is gone, saved (hintsShown) and not shown in the next view', r.get('gone') and r['setting'] is True and r['saved'] is True and not r['again'], r)
+
+        # "Toolbar size": Compact (36 px) / Comfortable (44 px), from the settings tab, applied to the open view.
+        r = ev("""async () => {
+          const tab = p.settingTabs[0];
+          tab.display();
+          document.body.appendChild(tab.containerEl);
+          const sel = [...tab.containerEl.querySelectorAll('select')].find(s => [...s.options].map(o => o.value).join() === 'compact,comfortable');
+          const out = { found: !!sel, initial: sel && sel.value, before: T.tool('pen').offsetHeight };
+          sel.value = 'compact';
+          sel.dispatchEvent(new Event('change'));
+          await T.sleep(50);
+          out.compact = [p.settings.toolbarSize, T.tool('pen').offsetWidth, T.tool('pen').offsetHeight, T.tb('.nb-ink-undo').offsetWidth, T.bar().offsetHeight, pluginData.toolbarSize];
+          out.compactLayout = { ...view.toolbar.layout };
+          sel.value = 'comfortable';
+          sel.dispatchEvent(new Event('change'));
+          await T.sleep(50);
+          out.comfortable = [p.settings.toolbarSize, T.tool('pen').offsetWidth, T.tool('pen').offsetHeight];
+          tab.containerEl.remove();
+          return out;
+        }""")
+        print('toolbar size:', r)
+        check('toolbar size: the setting (Compact / Comfortable, comfortable by default) resizes the open toolbar\'s buttons to 36 or 44 px',
+              r['found'] and r['initial'] == 'comfortable' and r['before'] == 44 and r['compact'][:4] == ['compact', 36, 36, 36] and r['compact'][4] < 48
+              and r['compact'][5] == 'compact' and r['comfortable'] == ['comfortable', 44, 44], r)
 
         # Pencil taps on the toolbar and the picker still register (touchstart not prevented).
         r = ev("""() => {
@@ -4924,7 +5219,7 @@ try:
             if (!el.closest(T.CONTROL)) bad.push([name, 'not marked as a control']);
             return bad;
           });
-          T.interactive = root => [...root.querySelectorAll('button, input, select, textarea, a, label, canvas.nb-ink-preview, .nb-pages-thumb, .suggestion-item')];
+          T.interactive = root => [...root.querySelectorAll('button, input, select, textarea, a, label, canvas.nb-ink-preview, .nb-pages-thumb, .suggestion-item, .nb-ink-slider, .nb-ink-slider-thumb, .nb-ink-hint')];
           T.strokeCount = () => view.store.slots.reduce((n, s) => n + view.store.page(s).strokes.length, 0);
           await p.createInkNote('Controls', '', 'letter', 'blank');
           await T.sleep(150);
@@ -4983,13 +5278,27 @@ try:
           const base = T.interactive(view.contentEl).filter(el => el.offsetParent !== null);
           out.base = { n: base.length, bad: T.audit(base),
             kinds: { toolbar: base.filter(el => T.bar().contains(el)).length, panel: base.filter(el => T.panel().contains(el)).length,
-              footer: base.filter(el => el.closest('.nb-ink-footer')).length, ruler: base.filter(el => el.closest('.nb-ink-ruler-layer')).length } };
+              footer: base.filter(el => el.closest('.nb-ink-footer')).length, ruler: base.filter(el => el.closest('.nb-ink-ruler-layer')).length },
+            shown: [...T.bar().querySelectorAll('button')].filter(el => el.offsetParent !== null).length };
+          // #71: the toolbar at each width it changes layout at (strip, labels, "..." (more)): every shown button takes the Pencil.
+          const leaf = document.getElementById('leaf').style;
+          out.widths = {};
+          for (const w of [768, 1024, 1366]) {
+            leaf.width = `${w}px`; leaf.boxSizing = 'border-box';
+            await T.sleep(100);
+            const shown = T.interactive(T.bar()).filter(el => el.offsetParent !== null);
+            out.widths[w] = { n: shown.length, bad: T.audit(shown), layout: { ...view.toolbar.layout },
+              more: shown.some(el => el.classList.contains('nb-ink-more')), swatches: shown.filter(el => el.classList.contains('nb-ink-inline-swatch')).length };
+          }
+          leaf.width = leaf.boxSizing = '';
+          await T.sleep(100);
           const pickers = {};
-          for (const [tool, open] of [['pen', 'pen'], ['highlighter', 'highlighter'], ['eraser', 'eraser'], ['lasso', 'lasso'], ['pen', 'page'], ['pen', 'import']]) {
+          for (const [tool, open] of [['pen', 'pen'], ['highlighter', 'highlighter'], ['eraser', 'eraser'], ['lasso', 'lasso'], ['pen', 'page'], ['pen', 'import'], ['pen', 'more']]) {
             view.setTool(tool);
-            if (open === 'page') T.tb('.nb-ink-page-settings').click(); else if (open === 'import') T.tb('.nb-ink-import').click(); else T.picker();
+            if (open === 'page') T.tb('.nb-ink-page-settings').click(); else if (open === 'import') T.tb('.nb-ink-import').click();
+            else if (open === 'more') T.tb('.nb-ink-more').click(); else T.picker();
             const picker = view.contentEl.querySelector('.nb-ink-picker'), els = T.interactive(picker);
-            pickers[open] = { n: els.length, bad: T.audit([picker, ...els]), kind: view.toolbar.pickerOpen };
+            pickers[open] = { n: els.length, bad: T.audit([picker, ...els]), kind: view.toolbar.pickerOpen, slider: !!picker.querySelector('.nb-ink-slider[role="slider"]') };
             view.toolbar.closePicker();
           }
           out.pickers = pickers;
@@ -5011,13 +5320,18 @@ try:
           if (input) input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
           return out;
         }""")
-        print('controls audit:', {'base': r['base']['n'], 'kinds': r['base']['kinds'], 'pickers': {k: v['n'] for k, v in r['pickers'].items()}, 'selmenu': r['selmenu']['n']})
-        check('controls audit: toolbar, preset slots, Pages panel thumbnails and buttons, footer and ruler label: Pencil never prevented, all marked',
-              r['base']['n'] >= 24 and r['base']['bad'] == [] and r['base']['kinds']['toolbar'] == 17 and r['base']['kinds']['panel'] >= 6
+        print('controls audit:', {'base': r['base']['n'], 'kinds': r['base']['kinds'], 'pickers': {k: v['n'] for k, v in r['pickers'].items()}, 'selmenu': r['selmenu']['n'],
+                                  'widths': {k: (v['n'], v['layout']) for k, v in r['widths'].items()}})
+        check('controls audit: toolbar (with the inline colours and "..." (more), #71), preset slots, Pages panel thumbnails and buttons, footer and ruler label: Pencil never prevented, all marked',
+              r['base']['n'] >= 24 and r['base']['bad'] == [] and r['base']['kinds']['toolbar'] == r['base']['shown'] >= 13 and r['base']['kinds']['panel'] >= 6
               and r['base']['kinds']['footer'] == 2 and r['base']['kinds']['ruler'] == 1, r['base'])
-        check('controls audit: every picker (pen with the ruler row, highlighter, eraser, lasso, page settings, Import #54): Pencil never prevented, all marked',
-              all(v['bad'] == [] and v['n'] >= 1 and v['kind'] == k for k, v in r['pickers'].items()) and r['pickers']['pen']['n'] >= 20
-              and r['pickers']['import']['n'] == 6, r['pickers'])
+        wd = r['widths']
+        check('controls audit (#71): the toolbar at 768, 1024 and 1366 px: every shown control takes the Pencil; "..." (more) when folded, the colours from 900 px',
+              all(v['bad'] == [] for v in wd.values()) and wd['768']['more'] and wd['768']['swatches'] == 0 and wd['1024']['more'] and wd['1024']['swatches'] == 8
+              and not wd['1366']['more'] and wd['1366']['swatches'] == 8 and wd['768']['n'] == 13 and wd['1024']['n'] == 21 and wd['1366']['n'] == 25, wd)
+        check('controls audit: every picker (pen with the slider and the ruler row, highlighter, eraser, lasso, Page, Import #54, "..." (more) #71): Pencil never prevented, all marked',
+              all(v['bad'] == [] and v['n'] >= 1 and v['kind'] == k for k, v in r['pickers'].items()) and r['pickers']['pen']['n'] >= 20 and r['pickers']['pen']['slider']
+              and r['pickers']['highlighter']['slider'] and r['pickers']['import']['n'] == 6 and r['pickers']['more']['n'] == 5, r['pickers'])
         check('controls audit: the selection menu (outside the scroller): Pencil never prevented, all marked',
               r['selmenu']['shown'] and not r['selmenu']['inScroller'] and r['selmenu']['n'] >= 12 and r['selmenu']['bad'] == [], r['selmenu'])
         check('controls audit: the ruler label (inside the scroller) opens its input on a Pencil tap and the input takes focus; no stroke',

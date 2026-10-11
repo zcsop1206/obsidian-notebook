@@ -633,10 +633,10 @@
   top: 2px;
   left: calc(11px + var(--nb-u, 0) * (100% - 22px));
   transform: translateX(-50%);
-  min-width: 26px;
+  min-width: 22px;
   min-height: 0;
   height: 22px;
-  padding: 0 3px;
+  padding: 0 2px;
   font-size: var(--font-ui-smaller, 12px);
   font-variant-numeric: tabular-nums;
 }

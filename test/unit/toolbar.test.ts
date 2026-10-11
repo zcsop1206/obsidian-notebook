@@ -168,7 +168,7 @@ test('toolbar layout: the colour strip from 900 px; labels drop first, then the 
     { strip: true, collapsed: false, labels: true }, { strip: true, collapsed: false, labels: false }, { strip: true, collapsed: true, labels: false },
     { strip: false, collapsed: true, labels: false },
   ]);
-  for (const w of [320, 768, 900, 1024, 1366]) assert.ok(toolbarLayouts(w).at(-1)!.collapsed, String(w)); // the last resort folds
+  for (const w of [320, 768, 900, 1024, 1366]) assert.ok(toolbarLayouts(w).slice(-1)[0].collapsed, String(w)); // the last resort folds
 });
 
 test('toolbar: the size bar grows with the size over each tool\'s range and fits a compact button', () => {
