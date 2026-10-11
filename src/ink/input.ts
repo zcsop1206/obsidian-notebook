@@ -43,7 +43,12 @@
 // join inside the line; see piece). Per-frame work is therefore bounded by LIVE_MAX + OVERLAP points
 // however long the stroke. On release the
 // stroke goes to the host, which draws its outline (refitted, as the file has it) into the
-// page bitmap, and both overlays are cleared: that swap is the stroke settling.
+// page bitmap, and both overlays are cleared: that swap is the stroke settling. The uniform
+// pen's tunables (#69) come with the stroke's style: LiveFit stabilises and refits with the
+// stroke's own settings (liveFit), and a tapered stroke's live pieces taper the stroke's start
+// (the first piece) and its current end (the tail), as strokeGeometry does for the whole. A
+// dashed or dotted stroke (#70) is drawn whole each frame (see draw), so its pattern runs from its
+// start as the committed stroke's does.
 //
 // The highlighter (#6) is drawn translucent, at HIGHLIGHT_ALPHA like the page's highlight layer,
 // but composited once so that its frozen head and its tail (and the stroke where it crosses
@@ -82,7 +87,7 @@
 // canvas hidden, the shape drawn translucent on the tail canvas) until the pen lifts, when it
 // is given to the host's commitShape with the freehand stroke; moving more than HOLD_SLOP
 // again drops it and the freehand stroke is drawn again, its points continuing.
-import { isStroked, LiveFit, outlinePath, refitStep, strokePath } from '../format/outline';
+import { isStroked, liveFit, LiveFit, outlinePath, strokeGeometry, strokePath, type StrokeGeometry, type TaperEnds } from '../format/outline';
 import { roundP, roundXY, type HighlighterStroke, type PenStroke, type Point, type Size } from '../format/page';
 import { fmt, median, yn } from '../debug/util';
 import type { EraserMode, EraserSettings, PenSettings } from './pen';
@@ -555,6 +560,9 @@ interface Lassoing {
 
 type Listen = <K extends keyof HTMLElementEventMap>(type: K, fn: (e: HTMLElementEventMap[K]) => void, options?: AddEventListenerOptions) => void;
 
+/** A live stroke's tapered ends (#69) as a Path2D to fill, or null. */
+const endsPath = (g: StrokeGeometry) => (g.ends ? new Path2D(g.ends) : null);
+
 function overlay(cls: string): [HTMLCanvasElement, CanvasRenderingContext2D] {
   const c = document.createElement('canvas');
   c.className = `nb-ink-live ${cls}`;
@@ -652,7 +660,7 @@ export class PenInput {
     map.edge = this.rulerEdge(target, map, e);
     const live: Live = this.live = {
       pointerId: e.pointerId, pointerType: e.pointerType, target, map, pen,
-      style, color: this.host.drawColor(style.color), trace: newTrace(), fit: new LiveFit(refitStep(style)), predicted: [], frozen: 0, pieces: 0,
+      style, color: this.host.drawColor(style.color), trace: newTrace(), fit: liveFit(style), predicted: [], frozen: 0, pieces: 0,
       events: 0, handler: [], frames: [], maxPredicted: 0, tailBox: null, head: false,
       hold: null, len: 0, lenCount: 1, shape: null,
     };
@@ -754,6 +762,10 @@ export class PenInput {
     // Only points that no longer change are frozen (the refit's last 1.5 px still move), with
     // the pen's context after them (see piece).
     if (plan.freeze && pen && this.contextEnd(live, plan.frozen, count) > live.fit.settled) plan = livePlan(live.frozen, live.frozen);
+    // A dashed or dotted line (#70) is drawn whole every frame, never in frozen pieces: each piece
+    // would start the dash pattern again. Its cost grows with its length (a refit point every
+    // 0.6 to 1 px; a 1,000 px construction line is about 1,000 points), unlike a solid stroke's.
+    if (plan.freeze && live.style.tool === 'pen' && live.style.dash) plan = livePlan(live.frozen, live.frozen);
     if (plan.freeze) {
       if (pen) this.piece(this.headCtx, live, live.frozen, plan.frozen, count);
       else this.fill(this.headCtx, live, this.drawn(live, plan.freeze[0], plan.freeze[1]));
@@ -857,11 +869,11 @@ export class PenInput {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, c.width, c.height);
     ctx.restore();
-    const d = strokePath({ ...live.style, points: shape.points }, true);
+    const g = strokeGeometry({ ...live.style, points: shape.points }, true), d = g.d;
     if (d) {
       ctx.save();
       ctx.globalAlpha = (live.style.tool === 'highlighter' ? HIGHLIGHT_ALPHA : 1) * SHAPE_PREVIEW_ALPHA;
-      paintPath(ctx, live.style, canvasPath(live.style, d), live.color);
+      paintPath(ctx, live.style, canvasPath(live.style, d), live.color, endsPath(g));
       ctx.restore();
     }
     this.livePath = d;
@@ -879,10 +891,12 @@ export class PenInput {
    * (the pressure nib) is computed over the piece plus SEAM_CONTEXT of points on each side (of
    * arc length), where it has converged to the whole's, and drawn clipped to the piece's own
    * neighbourhood: a wider outline of the piece's points alone. Returns the path `d` drawn.
+   * A tapered stroke (#69) tapers the first piece's start and the last piece's end only.
    */
   private piece(ctx: CanvasRenderingContext2D, live: Live, from: number, to: number, count: number, extra: Point[] = []): string {
     const a = this.contextStart(live, from), b = this.contextEnd(live, to, count);
-    const d = strokePath({ ...live.style, points: this.drawn(live, a, b).concat(extra) }, true);
+    const ends: TaperEnds = a === 0 ? (b >= count ? 'both' : 'head') : (b >= count ? 'tail' : 'none');
+    const g = strokeGeometry({ ...live.style, points: this.drawn(live, a, b).concat(extra) }, true, ends), d = g.d;
     if (!d) return d;
     const size = live.style.size;
     ctx.save();
@@ -890,7 +904,7 @@ export class PenInput {
       const own = this.drawn(live, from, to).concat(extra);
       ctx.clip(new Path2D(outlinePath({ tool: 'pen', nib: 'uniform', size: size * 1.5 + 2, points: own }, true)));
     }
-    paintPath(ctx, live.style, canvasPath(live.style, d), live.color);
+    paintPath(ctx, live.style, canvasPath(live.style, d), live.color, endsPath(g));
     ctx.restore();
     return d;
   }
@@ -924,8 +938,8 @@ export class PenInput {
 
   /** Draws the path of these points in the stroke's settings (filled, or stroked, #60); returns the path `d`. */
   private fill(ctx: CanvasRenderingContext2D, live: Live, points: Point[]): string {
-    const d = strokePath({ ...live.style, points }, true);
-    if (d) paintPath(ctx, live.style, canvasPath(live.style, d), live.color);
+    const g = strokeGeometry({ ...live.style, points }, true), d = g.d;
+    if (d) paintPath(ctx, live.style, canvasPath(live.style, d), live.color, endsPath(g));
     return d;
   }
 

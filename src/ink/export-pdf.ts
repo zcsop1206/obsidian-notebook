@@ -6,7 +6,10 @@
 // darken), then the pen strokes. A stroke is its saved path (strokePath, quadratics converted
 // exactly to cubic Béziers): a uniform pen stroke (#60) its refitted centreline, stroked `size`
 // wide with round caps and joins (`w`, `1 J`, `1 j`, `S`); a pressure pen stroke its refitted
-// outline and a highlighter stroke its polygon, filled with the nonzero rule.
+// outline and a highlighter stroke its polygon, filled with the nonzero rule. A tapered uniform
+// stroke (#69) is its stroked middle and then its ends filled, as its SVG group draws it. A dashed
+// or dotted stroke (#70) is stroked with its dash pattern (`[a b] 0 d`, dashArray in page px,
+// like the line width), then the dash is set back to solid (`[] 0 d`).
 //
 // Images: a JPEG is embedded as it is (DCTDecode). A PNG is decoded through a canvas and
 // re-encoded as JPEG over white, so its transparency is lost (a limitation; an SMask would keep
@@ -17,7 +20,7 @@
 // iPad also offered to the share sheet (navigator.share with a File) where it takes files. This
 // module takes Obsidian's Notice and Platform through ExportEnv, so its pure parts are unit-tested.
 import type { Vault } from 'obsidian';
-import { isStroked, strokePath } from '../format/outline';
+import { dashArray, isStroked, strokeGeometry } from '../format/outline';
 import { DEFAULT_INK, type Page, type Size, type Stroke } from '../format/page';
 import { deflate, num, PdfWriter, type Content, type Resources } from '../format/pdf-writer';
 import { FIRST_LINE, GRID_SPACING, MARGIN_COLOR, MARGIN_X, RULE_SPACING, type Template } from '../format/template';
@@ -187,12 +190,17 @@ export function templateOps(template: Template, size: Size): string {
 /**
  * A stroke in page px, in its colour ('' if it has no path): a stroked centreline (the uniform
  * pen, #60) as its path stroked `size` wide with round caps and joins, else its outline filled.
+ * A tapered stroke's ends (#69) are filled after its middle is stroked.
  */
 export function strokeOps(s: Stroke): string {
-  const ops = pathOps(strokePath(s));
+  const g = strokeGeometry(s), ops = pathOps(g.d);
   if (!ops) return '';
   const color = pdfColor(s.color === DEFAULT_INK ? EXPORT_INK : s.color);
-  if (isStroked(s)) return `${color} RG ${num(s.size)} w 1 J 1 j\n${ops}\nS\n`;
+  if (isStroked(s)) {
+    const ends = g.ends ? pathOps(g.ends) : '', dash = dashArray(s);
+    if (dash) return `${color} RG ${num(s.size)} w 1 J 1 j [${dash.map(num).join(' ')}] 0 d\n${ops}\nS\n[] 0 d\n`;
+    return `${color} RG ${num(s.size)} w 1 J 1 j\n${ops}\nS\n` + (ends ? `${color} rg\n${ends}\nf\n` : '');
+  }
   return `${color} rg\n${ops}\nf\n`;
 }
 

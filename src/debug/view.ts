@@ -2,7 +2,9 @@
  * The ink debug view: the spike's pen and audio test, moved over as-is. A graph-paper canvas
  * with Clear, Save page and Record, and a readout of Apple Pencil measurements (sample rate,
  * pressure, tilt, coalesced and predicted events, handler delay). Save page writes an SVG and
- * the measurements under _spike/.
+ * the measurements under _spike/. "Pen lab" (#69) shows the pen lab instead of the canvas: one
+ * recorded word written with each of the uniform pen's advanced settings, at 100% and 400%
+ * (pen-lab.ts).
  */
 import { ItemView, Notice } from 'obsidian';
 import type { WorkspaceLeaf } from 'obsidian';
@@ -11,6 +13,9 @@ import { navStatsLines, type NavStats } from '../ink/navigate';
 import type { Recorder } from './recorder';
 import { type InkStroke, toSvg, width } from './ink-svg';
 import { ROOT, appendText, ensureDir, fmt, kb, median, mmss, stamp, yn } from './util';
+import { PenLab } from './pen-lab';
+import type { PenTuning } from '../ink/pen';
+import { currentTheme } from '../ink/renderer';
 
 export const VIEW_TYPE_DEBUG = 'notebook-debug';
 
@@ -21,6 +26,10 @@ interface DebugHost {
   inkPenStats(): PenStats | null;
   /** The latest ink view's navigation stats (zoom, finger gesture frame times). */
   inkNavStats(): NavStats | null;
+  /** The settings the pen lab starts from (#69). */
+  settings: { advancedPen: PenTuning; tools: { pen: { size: number } } };
+  /** CSS px per page px of an open ink view at 100% (#69), or null. */
+  inkFitScale(): number | null;
 }
 
 /** A stroke while it is drawn, with the counters the readout needs. */
@@ -69,6 +78,8 @@ export class DebugView extends ItemView {
   rect!: DOMRect;
   color = '';
   size!: { w: number; h: number };
+  /** The pen lab (#69), while shown. */
+  lab: PenLab | null = null;
 
   constructor(leaf: WorkspaceLeaf, plugin: DebugHost) {
     super(leaf);
@@ -92,6 +103,7 @@ export class DebugView extends ItemView {
     button('Clear', () => this.clear());
     button('Save page', () => this.save());
     this.recButton = button('Record', () => this.plugin.recorder.toggle());
+    button('Pen lab', () => this.toggleLab()).addClass('nbspike-lab-toggle');
     this.hud = root.createDiv({ cls: 'nbspike-hud' });
     this.page = root.createDiv({ cls: 'nbspike-page' });
     this.canvas = this.page.createEl('canvas');
@@ -116,6 +128,28 @@ export class DebugView extends ItemView {
 
   async onClose() {
     if (this.observer) this.observer.disconnect();
+  }
+
+  /** Shows the pen lab (#69) in place of the canvas, or the canvas again. */
+  toggleLab() {
+    if (this.lab) {
+      this.lab.el.remove();
+      this.lab = null;
+      this.page.show();
+      this.resize();
+      return;
+    }
+    this.page.hide();
+    const p = this.plugin;
+    this.lab = new PenLab(this.contentEl, {
+      tuning: () => p.settings.advancedPen,
+      fitScale: () => p.inkFitScale(),
+      penSize: () => p.settings.tools.pen.size,
+      colors: () => {
+        const t = currentTheme();
+        return { ink: t.ink, paper: t.paper };
+      },
+    });
   }
 
   resize() {

@@ -33,7 +33,7 @@ test('highlighter: withHighlighter validates colours and clamps sizes', () => {
 test('highlighter: the tool is part of the pen settings and switching keeps the pen\'s colour and size', () => {
   const pen = withPen(DEFAULT_PEN, { color: '#e0301e', size: 4 });
   const hl = withPen(pen, { tool: 'highlighter' });
-  assert.deepEqual(hl, { tool: 'highlighter', nib: 'uniform', color: '#e0301e', size: 4 });
+  assert.deepEqual(hl, { tool: 'highlighter', nib: 'uniform', color: '#e0301e', size: 4, dash: 'solid' });
   assert.deepEqual(withPen(hl, { tool: 'pen' }), pen);
   assert.throws(() => withPen(pen, { tool: 'marker' as never }), /Unknown tool/);
 });

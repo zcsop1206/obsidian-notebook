@@ -89,7 +89,7 @@ test('toolbar: the current settings match a preset only exactly, for the tool in
 
 test('toolbar: the tool state round-trips and each bad field falls back on its own', () => {
   const state = {
-    pen: { tool: 'highlighter' as const, nib: 'pressure' as const, color: '#e0301e', size: 4.5 },
+    pen: { tool: 'highlighter' as const, nib: 'pressure' as const, color: '#e0301e', size: 4.5, dash: 'solid' as const },
     highlighter: { color: '#3ddc84', size: 24 },
     eraser: { size: 14, mode: 'stroke' as const },
   };
@@ -102,7 +102,7 @@ test('toolbar: the tool state round-trips and each bad field falls back on its o
     eraser: { size: 13, mode: 'smudge' },
   })));
   assert.deepEqual(got, {
-    pen: { tool: 'pen', nib: 'pressure', color: '#000000', size: 16 },
+    pen: { tool: 'pen', nib: 'pressure', color: '#000000', size: 16, dash: 'solid' },
     highlighter: { color: '#3ddc84', size: 18 },
     eraser: { size: 14, mode: 'partial' },
   });

@@ -16,13 +16,14 @@ import { DEFAULT_PEN, nextColor, nextSize, withPen, type PenSettings } from './p
 import { DEFAULT_HIGHLIGHTER, nextHighlighterColor, nextHighlighterSize, withHighlighter, type HighlighterSettings, type ToolKind } from './pen';
 import { DEFAULT_ERASER, nextEraserSize, withEraser, type EraserMode, type EraserSettings } from './pen';
 import { DEFAULT_PRESETS, MAX_PRESETS, parseToolState, presetOf, type PenPreset } from './pen';
+import { DEFAULT_TUNING, tuningFields, type PenTuning } from './pen';
 import { A4, LETTER, newPage, paperSize, roundXY } from '../format/page';
 import type { NotebookSettings } from '../settings';
 import { Toolbar } from './toolbar';
 import { splitStroke } from './split';
 import { bandNeed, bitmapBand, emptyGhostPages, inksGhost, layoutPages, MARGIN, mostVisiblePage, pageAtY, pagesInBand, type Band, type Layout, type PageBox } from './layout';
 import { anchorAt, clampZoom, navStatsLines, Navigator, newNavStats, scrollToKeep, zoomStep, type NavStats } from './navigate';
-import { currentTheme, MAX_CANVAS_PIXELS, PageBitmap, pageTheme, releaseScratch, sameBand, strokeColor, TemplateImages, warmOutlines, type TemplateSource, type Theme } from './renderer';
+import { currentTheme, MAX_CANVAS_PIXELS, PageBitmap, pageTheme, releaseScratch, sameBand, setThinLineBoost, strokeColor, TemplateImages, warmOutlines, type TemplateSource, type Theme } from './renderer';
 import { SpatialIndex } from './spatial';
 import { PagesPanel } from './pages-panel';
 import { NoteStore, type NoteFiles, type PageSlot, type TemplatesBefore } from './store';
@@ -245,6 +246,7 @@ export class InkView extends FileView {
     root.empty();
     root.addClass('nb-ink-view');
     this.restoreTools();
+    setThinLineBoost(this.tuning.boost); // #69
     this.buildToolbar(root);
     this.buildPagesPanel(root);
     this.scroller = root.createDiv({ cls: 'nb-ink-scroll' });
@@ -939,7 +941,12 @@ export class InkView extends FileView {
    * unknown nib or a colour that isn't `#rrggbb` throws.
    */
   setPen(change: Partial<PenSettings>) {
+    const was = this.pen;
     this.pen = withPen(this.pen, change);
+    // #70: only the uniform nib draws dashed or dotted lines; say when a change of nib undid one.
+    if (was.dash !== 'solid' && this.pen.dash === 'solid' && change.dash === undefined) {
+      new Notice(`The pressure pen draws solid lines only: the line is solid now (${was.dash} lines are for the uniform pen).`);
+    }
     if (this.pen.tool !== 'lasso') this.clearSelection(); // switching tools drops the lasso's selection (#11)
     this.toolsChanged();
     this.renderStats();
@@ -959,7 +966,41 @@ export class InkView extends FileView {
   strokeStyle(): StrokeStyle {
     const { pen, highlighter } = this;
     if (pen.tool === 'highlighter') return { tool: 'highlighter', color: highlighter.color, size: highlighter.size };
-    return { tool: 'pen', nib: pen.nib, color: pen.color, size: pen.size };
+    return { tool: 'pen', nib: pen.nib, color: pen.color, size: pen.size, ...this.strokeTuning(), ...(pen.nib === 'uniform' && pen.dash !== 'solid' ? { dash: pen.dash } : {}) };
+  }
+
+  // ---- the advanced pen (#69)
+
+  /** The uniform pen's tunables from the settings ("Advanced pen"); the defaults without a plugin. */
+  get tuning(): Readonly<PenTuning> {
+    return this.settingsHost?.settings.advancedPen ?? DEFAULT_TUNING;
+  }
+
+  /**
+   * The tunables a new pen stroke is written with: those that differ from the defaults, for the
+   * uniform nib only (the pressure nib is unchanged by #69). Read at each stroke's start, so a
+   * settings change shows on the next stroke.
+   */
+  strokeTuning(): { smooth?: number; stab?: number; taper?: number } {
+    return this.pen.nib === 'uniform' ? tuningFields(this.tuning) : {};
+  }
+
+  /**
+   * The advanced pen settings changed: redraw the pages if the thin-line boost now draws
+   * differently. `redraw`: whether it does, when the plugin has already set the boost (it is one
+   * setting for every view, so only the first view to set it would see the change).
+   */
+  penTuningChanged(redraw = setThinLineBoost(this.tuning.boost)) {
+    if (redraw) {
+      for (const pv of this.pages) if (pv.bitmap) this.renderPage(pv);
+      if (this.ghost?.bitmap) this.renderGhost();
+    }
+    this.toolbar?.render();
+  }
+
+  /** CSS px per page px at 100% zoom (the fitted width), or null before the pages are laid out. */
+  fitScale(): number | null {
+    return this.layout ? this.layout.scale / this.layout.zoom : null;
   }
 
   /** Switches the tool (pen, highlighter or eraser); each keeps its own settings. An unknown tool throws. */
@@ -1922,6 +1963,7 @@ export class InkView extends FileView {
       pageLabel: () => this.pageLabel(),
       goToPage: () => this.goToPage(),
       theme: () => this.theme,
+      strokeTuning: () => this.strokeTuning(),
       canPaste: () => this.canPaste,
       paste: () => this.pasteStrokes(),
       exportPdf: () => void this.exportPdf(),
@@ -1972,7 +2014,7 @@ export class InkView extends FileView {
     if (p.tool === 'highlighter') {
       this.highlighter = withHighlighter(this.highlighter, { color: p.color, size: p.size });
       this.setPen({ tool: 'highlighter' });
-    } else this.setPen({ tool: 'pen', color: p.color, size: p.size, nib: p.nib ?? 'uniform' });
+    } else this.setPen({ tool: 'pen', color: p.color, size: p.size, nib: p.nib ?? 'uniform', dash: p.dash ?? 'solid' });
   }
 
   /** Saves the pen or highlighter in use as preset `index`; returns false for the eraser or a bad slot. */

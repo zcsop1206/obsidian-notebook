@@ -11,7 +11,7 @@ import { InkView, type InkClipboard } from './ink/view';
 import { RenameHandler } from './ink/rename';
 import { importNotice, importPdf, PdfNameModal, PdfSourceModal, type PdfChoice } from './ink/pdf-import';
 import { PdfPages, type PdfNote } from './ink/pdf';
-import { setSharpPdfRenderer } from './ink/renderer';
+import { setSharpPdfRenderer, setThinLineBoost } from './ink/renderer';
 import type { PdfTemplate } from './format/template';
 import { paperSize, type NotePaper } from './format/page';
 import { isTemplateName } from './format/template';
@@ -64,6 +64,10 @@ export default class NotebookPlugin extends Plugin {
     // Pen commands for desktop and the tests; the toolbar (#10) does the same.
     this.addInkCommand('pen-nib-uniform', 'Use the uniform pen', view => view.setPen({ nib: 'uniform' }));
     this.addInkCommand('pen-nib-pressure', 'Use the pressure pen', view => view.setPen({ nib: 'pressure' }));
+    // The line (#70); a dashed or dotted line switches to the uniform nib.
+    this.addInkCommand('pen-dash-solid', 'Use a solid line', view => view.setPen({ dash: 'solid' }));
+    this.addInkCommand('pen-dash-dashed', 'Use a dashed line', view => view.setPen({ dash: 'dashed' }));
+    this.addInkCommand('pen-dash-dotted', 'Use a dotted line', view => view.setPen({ dash: 'dotted' }));
     this.addInkCommand('pen-next-color', 'Next pen colour', view => view.nextColor());
     this.addInkCommand('pen-next-size', 'Next pen size', view => view.nextSize());
     this.addInkCommand('tool-pen', 'Use the pen', view => view.setTool('pen'));
@@ -221,6 +225,25 @@ export default class NotebookPlugin extends Plugin {
       if (view instanceof InkView && (!best || view.stats.nav.at > best.at)) best = view.stats.nav;
     }
     return best;
+  }
+
+  /** The advanced pen settings changed (#69): open ink views apply the thin-line boost. */
+  penTuningChanged() {
+    const redraw = setThinLineBoost(this.settings.advancedPen.boost);
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_INK)) {
+      const view = leaf.view;
+      if (view instanceof InkView) view.penTuningChanged(redraw);
+    }
+  }
+
+  /** CSS px per page px of an open ink view at 100% zoom (the pen lab's 100%, #69), or null. */
+  inkFitScale(): number | null {
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_INK)) {
+      const view = leaf.view;
+      const k = view instanceof InkView ? view.fitScale() : null;
+      if (k) return k;
+    }
+    return null;
   }
 
   /** A command, shown only in an open ink note, that opens the template chooser. */

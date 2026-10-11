@@ -12,7 +12,7 @@
 // as before. Everything is drawn in page px through pageTransform, so strokes, images and the
 // highlighter layer outside the band are simply clipped.
 import { DEFAULT_INK, prepareSave, type Page, type PageImage, type Size, type Stroke } from '../format/page';
-import { isStroked, strokePathCached } from '../format/outline';
+import { dashArray, isStroked, strokeGeometryCached } from '../format/outline';
 import { fixedPaper, renderTemplate, type PdfTemplate, type Template } from '../format/template';
 import type { Band } from './layout';
 
@@ -55,8 +55,8 @@ export function pixelRatio(cssWidth: number, cssHeight: number, dpr = window.dev
   return area * dpr * dpr > MAX_CANVAS_PIXELS ? Math.sqrt(MAX_CANVAS_PIXELS / area) : dpr;
 }
 
-/** What decides how a stroke's path is painted: its tool, nib and size. */
-export type PaintStyle = { tool: string; nib?: string; size: number };
+/** What decides how a stroke's path is painted: its tool, nib and size, and its line (#70). */
+export type PaintStyle = { tool: string; nib?: string; size: number; dash?: string };
 
 /**
  * The Path2D of a stroke's path `d` (strokePath). A stroked centreline of zero length (a dot:
@@ -79,30 +79,84 @@ export function canvasPath(style: PaintStyle, d: string): Path2D {
 /**
  * Paints a stroke's path (canvasPath of its strokePath) in `color`, in the current transform:
  * a uniform pen's centreline stroked `size` wide with round caps and joins (#60), any other
- * stroke's outline filled.
+ * stroke's outline filled. `ends`: a tapered stroke's ends (#69, strokeGeometry), filled too. A
+ * dashed or dotted stroke (#70) is stroked with its dashArray (the boost widens the line, never
+ * the pattern), and the dash is put back to solid after.
  */
-export function paintPath(ctx: CanvasRenderingContext2D, style: PaintStyle, path: Path2D, color: string) {
+export function paintPath(ctx: CanvasRenderingContext2D, style: PaintStyle, path: Path2D, color: string, ends?: Path2D | null) {
   if (isStroked(style)) {
-    ctx.lineWidth = style.size;
+    ctx.lineWidth = lineWidth(ctx, style.size);
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     ctx.strokeStyle = color;
-    ctx.stroke(path);
+    const dash = dashArray(style);
+    if (dash) {
+      ctx.setLineDash(dash);
+      ctx.lineDashOffset = 0;
+      ctx.stroke(path);
+      ctx.setLineDash([]);
+    } else ctx.stroke(path);
+    if (ends) {
+      ctx.fillStyle = color;
+      ctx.fill(ends);
+    }
   } else {
     ctx.fillStyle = color;
     ctx.fill(path);
   }
 }
 
+// ---- thin-line boost (#69)
+//
+// A uniform stroke under 2 device px wide is antialiased over two or three device pixels, none
+// of them fully inked, and reads as grey. With the boost on, a stroked centreline thinner than
+// BOOST_BELOW px is drawn in the editor's bitmaps (pages, live overlay, thumbnails, the picker's
+// preview) at least BOOST_DEVICE_PX device px wide: the narrowest line that always covers one
+// device pixel fully, wherever it falls, so its core is the ink colour at full opacity. The issue
+// asks for this below 150% zoom; the rule needs no zoom of its own, since it only acts where a
+// line would be under 2 device px, which at the iPad's fitted scale (about 1.3 CSS px per page
+// px on a 2x display) is below about 150% for a 0.5 px line and 75% for 1 px. So it is judged
+// per canvas from its transform, and every view, thumbnail and preview gets it right whatever
+// its zoom. Only the bitmaps: files, the SVG and the PDF keep the stroke's size. The boost is a
+// setting (setThinLineBoost), not a stroke's: turning it off draws every stroke as before.
+
+/** Strokes thinner than this (page px) can be boosted. */
+export const BOOST_BELOW = 1.5;
+/** The boosted line's least width in device px. */
+export const BOOST_DEVICE_PX = 2;
+
+let boost = false;
+
+/** Turns the thin-line boost on or off; returns whether that changed. */
+export function setThinLineBoost(on: boolean): boolean {
+  const was = boost;
+  boost = on;
+  return was !== on;
+}
+
+/** Whether the thin-line boost is on (the pen lab sets its own and puts this back). */
+export function thinLineBoost(): boolean {
+  return boost;
+}
+
+/** The width a stroked centreline of `size` is drawn at in `ctx`: its size, or the boost's least width. */
+function lineWidth(ctx: CanvasRenderingContext2D, size: number): number {
+  if (!boost || size >= BOOST_BELOW) return size;
+  // Device px per unit of the current transform.
+  const m = typeof ctx.getTransform === 'function' ? ctx.getTransform() : null;
+  const k = m ? Math.sqrt(Math.abs(m.a * m.d - m.b * m.c)) : (window.devicePixelRatio || 1);
+  return k > 0 ? Math.max(size, BOOST_DEVICE_PX / k) : size;
+}
+
 // Paths are computed once per stroke object and kept while it lives; the `d` they're made from
 // is cached by strokePathCached, which writePage shares.
-const paths = new WeakMap<Stroke, Path2D>();
+const paths = new WeakMap<Stroke, { path: Path2D; ends: Path2D | null }>();
 
-/** The Path2D a stroke is painted with (paintStroke): its centreline or its outline. */
-export function strokeDrawPath(stroke: Stroke): Path2D {
+function drawPaths(stroke: Stroke): { path: Path2D; ends: Path2D | null } {
   let p = paths.get(stroke);
   if (!p) {
-    p = canvasPath(stroke, strokePathCached(stroke));
+    const g = strokeGeometryCached(stroke);
+    p = { path: canvasPath(stroke, g.d), ends: g.ends ? new Path2D(g.ends) : null };
     paths.set(stroke, p);
     // And its points as the file stores them, so the next save only encodes new strokes (#37).
     prepareSave(stroke);
@@ -110,9 +164,20 @@ export function strokeDrawPath(stroke: Stroke): Path2D {
   return p;
 }
 
+/** The Path2D a stroke is painted with (paintStroke): its centreline or its outline. */
+export function strokeDrawPath(stroke: Stroke): Path2D {
+  return drawPaths(stroke).path;
+}
+
+/** A tapered stroke's ends (#69) as a Path2D to fill, or null. */
+export function strokeEndsPath(stroke: Stroke): Path2D | null {
+  return drawPaths(stroke).ends;
+}
+
 /** Paints a stroke as the page bitmap draws it, in the current transform. */
 export function paintStroke(ctx: CanvasRenderingContext2D, stroke: Stroke, color: string) {
-  paintPath(ctx, stroke, strokeDrawPath(stroke), color);
+  const p = drawPaths(stroke);
+  paintPath(ctx, stroke, p.path, color, p.ends);
 }
 
 // The area a stroked centreline covers, as a path to fill (see strokePath2D), per stroke object.
@@ -122,14 +187,17 @@ const areas = new WeakMap<Stroke, Path2D>();
  * A stroke's inked area as a Path2D to fill (nonzero). For a filled outline this is its drawn
  * path. For a stroked centreline (#60) it's the same area as the stroke paints: the centreline
  * (its quadratics flattened to within 0.01 px) as a union of one rectangle `size` wide per
- * segment and round discs at the ends and where the line turns, all wound the same way. For
- * callers that fill strokes (the lasso's drag preview, selection.ts); built on first use.
+ * segment and round discs at the ends and where the line turns, all wound the same way, and a
+ * tapered stroke's ends (#69, wound the same way). For callers that fill strokes (the lasso's
+ * drag preview, selection.ts); built on first use.
  */
 export function strokePath2D(stroke: Stroke): Path2D {
   if (!isStroked(stroke)) return strokeDrawPath(stroke);
   let p = areas.get(stroke);
   if (!p) {
-    p = centrelineArea(strokePathCached(stroke), stroke.size / 2);
+    const g = strokeGeometryCached(stroke);
+    p = centrelineArea(g.d, stroke.size / 2);
+    if (g.ends) p.addPath(new Path2D(g.ends));
     areas.set(stroke, p);
   }
   return p;

@@ -135,13 +135,16 @@ export class Toolbar {
       b.toggleClass('is-empty', !p);
       b.dataset.tool = p?.tool ?? '';
       b.toggleClass('is-default-ink', p?.color === '#000000');
+      // #70: a dashed or dotted ring round the mark of a dashed or dotted pen.
+      b.toggleClass('is-dashed', p?.dash === 'dashed');
+      b.toggleClass('is-dotted', p?.dash === 'dotted');
       mark.style.backgroundColor = p && p.color !== '#000000' ? p.color : '';
       // The mark's size follows the preset's width, within the button.
       const d = !p ? 0 : p.tool === 'highlighter' ? 10 : Math.max(6, Math.min(22, 4 + p.size * 2.2));
       mark.style.width = p?.tool === 'highlighter' ? '22px' : `${d}px`;
       mark.style.height = `${d}px`;
       const name = !p ? `Favourite ${i + 1}: empty (tap to save the current ${notPreset(pen.tool) ? 'pen' : pen.tool})`
-        : `Favourite ${i + 1}: ${p.tool === 'highlighter' ? 'highlighter' : `${p.nib ?? 'uniform'} pen`} ${p.color} ${p.size} px (long-press to replace)`;
+        : `Favourite ${i + 1}: ${p.tool === 'highlighter' ? 'highlighter' : `${p.nib ?? 'uniform'} pen${p.dash ? `, ${p.dash}` : ''}`} ${p.color} ${p.size} px (long-press to replace)`;
       b.setAttribute('aria-label', name);
       b.title = name;
       this.mark(b, matchesPreset(p, pen, hl));
