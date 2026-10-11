@@ -3,15 +3,26 @@
 // view, which draws a pdf page's template from the PDF itself at the bitmap's resolution so
 // text stays sharp when zoomed (the embedded JPEG is drawn until that render arrives).
 //
+// #68: the view's sharp renders stay off the pen's hot path. A render is drawn in tiles of at
+// most TILE × TILE device px, one pdf.js render per tile with a frame between tiles, assembled
+// into the page image, so no single main-thread render runs much longer than a frame; the
+// RenderTask of the tile in progress is kept and cancelled (where pdf.js offers `cancel`) when a
+// pen or mouse goes down, and that tile is rendered again at the next idle. A finished render is
+// handed over only once the pen has been up IDLE_MS, so the page isn't redrawn mid-stroke.
+//
 // Only the small part of the pdf.js API used here is typed; the tests' mock implements it.
 import { loadPdfJs, normalizePath, type Vault } from 'obsidian';
 import type { PdfTemplate } from '../format/template';
-import { MAX_CANVAS_PIXELS } from './renderer';
+import { MAX_CANVAS_PIXELS, pdfStats } from './renderer';
+import { tiles as pdfTiles } from './dirty';
 
 export interface PdfViewport { width: number; height: number }
+/** What page.render returns: pdf.js's RenderTask. `cancel` is feature-detected (#68). */
+export interface PdfRenderTask { promise: Promise<unknown>; cancel?(): void }
 export interface PdfPageProxy {
   getViewport(o: { scale: number }): PdfViewport;
-  render(o: { canvasContext: CanvasRenderingContext2D; viewport: PdfViewport }): { promise: Promise<unknown> };
+  /** `transform` is applied before the viewport's (pdf.js's RenderParameters.transform). */
+  render(o: { canvasContext: CanvasRenderingContext2D; viewport: PdfViewport; transform?: number[] }): PdfRenderTask;
   cleanup?(): void;
 }
 export interface PdfDocument {
@@ -89,22 +100,57 @@ export interface PdfNote {
   pages: string;
 }
 
+/** Resolves at the next animation frame, or after 50 ms if frames don't come (a hidden page). */
+const nextFrame = () => new Promise<void>(resolve => {
+  let done = false;
+  const go = () => {
+    if (done) return;
+    done = true;
+    resolve();
+  };
+  requestAnimationFrame(go);
+  window.setTimeout(go, 50);
+});
+
 /**
  * Sharp renders of PDF pages for the ink view. Documents are opened from the vault on demand
  * and kept per vault path (at most MAX_DOCS). Renders run one at a time and wait while a pen
  * or mouse is down and for IDLE_MS after it lifts, so pdf.js's main-thread drawing stays off
  * the pen's hot path. `noteOf` finds the vault path of the note a template belongs to.
+ *
+ * #68: a render is drawn TILE px square at a time (see the header), each tile after waiting for
+ * idle; a pen or mouse going down cancels the tile being rendered (the RenderTask's `cancel`, if
+ * it has one) and it is rendered again at the next idle. The finished image is decoded, then
+ * handed over at the next idle.
  */
 export class PdfPages {
   static MAX_DOCS = 2;
   static IDLE_MS = 300;
+  /** Tile size, device px (#68). */
+  static TILE = 1024;
   /** Renders started (for tests). */
   renders = 0;
   private docs = new Map<string, Promise<PdfDocument | null>>();
   private queue: Promise<unknown> = Promise.resolve();
   private down = new Set<number>();
   private lastUp = 0;
-  private onDown = (e: PointerEvent) => { if (e.pointerType !== 'touch') this.down.add(e.pointerId); };
+  /** The tile render in progress, and whether a pen going down cancelled it (#68). */
+  private task: PdfRenderTask | null = null;
+  private cancelled = false;
+  private onDown = (e: PointerEvent) => {
+    if (e.pointerType === 'touch') return;
+    this.down.add(e.pointerId);
+    const task = this.task;
+    if (task && typeof task.cancel === 'function' && !this.cancelled) {
+      this.cancelled = true;
+      pdfStats.cancelled++;
+      try {
+        task.cancel();
+      } catch (err) {
+        // a task that has just finished may throw; its tile is then rendered again anyway
+      }
+    }
+  };
   private onUp = (e: PointerEvent) => { if (this.down.delete(e.pointerId)) this.lastUp = performance.now(); };
 
   constructor(private vault: Vault, private noteOf: (template: PdfTemplate) => PdfNote | null) {
@@ -126,10 +172,13 @@ export class PdfPages {
       if (!doc || template.page > doc.numPages) return null;
       this.renders++;
       const page = await doc.getPage(template.page);
-      const one = page.getViewport({ scale: 1 });
-      const canvas = await renderPdfPage(page, width / one.width);
+      const canvas = await this.renderTiled(page, width);
       page.cleanup?.();
-      return canvasImage(canvas);
+      const img = await canvasImage(canvas);
+      // Decoded now, so the first drawImage of it doesn't decode a large PNG mid-stroke.
+      if (typeof img.decode === 'function') await img.decode().catch(() => undefined);
+      await this.idle(); // handed over, and so drawn, only once the pen has been up a moment (#68)
+      return img;
     };
     const result = this.queue.then(run).catch(e => {
       console.warn('[notebook] PDF page render failed', template.source, template.page, e);
@@ -140,7 +189,68 @@ export class PdfPages {
   }
 
   /**
-   * The PDF's vault path: `source` from the note's page folder, where the page files are. A
+   * Renders a page `width` device px wide (kept under MAX_CANVAS_PIXELS, as renderPdfPage does)
+   * on white, one tile per idle slot (#68), and records the times in pdfStats.
+   */
+  private async renderTiled(page: PdfPageProxy, width: number): Promise<HTMLCanvasElement> {
+    const one = page.getViewport({ scale: 1 });
+    let scale = width / one.width;
+    const area = one.width * one.height * scale * scale;
+    if (area > MAX_CANVAS_PIXELS) scale *= Math.sqrt(MAX_CANVAS_PIXELS / area);
+    const viewport = page.getViewport({ scale });
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(viewport.width));
+    canvas.height = Math.max(1, Math.round(viewport.height));
+    const ctx = canvas.getContext('2d')!;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    const tile = document.createElement('canvas');
+    let busy = 0, longest = 0, tiles = 0;
+    try {
+      for (const [x, y, w, h] of pdfTiles(canvas.width, canvas.height, PdfPages.TILE)) {
+        for (;;) {
+          await this.idle();
+          if (tile.width !== w || tile.height !== h) {
+            tile.width = w;
+            tile.height = h;
+          }
+          const tctx = tile.getContext('2d')!;
+          tctx.setTransform(1, 0, 0, 1, 0, 0);
+          tctx.fillStyle = '#ffffff';
+          tctx.fillRect(0, 0, w, h);
+          const t0 = performance.now();
+          this.cancelled = false;
+          const task = this.task = page.render({ canvasContext: tctx, viewport, transform: [1, 0, 0, 1, -x, -y] });
+          try {
+            await task.promise;
+          } catch (e) {
+            if (!this.cancelled) throw e;
+          } finally {
+            this.task = null;
+            busy += performance.now() - t0;
+          }
+          if (this.cancelled) continue; // a pen went down: this tile again at the next idle
+          longest = Math.max(longest, performance.now() - t0);
+          tiles++;
+          break;
+        }
+        ctx.drawImage(tile, 0, 0, w, h, x, y, w, h);
+        await nextFrame();
+      }
+    } catch (e) {
+      freeCanvas(canvas);
+      throw e;
+    } finally {
+      freeCanvas(tile);
+    }
+    pdfStats.renderMs = busy;
+    pdfStats.tiles = tiles;
+    pdfStats.tileMaxMs = longest;
+    return canvas;
+  }
+
+  /**
+   * The PDF's vault path:`source` from the note's page folder, where the page files are. A
    * rename or move of the note (#26) moves the folder with the PDF in it, so this still holds.
    */
   resolve(note: PdfNote, source: string): string {
