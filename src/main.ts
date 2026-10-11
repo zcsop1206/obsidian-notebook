@@ -64,6 +64,10 @@ export default class NotebookPlugin extends Plugin {
     // Pen commands for desktop and the tests; the toolbar (#10) does the same.
     this.addInkCommand('pen-nib-uniform', 'Use the uniform pen', view => view.setPen({ nib: 'uniform' }));
     this.addInkCommand('pen-nib-pressure', 'Use the pressure pen', view => view.setPen({ nib: 'pressure' }));
+    // The line (#70); a dashed or dotted line switches to the uniform nib.
+    this.addInkCommand('pen-dash-solid', 'Use a solid line', view => view.setPen({ dash: 'solid' }));
+    this.addInkCommand('pen-dash-dashed', 'Use a dashed line', view => view.setPen({ dash: 'dashed' }));
+    this.addInkCommand('pen-dash-dotted', 'Use a dotted line', view => view.setPen({ dash: 'dotted' }));
     this.addInkCommand('pen-next-color', 'Next pen colour', view => view.nextColor());
     this.addInkCommand('pen-next-size', 'Next pen size', view => view.nextSize());
     this.addInkCommand('tool-pen', 'Use the pen', view => view.setTool('pen'));

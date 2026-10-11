@@ -1,7 +1,8 @@
 // Pen settings (#5): the nib, colour and size the next stroke is written with. Held by the ink
 // view and saved in the plugin settings with the favourite presets (#10: see the end), and the
-// uniform pen's advanced tunables (#69: smoothing, stabiliser, taper, thin-line boost).
-import { DEFAULT_INK, NIBS, type Nib } from '../format/page';
+// uniform pen's advanced tunables (#69: smoothing, stabiliser, taper, thin-line boost), and the
+// line (#70: solid, dashed or dotted, for the uniform nib only).
+import { DASHES, DEFAULT_INK, NIBS, type Dash, type Nib } from '../format/page';
 
 /**
  * The tool the next stroke of the Pencil uses. Highlighter is #6, eraser is #7, lasso is #11
@@ -17,9 +18,15 @@ export interface PenSettings {
   color: string;
   /** Width in page px, 0.5 to 16 in 0.5 steps (for the pressure nib, the width at pressure 0.5). */
   size: number;
+  /** The line (#70): solid, or dashed or dotted with the uniform nib (the pressure nib is always solid). */
+  dash: LineDash;
 }
 
-export const DEFAULT_PEN: Readonly<PenSettings> = Object.freeze({ tool: 'pen', nib: 'uniform', color: DEFAULT_INK, size: 2.5 });
+/** The pen's line (#70): a stroke's `dash`, or solid (no `dash`). */
+export type LineDash = 'solid' | Dash;
+export const LINE_DASHES: readonly LineDash[] = ['solid', ...DASHES];
+
+export const DEFAULT_PEN: Readonly<PenSettings> = Object.freeze({ tool: 'pen', nib: 'uniform', color: DEFAULT_INK, size: 2.5, dash: 'solid' });
 
 export interface ColorPreset {
   color: string;
@@ -60,8 +67,10 @@ export function parseColor(c: unknown): string | null {
 }
 
 /**
- * The settings with `change` applied. Sizes are clamped; an unknown nib or a colour that isn't
- * `#rrggbb` throws.
+ * The settings with `change` applied. Sizes are clamped; an unknown nib or line, or a colour that
+ * isn't `#rrggbb`, throws. Only the uniform nib draws dashed or dotted lines (#70): choosing the
+ * pressure nib makes the line solid, and choosing a dashed or dotted line alone (no nib) with the
+ * pressure nib switches to the uniform nib.
  */
 export function withPen(pen: Readonly<PenSettings>, change: Partial<PenSettings>): PenSettings {
   const next = { ...pen };
@@ -79,6 +88,12 @@ export function withPen(pen: Readonly<PenSettings>, change: Partial<PenSettings>
     next.color = color;
   }
   if (change.size !== undefined) next.size = clampSize(change.size);
+  if (change.dash !== undefined) {
+    if (!LINE_DASHES.includes(change.dash)) throw new Error(`Unknown line ${JSON.stringify(change.dash)} (expected ${LINE_DASHES.join(', ')})`);
+    next.dash = change.dash;
+    if (change.dash !== 'solid' && change.nib === undefined) next.nib = 'uniform';
+  }
+  if (next.nib !== 'uniform') next.dash = 'solid';
   return next;
 }
 
@@ -260,7 +275,7 @@ export function stepSize(tool: 'pen' | 'highlighter', size: number, dir: -1 | 1)
   return tool === 'highlighter' ? clampHighlighterSize(next) : clampSize(next);
 }
 
-/** A favourite: a tool with its colour, size and (for the pen) nib, applied with one tap. */
+/** A favourite: a tool with its colour, size and (for the pen) nib and line, applied with one tap. */
 export interface PenPreset {
   tool: 'pen' | 'highlighter';
   /** Lowercase `#rrggbb`. */
@@ -268,6 +283,8 @@ export interface PenPreset {
   size: number;
   /** The pen's nib; absent for the highlighter. */
   nib?: Nib;
+  /** A uniform pen's dashed or dotted line (#70); absent: solid. */
+  dash?: Dash;
 }
 
 /** At most this many favourites (#10: more is out of scope). */
@@ -290,7 +307,10 @@ export function parsePreset(v: unknown): PenPreset | null {
   if (d.tool === 'highlighter') return { tool: 'highlighter', color, size: clampHighlighterSize(d.size) };
   const nib = d.nib === undefined ? 'uniform' : d.nib;
   if (!NIBS.includes(nib as Nib)) return null;
-  return { tool: 'pen', color, size: clampSize(d.size), nib: nib as Nib };
+  const preset: PenPreset = { tool: 'pen', color, size: clampSize(d.size), nib: nib as Nib };
+  // #70: a dashed or dotted line, with the uniform nib only; anything else is solid.
+  if (nib === 'uniform' && DASHES.includes(d.dash as Dash)) preset.dash = d.dash as Dash;
+  return preset;
 }
 
 /**
@@ -315,7 +335,7 @@ export function parsePresets(v: unknown): (PenPreset | null)[] {
 
 /** The preset for the tool in use, or null for the eraser and the lasso. */
 export function presetOf(pen: Readonly<PenSettings>, highlighter: Readonly<HighlighterSettings>): PenPreset | null {
-  if (pen.tool === 'pen') return { tool: 'pen', color: pen.color, size: pen.size, nib: pen.nib };
+  if (pen.tool === 'pen') return { tool: 'pen', color: pen.color, size: pen.size, nib: pen.nib, ...(pen.dash !== 'solid' ? { dash: pen.dash } : {}) };
   if (pen.tool === 'highlighter') return { tool: 'highlighter', color: highlighter.color, size: highlighter.size };
   return null;
 }
@@ -324,7 +344,7 @@ export function presetOf(pen: Readonly<PenSettings>, highlighter: Readonly<Highl
 export function matchesPreset(preset: Readonly<PenPreset> | null, pen: Readonly<PenSettings>, highlighter: Readonly<HighlighterSettings>): boolean {
   if (!preset || preset.tool !== pen.tool) return false;
   if (preset.tool === 'highlighter') return preset.color === highlighter.color && preset.size === highlighter.size;
-  return preset.color === pen.color && preset.size === pen.size && (preset.nib ?? 'uniform') === pen.nib;
+  return preset.color === pen.color && preset.size === pen.size && (preset.nib ?? 'uniform') === pen.nib && (preset.dash ?? 'solid') === pen.dash;
 }
 
 /** Every tool's current settings, saved in the plugin settings so they survive a restart. */
@@ -370,6 +390,9 @@ export function parseToolState(v: unknown): ToolState {
     color: apply('pen colour', p.color, c => withPen(DEFAULT_PEN, { color: c as string }).color),
     size: apply('pen size', p.size, s => clampSize(num(s))),
   });
+  // The line (#70) after the nib: a dashed or dotted line stays only with the uniform nib.
+  const dash = apply('pen line', p.dash, l => withPen(DEFAULT_PEN, { dash: l as LineDash }).dash);
+  if (dash !== undefined && out.pen.nib === 'uniform') out.pen = withPen(out.pen, { dash });
   out.highlighter = withHighlighter(out.highlighter, {
     color: apply('highlighter colour', h.color, c => withHighlighter(DEFAULT_HIGHLIGHTER, { color: c as string }).color),
     size: apply('highlighter size', h.size, s => clampHighlighterSize(num(s))),

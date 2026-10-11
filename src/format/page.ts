@@ -22,8 +22,13 @@
 // PenStroke and outline.ts), written after `size` only when set, so every stroke written
 // without them, and every file written before, keeps its bytes. A tapered stroke's drawing is a
 // `<g data-id>` of its stroked middle and its filled ends instead of one `<path data-id>`.
+//
+// Dashed and dotted lines (#70): a uniform pen stroke may carry `dash` (`dashed` or `dotted`;
+// absent: solid), written after the tunables. Its path gets `stroke-dasharray` (dashArray in
+// outline.ts: dashed 3 × size, 2 × size; dotted 0, 2 × size, the round caps making the dots), so
+// a reader that doesn't know `dash` still draws the same centreline, solid.
 import { isImageId, isPageId, isStrokeId } from './ids';
-import { fmt1, isStroked, strokeGeometryCached, type OutlineInput } from './outline';
+import { dashArray, fmt1, isStroked, strokeGeometryCached, type OutlineInput } from './outline';
 import { fixedPaper, IMAGE_RE, metadataTemplate, parseTemplate, renderTemplate, type Size, type Template } from './template';
 
 export type { Size } from './template';
@@ -121,7 +126,16 @@ export interface PenStroke extends StrokeBase {
   smooth?: number;
   stab?: number;
   taper?: number;
+  /** A dashed or dotted line (#70, uniform nib only; see Dash). Absent: solid. */
+  dash?: Dash;
 }
+
+/**
+ * A uniform pen stroke's line (#70): `dashed` or `dotted`, dashing along the centreline's arc
+ * length (dashArray in outline.ts). Solid strokes have no `dash`.
+ */
+export type Dash = 'dashed' | 'dotted';
+export const DASHES: readonly Dash[] = ['dashed', 'dotted'];
 
 /** The largest refit radius (`smooth`) and taper a pen stroke may have (#69). */
 export const MAX_SMOOTH = 10;
@@ -219,15 +233,16 @@ function checkSize(size: unknown): Size {
 }
 
 /** A stroke's fields other than its points, validated and in canonical form. */
-type StrokeHead = { id: string; tool: 'pen'; nib: Nib; color: string; size: number; smooth?: number; stab?: number; taper?: number }
+type StrokeHead = { id: string; tool: 'pen'; nib: Nib; color: string; size: number; smooth?: number; stab?: number; taper?: number; dash?: Dash }
   | { id: string; tool: 'highlighter'; color: string; size: number };
 
 /**
  * A pen stroke's optional tunables (#69), validated and rounded (smooth and taper to 0.1, stab to
- * 0.01); absent ones stay absent. Only the uniform nib has a stabiliser and a taper.
+ * 0.01); absent ones stay absent. Only the uniform nib has a stabiliser and a taper. And its
+ * line (#70): `dash` dashed or dotted, uniform nib only; `solid` is read as no `dash`.
  */
-function checkTuning(st: { smooth?: unknown; stab?: unknown; taper?: unknown }, id: string, nib: Nib): { smooth?: number; stab?: number; taper?: number } {
-  const out: { smooth?: number; stab?: number; taper?: number } = {};
+function checkTuning(st: { smooth?: unknown; stab?: unknown; taper?: unknown; dash?: unknown }, id: string, nib: Nib): { smooth?: number; stab?: number; taper?: number; dash?: Dash } {
+  const out: { smooth?: number; stab?: number; taper?: number; dash?: Dash } = {};
   const field = (name: 'smooth' | 'stab' | 'taper', max: number, k: number) => {
     const v = st[name];
     if (v === undefined) return;
@@ -238,11 +253,16 @@ function checkTuning(st: { smooth?: unknown; stab?: unknown; taper?: unknown }, 
   field('smooth', MAX_SMOOTH, 10);
   field('stab', 1, 100);
   field('taper', MAX_TAPER, 10);
+  if (st.dash !== undefined && st.dash !== 'solid') {
+    if (!DASHES.includes(st.dash as Dash)) fail(`pen stroke ${id} has an unknown dash ${JSON.stringify(st.dash)} (expected ${DASHES.join(' or ')})`);
+    if (nib !== 'uniform') fail(`pen stroke ${id} has a dash; only the uniform nib has one`);
+    out.dash = st.dash as Dash;
+  }
   return out;
 }
 
 function checkStroke(s: unknown, i: number, seen: Set<string>): StrokeHead {
-  const st = s as { id?: unknown; tool?: unknown; nib?: unknown; color?: unknown; size?: unknown; smooth?: unknown; stab?: unknown; taper?: unknown };
+  const st = s as { id?: unknown; tool?: unknown; nib?: unknown; color?: unknown; size?: unknown; smooth?: unknown; stab?: unknown; taper?: unknown; dash?: unknown };
   if (typeof st !== 'object' || st === null) fail(`stroke ${i} is not an object`);
   if (typeof st.id !== 'string' || !isStrokeId(st.id)) fail(`stroke ${i} has an invalid id ${JSON.stringify(st.id)}`);
   const id = st.id;
@@ -258,7 +278,7 @@ function checkStroke(s: unknown, i: number, seen: Set<string>): StrokeHead {
   }
   if (st.tool === 'highlighter') {
     if (st.nib !== undefined) fail(`highlighter stroke ${id} has a nib; only pen strokes do`);
-    for (const k of ['smooth', 'stab', 'taper'] as const) if (st[k] !== undefined) fail(`highlighter stroke ${id} has a ${k}; only pen strokes do`);
+    for (const k of ['smooth', 'stab', 'taper', 'dash'] as const) if (st[k] !== undefined) fail(`highlighter stroke ${id} has a ${k}; only pen strokes do`);
     return { id, tool: 'highlighter', color, size };
   }
   return fail(`stroke ${id} has an unknown tool ${JSON.stringify(st.tool)}`);
@@ -310,13 +330,15 @@ const PDF_STYLE_U = '<style>.i{fill:#1f1f1f}.t{stroke:#c9c9c9}.u{stroke:#1f1f1f}
 /**
  * A stroke's <path> attributes before `d`. A filled outline: the default ink's class `i` or its
  * colour as `fill`. A stroked centreline (the uniform pen, #60): no fill, the default ink's class
- * `u` or its colour as `stroke`, `size` wide, round caps and joins.
+ * `u` or its colour as `stroke`, `size` wide, round caps and joins; dashed or dotted (#70) with
+ * its `stroke-dasharray`.
  */
 function pathPaint(s: StrokeHead): string {
   const ink = s.color === DEFAULT_INK;
   if (!isStroked(s)) return ink ? 'class="i"' : `fill="${s.color}"`;
+  const dash = dashArray(s); // #70
   return (ink ? 'class="u" fill="none"' : `fill="none" stroke="${s.color}"`) +
-    ` stroke-width="${fmt1(s.size)}" stroke-linecap="round" stroke-linejoin="round"`;
+    ` stroke-width="${fmt1(s.size)}" stroke-linecap="round" stroke-linejoin="round"` + (dash ? ` stroke-dasharray="${dash.map(fmt1).join(' ')}"` : '');
 }
 
 /** A stroke's points as the file stores them, and the inputs of its outline (#37). */
@@ -383,7 +405,7 @@ export function prepareSave(s: Stroke): boolean {
 function encodedStroke(s: Stroke, head: StrokeHead): { json: string; d: string; ends: string } {
   const e = encodedPoints(s, head.id);
   const input: OutlineInput = head.tool === 'pen'
-    ? { tool: 'pen', nib: head.nib, size: head.size, points: e.decoded, smooth: head.smooth, stab: head.stab, taper: head.taper }
+    ? { tool: 'pen', nib: head.nib, size: head.size, points: e.decoded, smooth: head.smooth, stab: head.stab, taper: head.taper, dash: head.dash }
     : { tool: 'highlighter', size: head.size, points: e.decoded };
   // Canonical points, size and tunables: the stroke's own outline, which the renderer shares.
   const same = e.canonical && s.size === head.size && s.tool === head.tool && (s.tool !== 'pen' || head.tool !== 'pen' || (s.nib === head.nib && sameTuning(s, head)));
@@ -392,8 +414,8 @@ function encodedStroke(s: Stroke, head: StrokeHead): { json: string; d: string; 
 }
 
 /** Whether two pen strokes have the same tunables (#69). */
-const sameTuning = (a: Pick<PenStroke, 'smooth' | 'stab' | 'taper'>, b: Pick<PenStroke, 'smooth' | 'stab' | 'taper'>) =>
-  a.smooth === b.smooth && a.stab === b.stab && a.taper === b.taper;
+const sameTuning = (a: Pick<PenStroke, 'smooth' | 'stab' | 'taper' | 'dash'>, b: Pick<PenStroke, 'smooth' | 'stab' | 'taper' | 'dash'>) =>
+  a.smooth === b.smooth && a.stab === b.stab && a.taper === b.taper && a.dash === b.dash;
 
 /** One stable outline input per encoded entry and head, so strokePathCached can hit on it. */
 const inputs = new WeakMap<Encoded, OutlineInput>();
@@ -435,7 +457,7 @@ export function writePage(page: Page): string {
   // A pen stroke's tunables (#69) only when set, so strokes without them keep their bytes.
   const tuning = (s: StrokeHead) => s.tool !== 'pen' ? '' :
     (s.smooth !== undefined ? `"smooth":${json(s.smooth)},` : '') + (s.stab !== undefined ? `"stab":${json(s.stab)},` : '') +
-    (s.taper !== undefined ? `"taper":${json(s.taper)},` : '');
+    (s.taper !== undefined ? `"taper":${json(s.taper)},` : '') + (s.dash !== undefined ? `"dash":${json(s.dash)},` : '');
   strokes.forEach((s, i) => meta.push(
     (i ? ',\n' : '') + `{"id":${json(s.id)},"tool":${json(s.tool)},` + (s.tool === 'pen' ? `"nib":${json(s.nib)},` : '') +
     `"color":${json(s.color)},"size":${json(s.size)},` + tuning(s) + (s.on ? `"on":${json(s.on)},` : '') + '"points":', s.pointsJson, '}'));

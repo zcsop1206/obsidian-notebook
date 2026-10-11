@@ -941,7 +941,12 @@ export class InkView extends FileView {
    * unknown nib or a colour that isn't `#rrggbb` throws.
    */
   setPen(change: Partial<PenSettings>) {
+    const was = this.pen;
     this.pen = withPen(this.pen, change);
+    // #70: only the uniform nib draws dashed or dotted lines; say when a change of nib undid one.
+    if (was.dash !== 'solid' && this.pen.dash === 'solid' && change.dash === undefined) {
+      new Notice(`The pressure pen draws solid lines only: the line is solid now (${was.dash} lines are for the uniform pen).`);
+    }
     if (this.pen.tool !== 'lasso') this.clearSelection(); // switching tools drops the lasso's selection (#11)
     this.toolsChanged();
     this.renderStats();
@@ -961,7 +966,7 @@ export class InkView extends FileView {
   strokeStyle(): StrokeStyle {
     const { pen, highlighter } = this;
     if (pen.tool === 'highlighter') return { tool: 'highlighter', color: highlighter.color, size: highlighter.size };
-    return { tool: 'pen', nib: pen.nib, color: pen.color, size: pen.size, ...this.strokeTuning() };
+    return { tool: 'pen', nib: pen.nib, color: pen.color, size: pen.size, ...this.strokeTuning(), ...(pen.nib === 'uniform' && pen.dash !== 'solid' ? { dash: pen.dash } : {}) };
   }
 
   // ---- the advanced pen (#69)
@@ -2009,7 +2014,7 @@ export class InkView extends FileView {
     if (p.tool === 'highlighter') {
       this.highlighter = withHighlighter(this.highlighter, { color: p.color, size: p.size });
       this.setPen({ tool: 'highlighter' });
-    } else this.setPen({ tool: 'pen', color: p.color, size: p.size, nib: p.nib ?? 'uniform' });
+    } else this.setPen({ tool: 'pen', color: p.color, size: p.size, nib: p.nib ?? 'uniform', dash: p.dash ?? 'solid' });
   }
 
   /** Saves the pen or highlighter in use as preset `index`; returns false for the eraser or a bad slot. */

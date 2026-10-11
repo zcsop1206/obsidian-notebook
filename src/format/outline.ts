@@ -23,6 +23,11 @@
 //   so the editor, Obsidian's reading view, GitHub and the PDF agree. (Alternatives rejected: a
 //   filled outline of the whole stroke would bring back the width wobble #60 removed; a variable
 //   stroke width doesn't exist in SVG, canvas or PDF.)
+//
+// Dashed and dotted lines (#70): a uniform stroke's `dash` doesn't change its path, only how it
+// is stroked: dashArray gives the pattern every renderer uses (the SVG's stroke-dasharray, canvas
+// setLineDash, the PDF's `d`), dashing along the centreline's arc length from its start. A dashed
+// or dotted stroke has no taper (taperOf is 0): its ends are the pattern's own round caps.
 import { getStroke, type StrokeOptions } from 'perfect-freehand';
 import type { HighlighterStroke, Nib, PenStroke, Point } from './page';
 
@@ -98,10 +103,10 @@ export const NIB_OPTIONS: Readonly<Record<Nib, Readonly<StrokeOptions>>> = {
 };
 
 /** What an outline depends on (#69: and a pen stroke's smoothing, stabiliser and taper, if set). */
-export type OutlineInput = Pick<PenStroke, 'tool' | 'nib' | 'size' | 'points' | 'smooth' | 'stab' | 'taper'> | Pick<HighlighterStroke, 'tool' | 'size' | 'points'>;
+export type OutlineInput = Pick<PenStroke, 'tool' | 'nib' | 'size' | 'points' | 'smooth' | 'stab' | 'taper' | 'dash'> | Pick<HighlighterStroke, 'tool' | 'size' | 'points'>;
 
 /** A stroke's tunables (#69), as far as the path depends on them. */
-type Tuned = { tool: string; nib?: string; smooth?: number; stab?: number; taper?: number };
+type Tuned = { tool: string; nib?: string; smooth?: number; stab?: number; taper?: number; dash?: string };
 
 export const outlineOptions = (s: OutlineInput): Readonly<StrokeOptions> =>
   s.tool === 'pen' ? NIB_OPTIONS[s.nib] : HIGHLIGHTER_OPTIONS;
@@ -221,9 +226,23 @@ export function stabOf(s: Tuned): number {
   return s.tool === 'pen' && s.stab !== undefined && s.stab > 0 ? Math.min(1, s.stab) : 0;
 }
 
-/** A stroke's taper (#69) in multiples of its size: its `taper` if it's a stroked centreline, else 0. */
+/**
+ * A stroke's taper (#69) in multiples of its size: its `taper` if it's a stroked centreline, else
+ * 0. A dashed or dotted line (#70) has none.
+ */
 export function taperOf(s: Tuned): number {
-  return isStroked(s) && s.taper !== undefined && s.taper > 0 ? s.taper : 0;
+  return isStroked(s) && s.taper !== undefined && s.taper > 0 && !s.dash ? s.taper : 0;
+}
+
+/**
+ * A dashed or dotted uniform stroke's dash pattern (#70), dash and gap lengths in page px to 0.1
+ * px: dashed 3 × size on, 2 × size off; dotted 0 on, 2 × size off (zero-length dashes, which the
+ * round caps draw as dots `size` wide, `size` apart). Null for a solid line or a filled outline.
+ */
+export function dashArray(s: { tool: string; nib?: string; size: number; dash?: string }): number[] | null {
+  if (!isStroked(s) || (s.dash !== 'dashed' && s.dash !== 'dotted')) return null;
+  const r = (v: number) => Math.round(v * 10) / 10;
+  return s.dash === 'dashed' ? [r(3 * s.size), r(2 * s.size)] : [0, r(2 * s.size)];
 }
 
 /**
@@ -734,10 +753,11 @@ interface CachedPath {
   n: number;
   first: Point;
   last: Point;
-  /** The pen's tunables (#69). */
+  /** The pen's tunables (#69) and its line (#70: a dash has no taper). */
   smooth: number | undefined;
   stab: number | undefined;
   taper: number | undefined;
+  dash: string | undefined;
   d: string;
   ends: string;
 }
@@ -758,13 +778,13 @@ export function strokePathCached(stroke: OutlineInput): string {
 export function strokeGeometryCached(stroke: OutlineInput): StrokeGeometry {
   const { tool, size, points } = stroke;
   const pen = stroke.tool === 'pen' ? stroke : null;
-  const nib = pen?.nib, smooth = pen?.smooth, stab = pen?.stab, taper = pen?.taper;
+  const nib = pen?.nib, smooth = pen?.smooth, stab = pen?.stab, taper = pen?.taper, dash = pen?.dash;
   const n = points.length, first = points[0], last = points[n - 1];
   const c = paths.get(stroke);
   if (c && c.tool === tool && c.nib === nib && c.size === size && c.points === points && c.n === n && c.first === first && c.last === last &&
-    c.smooth === smooth && c.stab === stab && c.taper === taper) return c;
+    c.smooth === smooth && c.stab === stab && c.taper === taper && c.dash === dash) return c;
   const g = strokeGeometry(stroke);
-  const e: CachedPath = { tool, nib, size, points, n, first, last, smooth, stab, taper, d: flat(g.d), ends: flat(g.ends) };
+  const e: CachedPath = { tool, nib, size, points, n, first, last, smooth, stab, taper, dash, d: flat(g.d), ends: flat(g.ends) };
   paths.set(stroke, e);
   return e;
 }

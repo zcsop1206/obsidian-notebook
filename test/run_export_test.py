@@ -60,6 +60,9 @@ SETUP = """async () => {
       // #60: thin uniform strokes, stroked centrelines (a line and a dot)
       pen('0000000a', '#000000', line(150, 560, 600, 580, 120), { nib: 'uniform', size: 0.5 }),
       pen('0000000b', '#1e5bd8', [{ x: 650, y: 580, p: 0.5, t: 0 }], { nib: 'uniform', size: 0.5 }),
+      // #70: a dashed and a dotted line
+      pen('0000000c', '#000000', line(150, 640, 600, 640, 120), { nib: 'uniform', dash: 'dashed' }),
+      pen('0000000d', '#d32f2f', line(150, 680, 600, 680, 120), { nib: 'uniform', size: 1, dash: 'dotted' }),
     ] },
     { id: ids[1], size: { width: 288, height: 288 }, template: { kind: 'fill', color: '#fff59d' }, strokes: [pen('00000006', '#000000', line(30, 100, 250, 150))] },
     { id: ids[2], size: { width: 816, height: 1056 }, template: { kind: 'blank' },
@@ -155,6 +158,11 @@ try:
         check('thin uniform pen (#60): stroked centrelines 0.5 px wide with round caps and joins (w, 1 J, 1 j, S), in their colours, one open subpath each',
               [c for c, _ in thin] == ['0 0 0', '0.118 0.357 0.847'] and all(body.count(' m\n') == 1 and ' h\n' not in body for _, body in thin)
               and thin[0][1].count(' c\n') > 20 and re.fullmatch(r'650 580 m\n650 580 l\n', thin[1][1]) is not None, thin)
+        dashes = re.findall(r'(\S+ \S+ \S+) RG (\S+) w 1 J 1 j (\[[^\]]*\]) 0 d\n((?:[^\n]* [mlc]\n)+)S\n\[\] 0 d\n', a0)
+        print('dashed and dotted strokes in the PDF:', [(c, w, d, len(body.split('\n')) - 1) for c, w, d, body in dashes])
+        check('dashed and dotted lines (#70): stroked with the d operator (dashed [7.5 5] at 2.5 px, dotted [0 2] at 1 px), round caps, then solid again',
+              [(c, w, d) for c, w, d, _ in dashes] == [('0 0 0', '2.5', '[7.5 5]'), ('0.827 0.184 0.184', '1', '[0 2]')]
+              and all(body.count(' m\n') == 1 and body.count(' c\n') > 20 for *_, body in dashes) and a0.count(' 0 d\n') == 4, dashes)
         check('vector ink: pen strokes in black and blue on the page, after the highlights',
               '0 0 0 rg' in a0 and '0.118 0.357 0.847 rg' in a0 and a0.index('/Hl Do') < a0.index('0.118 0.357 0.847 rg'), a0[:300])
         check('page transform: px scaled by 0.75 with y flipped', a0.startswith('q\n0.75 0 0 -0.75 0 792 cm'), a0[:60])

@@ -1,5 +1,6 @@
-// The toolbar's popover (#10): the picker of the tool in use (pen: nib, colours, custom colour,
-// size in 0.5 px steps, a live preview and "Save as favourite"; highlighter: the same without
+// The toolbar's popover (#10): the picker of the tool in use (pen: nib, line (#70: solid, dashed
+// or dotted, shown for the uniform nib only), colours, custom colour, size in 0.5 px steps, a
+// live preview and "Save as favourite"; highlighter: the same without
 // the nib; eraser: sizes and mode; lasso, #11: a hint and Paste), the page settings menu
 // (templates; #54, saving the page's background as a template and adding a page from a favourite
 // template; export) and the Import menu (#54: PDFs and images, once or as templates, which took
@@ -11,7 +12,7 @@ import { strokeGeometry } from '../format/outline';
 import type { Nib, Point } from '../format/page';
 import {
   COLOR_PRESETS, DEFAULT_PEN, ERASER_SIZES, HIGHLIGHTER_COLORS, HIGHLIGHTER_SIZES, MAX_PRESETS, SIZE_PRESETS, stepSize,
-  type ColorPreset, type EraserMode, type EraserSettings, type HighlighterSettings, type PenPreset, type PenSettings, type ToolKind,
+  type ColorPreset, type EraserMode, type EraserSettings, type HighlighterSettings, type LineDash, type PenPreset, type PenSettings, type ToolKind,
 } from './pen';
 import { canvasPath, HIGHLIGHT_ALPHA, paintPath, type Theme } from './renderer';
 
@@ -159,6 +160,10 @@ export class Picker {
     }
     const color = kind === 'pen' ? pen.color : hl.color, size = kind === 'pen' ? pen.size : hl.size;
     mark('.nb-ink-nib', el => el.dataset.nib === pen.nib);
+    // The line (#70): only the uniform nib can be dashed or dotted.
+    const line = this.el.querySelector<HTMLElement>('.nb-ink-dashes');
+    if (line) { if (pen.nib === 'uniform') line.show(); else line.hide(); }
+    mark('.nb-ink-dash', el => el.dataset.dash === pen.dash);
     mark('.nb-ink-swatch, .nb-ink-hl-swatch', el => el.dataset.color === color);
     mark('.nb-ink-size, .nb-ink-hl-size', el => Number(el.dataset.size) === size);
     const custom = this.el.querySelector<HTMLInputElement>('.nb-ink-custom-color');
@@ -171,7 +176,7 @@ export class Picker {
     mark('.nb-ink-ruler-unit', el => el.dataset.unit === h.rulerUnit?.());
     const angle = this.el.querySelector<HTMLInputElement>('.nb-ink-ruler-angle-input'), a = h.rulerAngle?.();
     if (angle && a != null && angle.ownerDocument.activeElement !== angle) angle.value = String(Math.round(a * 10) / 10);
-    this.drawPreview(kind, color, size, pen.nib);
+    this.drawPreview(kind, color, size, pen.nib, pen.dash);
   }
 
   private buildInk(kind: 'pen' | 'highlighter') {
@@ -182,6 +187,10 @@ export class Picker {
       const nibs = this.row('nb-ink-nibs', 'Pen type');
       for (const [nib, text] of [['uniform', 'Uniform'], ['pressure', 'Pressure']] as [Nib, string][]) {
         this.option(nibs, 'nb-ink-nib', text, `${text} pen`, () => h.setPen({ nib })).dataset.nib = nib;
+      }
+      const line = this.row('nb-ink-dashes', 'Line');
+      for (const [dash, text] of [['solid', 'Solid'], ['dashed', 'Dashed'], ['dotted', 'Dotted']] as [LineDash, string][]) {
+        this.option(line, 'nb-ink-dash', text, `${text} line`, () => h.setPen({ dash })).dataset.dash = dash;
       }
     }
     const colors = this.row(kind === 'pen' ? 'nb-ink-colors' : 'nb-ink-highlighter', 'Colour');
@@ -321,7 +330,7 @@ export class Picker {
     status?.show();
   }
 
-  private drawPreview(kind: 'pen' | 'highlighter', color: string, size: number, nib: Nib) {
+  private drawPreview(kind: 'pen' | 'highlighter', color: string, size: number, nib: Nib, dash: LineDash) {
     const c = this.canvas;
     if (!c) return;
     const dpr = window.devicePixelRatio || 1;
@@ -339,7 +348,9 @@ export class Picker {
     ctx.fillRect(0, 0, PREVIEW_W, PREVIEW_H);
     const points = previewPoints();
     // The pen as its next stroke will be written, with the advanced pen's taper and smoothing (#69).
-    const style = kind === 'pen' ? { tool: 'pen' as const, nib, size, ...this.host.strokeTuning?.() } : { tool: 'highlighter' as const, size };
+    // And its line (#70).
+    const style = kind === 'pen' ? { tool: 'pen' as const, nib, size, ...this.host.strokeTuning?.(), ...(nib === 'uniform' && dash !== 'solid' ? { dash } : {}) }
+      : { tool: 'highlighter' as const, size };
     const g = strokeGeometry({ ...style, points });
     if (kind === 'highlighter') ctx.globalAlpha = HIGHLIGHT_ALPHA;
     paintPath(ctx, style, canvasPath(style, g.d), color === DEFAULT_PEN.color ? theme.ink : color, g.ends ? new Path2D(g.ends) : null);

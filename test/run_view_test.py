@@ -716,9 +716,9 @@ try:
         check('pen picker: the toolbar is one row; the picker has nib, 8 swatches, 3 sizes and a stepper', r['layout']['height'] < 56 and r['layout']['swatches'] == 8, r['layout'])
         check('pen picker: clicks set nib, colour and size, and show them', r['shown'] == {'nib': 'pressure', 'color': '#e0301e', 'value': '4.5 px'}, r['shown'])
         check('pen picker: the next stroke saves with them, drawn in red', r['disk'][0] == ['pressure', '#e0301e', 4.5] and r['red'] > 200, r)
-        check('pen commands: uniform nib, next colour and next size', r['afterCmds'] == {'tool': 'pen', 'nib': 'uniform', 'color': '#1f9d55', 'size': 1.5} and r['disk'][1] == ['uniform', '#1f9d55', 1.5], r)
+        check('pen commands: uniform nib, next colour and next size', r['afterCmds'] == {'tool': 'pen', 'nib': 'uniform', 'color': '#1f9d55', 'size': 1.5, 'dash': 'solid'} and r['disk'][1] == ['uniform', '#1f9d55', 1.5], r)
         check('pen: setPen refuses a colour that is not #rrggbb, lowercases one that is, clamps sizes',
-              'Invalid pen colour' in r['threw'] and r['custom'] == {'tool': 'pen', 'nib': 'uniform', 'color': '#abcdef', 'size': 16, 'active': 0}, r)
+              'Invalid pen colour' in r['threw'] and r['custom'] == {'tool': 'pen', 'nib': 'uniform', 'color': '#abcdef', 'size': 16, 'dash': 'solid', 'active': 0}, r)
         page.locator('#leaf').screenshot(path=os.path.join(OUT, 'pen_strip.png'))
 
         # (8) the stats overlay toggles
@@ -3045,9 +3045,9 @@ try:
         print('presets:', r)
         check('presets: five labelled slots with the defaults', all(l.startswith(f'Favourite {i + 1}: ') for i, l in enumerate(r['labels']))
               and 'uniform pen #1e6fff 2.5 px' in r['labels'][1] and 'highlighter #ffd400 18 px' in r['labels'][4], r['labels'])
-        check('presets: one tap applies a pen preset and highlights it', r['blue'] == [{'tool': 'pen', 'nib': 'uniform', 'color': '#1e6fff', 'size': 2.5}, [1]], r['blue'])
+        check('presets: one tap applies a pen preset and highlights it', r['blue'] == [{'tool': 'pen', 'nib': 'uniform', 'color': '#1e6fff', 'size': 2.5, 'dash': 'solid'}, [1]], r['blue'])
         check('presets: one tap applies the highlighter preset (switching tool)', r['hl'] == ['highlighter', {'color': '#ffd400', 'size': 18}, [4]], r['hl'])
-        check('presets: the pressure preset; black 2.5 is not highlighted with it', r['pressure'] == [{'tool': 'pen', 'nib': 'pressure', 'color': '#000000', 'size': 4}, [3]], r['pressure'])
+        check('presets: the pressure preset; black 2.5 is not highlighted with it', r['pressure'] == [{'tool': 'pen', 'nib': 'pressure', 'color': '#000000', 'size': 4, 'dash': 'solid'}, [3]], r['pressure'])
         check('presets: no highlight once the settings match none', r['none'] == [], r['none'])
         check('presets: "Save as favourite" with all slots taken asks which to replace, then saves there',
               r['asks'] and r['saved'] == [{'tool': 'pen', 'color': '#000000', 'size': 5, 'nib': 'pressure'}, [2], 'Saved as favourite 3'], r)
@@ -3096,14 +3096,14 @@ try:
           return { soon, data: { tools: data.tools, presets: data.presets }, presets, back, warned: warned.length, parsed };
         }""")
         print('toolbar persistence:', r)
-        want = {'pen': {'tool': 'eraser', 'nib': 'uniform', 'color': '#8a8a8a', 'size': 3.5}, 'highlighter': {'color': '#4fc3f7', 'size': 22.5}, 'eraser': {'size': 14, 'mode': 'stroke'}}
+        want = {'pen': {'tool': 'eraser', 'nib': 'uniform', 'color': '#8a8a8a', 'size': 3.5, 'dash': 'solid'}, 'highlighter': {'color': '#4fc3f7', 'size': 22.5}, 'eraser': {'size': 14, 'mode': 'stroke'}}
         check('persist: tools are saved in the plugin data after a short delay', r['data']['tools'] == want and r['soon'] != __import__('json').dumps(want), r)
         check('persist: presets are saved in the plugin data', __import__('json').loads(r['presets']) == r['data']['presets'] and len(r['data']['presets']) == 5, r)
         check('persist: after a plugin reload a new view has the same tool, settings and presets',
               r['back']['other'] and {k: r['back'][k] for k in ('pen', 'highlighter', 'eraser')} == want and r['back']['active'] == 'eraser'
               and r['back']['presets'] == r['presets'], r['back'])
         check('persist: invalid saved tools and presets fall back to defaults with warnings',
-              r['warned'] >= 3 and r['parsed']['tools']['pen'] == {'tool': 'pen', 'nib': 'uniform', 'color': '#000000', 'size': 3}
+              r['warned'] >= 3 and r['parsed']['tools']['pen'] == {'tool': 'pen', 'nib': 'uniform', 'color': '#000000', 'size': 3, 'dash': 'solid'}
               and r['parsed']['presets'] == [{'tool': 'pen', 'color': '#000000', 'size': 2, 'nib': 'uniform'}, None], r['parsed'])
 
         # Portrait and landscape iPad widths: at most two rows, nothing cut off; the picker fits.
@@ -6609,6 +6609,195 @@ try:
         check('pen lab: the size buttons redraw it thinner', all(t < c[1] for t, c in zip(r['thin'], r['canvases'])), r['thin'])
         ev("() => view.toggleLab()")
         # ======== end of 33. The uniform pen's advanced settings (#69) ========
+
+        # ======== 34. Dashed and dotted lines (#70) ========
+        # The pen picker's Line row (uniform nib only), strokes drawn dashed and dotted with
+        # synthetic pen events (live as committed), the saved file, reopening, the SVG on its own
+        # against the editor, partial erasing, favourites and the commands.
+        r = ev("""async () => {
+          await p.createInkNote('Dashes', '', 'letter', 'blank');
+          await T.sleep(150);
+          view.setZoom(1);
+          view.setTool('pen');
+          view.setPen({ nib: 'uniform', color: '#000000', size: 2.5, dash: 'solid' });
+          const pk = T.picker(), row = pk.querySelector('.nb-ink-dashes');
+          const out = { options: [...row.querySelectorAll('.nb-ink-dash')].map(b => b.textContent), shown: row.style.display !== 'none',
+                        active: pk.querySelector('.nb-ink-dash.is-active')?.dataset.dash };
+          row.querySelector('[data-dash="dashed"]').click();
+          out.picked = view.pen.dash;
+          out.activeAfter = pk.querySelector('.nb-ink-dash.is-active')?.dataset.dash;
+          // The preview is dashed: along its middle row, ink and gaps alternate.
+          const pv = pk.querySelector('.nb-ink-preview'), g = pv.getContext('2d'), d = g.getImageData(0, 0, pv.width, pv.height).data;
+          let inked = 0;
+          for (let k = 0; k < d.length; k += 4) if (d[k] < 128) inked++;
+          out.previewInk = inked;
+          // A dashed stroke, mid-stroke then committed.
+          T.dashLine = (x0, y0, len) => Array.from({ length: Math.round(len / 0.4) }, (_, j) => [x0 + j * 0.4, y0, 0.1]);
+          const pts = T.dashLine(100, 120, 300);
+          await T.pen(0, pts, { predict: 0, up: false });
+          const inp = view.input, live = inp.live;
+          out.liveFrozen = live.frozen;
+          out.liveSame = inp.livePath === ink.strokePath({ ...live.style, points: live.trace.points.map(q => ({ ...q })) });
+          out.liveDash = live.style.dash;
+          T.penUp(0, pts[pts.length - 1]);
+          view.setPen({ dash: 'dotted', size: 1 });
+          await T.pen(0, T.dashLine(100, 160, 300), { predict: 0 });
+          view.setPen({ dash: 'solid', size: 2.5 });
+          await T.pen(0, T.dashLine(100, 200, 300), { predict: 0 });
+          const strokes = view.store.page(view.store.slots[0]).strokes;
+          out.dashes = strokes.map(s => s.dash ?? 'solid');
+          out.points = strokes.map(s => s.points.length);
+          // Along the dashed stroke in the bitmap: runs of ink and of paper.
+          const runs = y => {
+            const c = T.pages()[0].querySelector('canvas.nb-ink-bitmap'), s = c.width / 816;
+            const row = c.getContext('2d').getImageData(Math.round(110 * s), Math.round(y * s), Math.round(200 * s), 1).data;
+            let n = 0, prev = null;
+            for (let k = 0; k < row.length; k += 4) { const on = row[k] < 128; if (on !== prev) { n++; prev = on; } }
+            return n;
+          };
+          out.runs = [runs(120), runs(160), runs(200)];
+          return out;
+        }""")
+        print('dashed lines (#70):', r)
+        check('dashed lines (#70): the pen picker has a Line row (Solid, Dashed, Dotted), Solid first; picking Dashed sets the pen and marks it',
+              r['options'] == ['Solid', 'Dashed', 'Dotted'] and r['shown'] and r['active'] == 'solid' and r['picked'] == 'dashed' and r['activeAfter'] == 'dashed', r)
+        check('dashed lines: strokes are written dashed, dotted and solid as picked; the picker preview is drawn', r['dashes'] == ['dashed', 'dotted', 'solid'] and min(r['points']) > 500 and r['previewInk'] > 100, r)
+        check('dashed lines: live, a dashed stroke is drawn whole (not frozen in pieces) as the committed stroke of the points so far',
+              r['liveSame'] and r['liveFrozen'] == 0 and r['liveDash'] == 'dashed', r)
+        # 200 px of a 2.5 px dashed line: a 12.5 px period, 16 dashes (32 runs); 1 px dotted: 2 px period, 100 dots; solid: one run.
+        check('dashed lines: the page bitmap dashes the dashed line (about 16 dashes over 200 px), dots the dotted one (about 100), not the solid one',
+              28 <= r['runs'][0] <= 36 and 150 <= r['runs'][1] <= 210 and r['runs'][2] <= 3, r['runs'])
+
+        # the pressure nib: the Line row hides and the line goes back to solid, with a notice
+        r = ev("""async () => {
+          const pk = T.picker();
+          view.setPen({ dash: 'dashed' });
+          const before = notices.length;
+          pk.querySelector('.nb-ink-nib[data-nib="pressure"]').click();
+          const out = { dash: view.pen.dash, nib: view.pen.nib, shown: pk.querySelector('.nb-ink-dashes').style.display !== 'none',
+                        notice: notices.slice(before).join(' | ') };
+          pk.querySelector('.nb-ink-nib[data-nib="uniform"]').click();
+          out.back = [view.pen.nib, view.pen.dash, pk.querySelector('.nb-ink-dashes').style.display !== 'none'];
+          view.toolbar.closePicker();
+          // The commands, shown only in an ink view; a dashed line switches the pressure pen to the uniform nib.
+          const ids = ['pen-dash-solid', 'pen-dash-dashed', 'pen-dash-dotted'];
+          out.available = ids.map(id => commands[id].checkCallback(true));
+          commands['pen-dash-dotted'].checkCallback(false);
+          out.dotted = view.pen.dash;
+          view.setPen({ nib: 'pressure' });
+          commands['pen-dash-dashed'].checkCallback(false);
+          out.dashedFromPressure = [view.pen.nib, view.pen.dash];
+          commands['pen-dash-solid'].checkCallback(false);
+          out.solid = view.pen.dash;
+          return out;
+        }""")
+        print('dashed lines, nib and commands:', r)
+        check('dashed lines: choosing the pressure nib hides the Line row and sets the line back to solid, saying so',
+              r['dash'] == 'solid' and r['nib'] == 'pressure' and not r['shown'] and 'solid' in r['notice'] and r['back'] == ['uniform', 'solid', True], r)
+        check('dashed lines: the commands Use a solid / dashed / dotted line work in an ink view (a dashed line from the pressure pen switches to the uniform nib)',
+              r['available'] == [True, True, True] and r['dotted'] == 'dotted' and r['dashedFromPressure'] == ['uniform', 'dashed'] and r['solid'] == 'solid', r)
+        r = ev("""async () => {
+          const leaf = app.workspace.getLeaf(false), file = view.file;
+          if (!app.vault.getFile('Plain70.md')) await app.vault.create('Plain70.md', 'Plain markdown.');
+          await leaf.openFile(app.vault.getFile('Plain70.md'));
+          await T.sleep(50);
+          const out = ['pen-dash-solid', 'pen-dash-dashed', 'pen-dash-dotted'].map(id => commands[id].checkCallback(true));
+          await leaf.openFile(file);
+          await T.sleep(300);
+          return out;
+        }""")
+        check('dashed lines: the commands are not shown outside an ink view', r == [False, False, False], r)
+
+        # favourites carry the line, with a dashed or dotted ring on the mark
+        r = ev("""async () => {
+          const saved = JSON.parse(JSON.stringify(p.settings.presets));
+          view.setTool('pen');
+          view.setPen({ nib: 'uniform', color: '#1e6fff', size: 2.5, dash: 'dashed' });
+          view.savePreset(3);
+          view.setPen({ dash: 'dotted' });
+          view.savePreset(4);
+          const btn = i => view.contentEl.querySelector(`.nb-ink-preset[data-slot="${i}"]`);
+          const out = { presets: p.settings.presets.slice(3).map(x => x && x.dash), rings: [3, 4].map(i => [btn(i).hasClass('is-dashed'), btn(i).hasClass('is-dotted')]),
+                        label: btn(3).getAttribute('aria-label'), ring: getComputedStyle(btn(3).querySelector('.nb-ink-preset-mark')).outlineStyle };
+          view.setPen({ dash: 'solid' });
+          btn(3).click();
+          out.applied = [view.pen.dash, btn(3).hasClass('is-active'), btn(4).hasClass('is-active')];
+          await T.sleep(500);
+          out.persisted = pluginData.presets.slice(3).map(x => x && x.dash);
+          p.settings.presets = saved;
+          view.setPen({ dash: 'solid', color: '#000000' });
+          return out;
+        }""")
+        print('dashed lines, favourites:', r)
+        check('dashed lines: favourites carry dash (saved in the settings) and apply it; their marks get a dashed or dotted ring',
+              r['presets'] == ['dashed', 'dotted'] and r['persisted'] == ['dashed', 'dotted'] and r['rings'] == [[True, False], [False, True]]
+              and r['ring'] == 'dashed' and 'dashed' in r['label'] and r['applied'] == ['dashed', True, False], r)
+
+        # the saved file, the SVG on its own against the editor, reopening
+        path70 = ev("() => view.store.slots[0].path")
+        r = ev(f"""async () => {{
+          await view.save();
+          const text = fs.get('{path70}'), mem = view.store.page(view.store.slots[0]).strokes;
+          const line = s => text.split('\\n').find(l => l.startsWith(`<path data-id="${{s.id}}"`)) || '';
+          const out = {{ attrs: mem.map(s => (/stroke-dasharray="([^"]*)"/.exec(line(s)) || [null, null])[1]),
+                        keys: JSON.parse(/<!\\[CDATA\\[([\\s\\S]*)\\]\\]>/.exec(text)[1]).strokes.map(s => Object.keys(s).join()),
+                        back: ink.readPage(text).strokes.map(s => s.dash ?? 'solid'), same: ink.writePage(ink.readPage(text)) === text }};
+          const img = new Image();
+          img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(text);
+          await img.decode();
+          const R = 4, W = 320 * R, H = 110 * R;
+          const draw = file => {{
+            const c = document.createElement('canvas');
+            c.width = W; c.height = H;
+            const g = c.getContext('2d');
+            g.fillStyle = '#fff'; g.fillRect(0, 0, W, H);
+            if (file) g.drawImage(img, -90 * R, -110 * R, 816 * R, 1056 * R);
+            else {{
+              g.setTransform(R, 0, 0, R, -90 * R, -110 * R);
+              for (const s of mem) ink.paintPath(g, s, ink.canvasPath(s, ink.strokePath(s)), '#1f1f1f');
+            }}
+            return g.getImageData(0, 0, W, H).data;
+          }};
+          const a = draw(true), b = draw(false);
+          let diff = 0, inkSum = 0;
+          for (let k = 0; k < a.length; k += 4) {{ diff += Math.abs(a[k] - b[k]); inkSum += 255 - b[k]; }}
+          out.err = diff / inkSum;
+          out.inkSum = inkSum;
+          const before = T.pages()[0].querySelector('canvas.nb-ink-bitmap').getContext('2d').getImageData(0, 0, 900, 600).data;
+          const leaf = app.workspace.getLeaf(false), file = view.file;
+          if (!app.vault.getFile('Plain70.md')) await app.vault.create('Plain70.md', 'Plain markdown.');
+          await leaf.openFile(app.vault.getFile('Plain70.md'));
+          await T.sleep(50);
+          await leaf.openFile(file);
+          await T.sleep(400);
+          const after = T.pages()[0].querySelector('canvas.nb-ink-bitmap').getContext('2d').getImageData(0, 0, 900, 600).data;
+          let px = 0;
+          for (let k = 0; k < before.length; k += 4) if (before[k] !== after[k]) px++;
+          out.reopened = {{ px, dashes: view.store.page(view.store.slots[0]).strokes.map(s => s.dash ?? 'solid') }};
+          return out;
+        }}""")
+        print('dashed lines, the file:', r)
+        check('dashed lines file: stroke-dasharray 7.5 5 (dashed, 2.5 px) and 0 2 (dotted, 1 px), none on the solid stroke; dash in the metadata only where set',
+              r['attrs'] == ['7.5 5', '0 2', None] and r['keys'] == ['id,tool,nib,color,size,dash,points'] * 2 + ['id,tool,nib,color,size,points']
+              and r['back'] == ['dashed', 'dotted', 'solid'] and r['same'], r)
+        check("dashed lines file: drawn on its own (as Obsidian's reading view and GitHub draw it), the dashes and dots fall where the editor paints them (grey error under 0.05)",
+              r['inkSum'] > 50000 and r['err'] < 0.05, r)
+        check("dashed lines: the note reopened draws the same and keeps each stroke's line", r['reopened']['px'] == 0 and r['reopened']['dashes'] == ['dashed', 'dotted', 'solid'], r['reopened'])
+
+        # partial erase: the remnants keep the line
+        r = ev("""async () => {
+          view.setTool('eraser');
+          view.setEraser({ mode: 'partial' });
+          await T.pen(0, [[200, 100, 0.3], [200, 115, 0.3], [200, 130, 0.3], [200, 145, 0.3], [200, 175, 0.3]], { per: 1, predict: 0 });
+          view.setTool('pen');
+          const s = view.store.page(view.store.slots[0]).strokes;
+          return s.map(x => x.dash ?? 'solid');
+        }""")
+        print('dashed lines, after a partial erase across the dashed and dotted strokes:', r)
+        check('dashed lines: a partial erase cuts the dashed and dotted strokes; their remnants keep their dash',
+              r.count('dashed') == 2 and r.count('dotted') == 2 and r.count('solid') == 1, r)
+        page.locator('.nb-ink-page').first.screenshot(path=os.path.join(OUT, 'dashed_lines.png'))
+        # ======== end of 34. Dashed and dotted lines (#70) ========
 
         # --- unload removes the patch
         r = ev("""async () => {

@@ -46,7 +46,9 @@
 // page bitmap, and both overlays are cleared: that swap is the stroke settling. The uniform
 // pen's tunables (#69) come with the stroke's style: LiveFit stabilises and refits with the
 // stroke's own settings (liveFit), and a tapered stroke's live pieces taper the stroke's start
-// (the first piece) and its current end (the tail), as strokeGeometry does for the whole.
+// (the first piece) and its current end (the tail), as strokeGeometry does for the whole. A
+// dashed or dotted stroke (#70) is drawn whole each frame (see draw), so its pattern runs from its
+// start as the committed stroke's does.
 //
 // The highlighter (#6) is drawn translucent, at HIGHLIGHT_ALPHA like the page's highlight layer,
 // but composited once so that its frozen head and its tail (and the stroke where it crosses
@@ -760,6 +762,10 @@ export class PenInput {
     // Only points that no longer change are frozen (the refit's last 1.5 px still move), with
     // the pen's context after them (see piece).
     if (plan.freeze && pen && this.contextEnd(live, plan.frozen, count) > live.fit.settled) plan = livePlan(live.frozen, live.frozen);
+    // A dashed or dotted line (#70) is drawn whole every frame, never in frozen pieces: each piece
+    // would start the dash pattern again. Its cost grows with its length (a refit point every
+    // 0.6 to 1 px; a 1,000 px construction line is about 1,000 points), unlike a solid stroke's.
+    if (plan.freeze && live.style.tool === 'pen' && live.style.dash) plan = livePlan(live.frozen, live.frozen);
     if (plan.freeze) {
       if (pen) this.piece(this.headCtx, live, live.frozen, plan.frozen, count);
       else this.fill(this.headCtx, live, this.drawn(live, plan.freeze[0], plan.freeze[1]));

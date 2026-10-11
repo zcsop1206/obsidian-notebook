@@ -235,6 +235,17 @@
   box-shadow: inset 0 0 0 2px var(--interactive-accent, #7b6cd9);
 }
 
+/* #70: a dashed or dotted ring round the mark of a dashed or dotted pen favourite. */
+.nb-ink-preset.is-dashed .nb-ink-preset-mark,
+.nb-ink-preset.is-dotted .nb-ink-preset-mark {
+  outline: 2px dashed var(--text-normal);
+  outline-offset: 2px;
+}
+
+.nb-ink-preset.is-dotted .nb-ink-preset-mark {
+  outline-style: dotted;
+}
+
 .nb-ink-toolbar button.nb-ink-preset.is-empty {
   outline: 1px dashed var(--text-faint, #999);
   outline-offset: -8px;

@@ -12,7 +12,7 @@
 // as before. Everything is drawn in page px through pageTransform, so strokes, images and the
 // highlighter layer outside the band are simply clipped.
 import { DEFAULT_INK, prepareSave, type Page, type PageImage, type Size, type Stroke } from '../format/page';
-import { isStroked, strokeGeometryCached } from '../format/outline';
+import { dashArray, isStroked, strokeGeometryCached } from '../format/outline';
 import { fixedPaper, renderTemplate, type PdfTemplate, type Template } from '../format/template';
 import type { Band } from './layout';
 
@@ -55,8 +55,8 @@ export function pixelRatio(cssWidth: number, cssHeight: number, dpr = window.dev
   return area * dpr * dpr > MAX_CANVAS_PIXELS ? Math.sqrt(MAX_CANVAS_PIXELS / area) : dpr;
 }
 
-/** What decides how a stroke's path is painted: its tool, nib and size. */
-export type PaintStyle = { tool: string; nib?: string; size: number };
+/** What decides how a stroke's path is painted: its tool, nib and size, and its line (#70). */
+export type PaintStyle = { tool: string; nib?: string; size: number; dash?: string };
 
 /**
  * The Path2D of a stroke's path `d` (strokePath). A stroked centreline of zero length (a dot:
@@ -79,7 +79,9 @@ export function canvasPath(style: PaintStyle, d: string): Path2D {
 /**
  * Paints a stroke's path (canvasPath of its strokePath) in `color`, in the current transform:
  * a uniform pen's centreline stroked `size` wide with round caps and joins (#60), any other
- * stroke's outline filled. `ends`: a tapered stroke's ends (#69, strokeGeometry), filled too.
+ * stroke's outline filled. `ends`: a tapered stroke's ends (#69, strokeGeometry), filled too. A
+ * dashed or dotted stroke (#70) is stroked with its dashArray (the boost widens the line, never
+ * the pattern), and the dash is put back to solid after.
  */
 export function paintPath(ctx: CanvasRenderingContext2D, style: PaintStyle, path: Path2D, color: string, ends?: Path2D | null) {
   if (isStroked(style)) {
@@ -87,7 +89,13 @@ export function paintPath(ctx: CanvasRenderingContext2D, style: PaintStyle, path
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     ctx.strokeStyle = color;
-    ctx.stroke(path);
+    const dash = dashArray(style);
+    if (dash) {
+      ctx.setLineDash(dash);
+      ctx.lineDashOffset = 0;
+      ctx.stroke(path);
+      ctx.setLineDash([]);
+    } else ctx.stroke(path);
     if (ends) {
       ctx.fillStyle = color;
       ctx.fill(ends);
