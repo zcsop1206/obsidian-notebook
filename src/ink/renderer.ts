@@ -22,7 +22,7 @@ import { DEFAULT_INK, prepareSave, type Page, type PageImage, type Size, type St
 import { isStroked, strokePathCached } from '../format/outline';
 import { fixedPaper, renderTemplate, type PdfTemplate, type Template } from '../format/template';
 import type { Band } from './layout';
-import { deviceClip, imagePart, meets, pageMatrix, pageRectOf, type Clip, type PageMatrix, type Rect } from './dirty';
+import { clipHolds, deviceClip, imagePart, meets, pageMatrix, pageRectOf, type Clip, type PageMatrix, type Rect } from './dirty';
 
 export interface Theme {
   dark: boolean;
@@ -620,22 +620,13 @@ function scratchCanvas(width: number, height: number): CanvasRenderingContext2D 
 }
 
 /**
- * The highlighter canvas for a partial redraw (#68): only `clip` cleared, and clipped to it
- * (the caller restores the context). The rest keeps whatever it held; only `clip` is copied.
+ * The highlighter canvas for a partial redraw (#68): only `clip` cleared, not clipped (strokes
+ * drawn on it rasterise as in a full redraw; see renderRect). The rest keeps whatever it held,
+ * and only `clip` of it is used.
  */
 function scratchRegion(width: number, height: number, clip: Clip): CanvasRenderingContext2D {
-  if (!scratch) scratch = document.createElement('canvas');
-  if (scratch.width !== width || scratch.height !== height) {
-    scratch.width = width;
-    scratch.height = height;
-  }
-  const ctx = scratch.getContext('2d')!;
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  const ctx = scratchPlain(width, height);
   ctx.clearRect(clip.x, clip.y, clip.width, clip.height);
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(clip.x, clip.y, clip.width, clip.height);
-  ctx.clip();
   return ctx;
 }
 
@@ -659,18 +650,19 @@ function imageSize(img: CanvasImageSource): [number, number] {
 }
 
 /**
- * Draws `img` stretched over (0, 0, W, H) of the current transform, only the part under `r` of
- * that space (#68: imagePart, the 9-argument drawImage); the caller has clipped to `r`. Falls
- * back to drawing it whole (still clipped) when its size isn't known.
+ * Draws `img` stretched over (0, 0, W, H) of the current transform, for the part of that space
+ * under `r` (#68); the caller has clipped to `r`. An image drawn 1:1 (a line template of a
+ * band, a sharp render at the bitmap's size) is drawn only in part, through the 9-argument
+ * drawImage (imagePart). A scaled one is drawn whole, inside the clip: Chromium maps a source
+ * rectangle onto its destination with its own rounding, so a part of a scaled image can come out
+ * a pixel column off from the whole image drawn at the same scale (seen in the view test at
+ * 400%), and the clip already limits the drawing to its pixels.
  */
 function drawImagePart(ctx: CanvasRenderingContext2D, img: CanvasImageSource, W: number, H: number, r: Rect) {
   const [iw, ih] = imageSize(img);
-  if (!(iw > 0 && ih > 0)) {
-    ctx.drawImage(img, 0, 0, W, H);
-    return;
-  }
-  const p = imagePart(iw, ih, W, H, r);
+  const p = iw === W && ih === H ? imagePart(iw, ih, W, H, r, 0) : null;
   if (p) ctx.drawImage(img, p.sx, p.sy, p.sw, p.sh, p.dx, p.dy, p.dw, p.dh);
+  else if (!(iw === W && ih === H)) ctx.drawImage(img, 0, 0, W, H);
 }
 
 /** Frees the highlighter canvas (when the last view closes). */
@@ -814,7 +806,8 @@ export class PageBitmap {
    * Redraws only `rect` (page px) of the bitmap (#68), leaving it as render() would: clipped to
    * the whole device pixels the rectangle covers (dirty.ts), the paper, the part of the template
    * image under them, the images, the highlighter layer (composited through the scratch canvas
-   * in the same clip) and the pen strokes, of those that meet them. Returns false if the
+   * in the same clip) and the pen strokes, of those that meet them; strokes crossing the clip's
+   * edge are drawn unclipped on the scratch canvas (see below). Returns false if the
    * rectangle misses the bitmap (outside its band), when nothing is drawn.
    */
   renderRect(page: Page, theme: Theme, template: TemplateSource | null, rect: Rect, skip?: ReadonlySet<string> | null, onImage?: () => void): boolean {
@@ -848,11 +841,14 @@ export class PageBitmap {
     }
     const near = (s: Stroke) => !skip?.has(s.id) && meets(strokeBounds(s), area);
     const highlights = page.strokes.filter(s => s.tool === 'highlighter' && near(s));
+    // A path crossing a clip's edge can rasterise a little differently from the same path
+    // unclipped (Chromium's Skia: antialiased edge pixels off by a few levels), so strokes are
+    // never drawn clipped where they cross it: highlighters go onto the scratch canvas (the
+    // size of the bitmap, the clip's pixels cleared) unclipped, and are composited inside the clip.
     if (highlights.length) {
       const hctx = scratchRegion(w, h, clip);
       this.pageTransform(hctx, size);
       for (const s of highlights) paintStroke(hctx, s, strokeColor(s, theme));
-      hctx.restore();
       // Composited as render() does (the whole canvas at 40%, here inside the clip), so the
       // blending rounds the same way.
       ctx.globalAlpha = HIGHLIGHT_ALPHA;
@@ -860,12 +856,10 @@ export class PageBitmap {
       ctx.globalAlpha = 1;
     }
     const pens = page.strokes.filter(s => s.tool === 'pen' && near(s));
-    if (pens.some(isStroked)) {
-      // A stroked centreline (#60) crossing a clip's edge is rasterised slightly differently
-      // from the same stroke unclipped (Skia strokes it within the clip), so the pen strokes
-      // are drawn unclipped onto the highlighter canvas, the same size as the bitmap, over a
-      // copy of this part of it, and the part is copied back: the same pixels a full redraw
-      // gives. Copies are 1:1 and the bitmap is opaque, so they are exact.
+    if (pens.some(s => !clipHolds(clip, deviceClip(strokeBounds(s), m, w, h)))) {
+      // Pen strokes crossing the clip's edge: they are drawn unclipped onto the scratch canvas
+      // over a copy of the clip's pixels, which are copied back. Copies are 1:1 and the bitmap
+      // is opaque, so they are exact.
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       const sctx = scratchPlain(w, h);
       sctx.imageSmoothingEnabled = false;
@@ -878,7 +872,7 @@ export class PageBitmap {
       ctx.drawImage(scratch!, clip.x, clip.y, clip.width, clip.height, clip.x, clip.y, clip.width, clip.height);
       ctx.imageSmoothingEnabled = true;
     } else {
-      // Filled outlines rasterise the same clipped or not.
+      // Every pen stroke lies wholly inside the clip, which then changes nothing about it.
       this.pageTransform(ctx, size);
       for (const s of pens) this.fill(s, theme);
     }

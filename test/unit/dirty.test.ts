@@ -5,7 +5,7 @@
 // tiles of a sharp PDF render. The view test (section 33) checks the pixels.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { deviceClip, imagePart, meets, pageMatrix, pageRectOf, tiles, unionRect, unionRects, type Rect } from '../../src/ink/dirty';
+import { clipHolds, deviceClip, imagePart, meets, pageMatrix, pageRectOf, tiles, unionRect, unionRects, type Rect } from '../../src/ink/dirty';
 import { strokeBounds } from '../../src/ink/renderer';
 import type { Stroke } from '../../src/format/page';
 
@@ -69,7 +69,17 @@ test('deviceClip in a band bitmap: in the band\'s device px; a rectangle outside
   assert.notEqual(deviceClip([745, 400, 760, 410], m, 4000, 3000), null);
 });
 
-test('pageRectOf: the page rectangle of a clip, grown one device px; it covers the dirty rectangle', () => {
+test('clipHolds: a stroke\'s pixels wholly inside the clip, or off the bitmap', () => {
+  const clip = { x: 100, y: 100, width: 50, height: 40 };
+  assert.ok(clipHolds(clip, { x: 100, y: 100, width: 50, height: 40 }));
+  assert.ok(clipHolds(clip, { x: 120, y: 110, width: 10, height: 10 }));
+  assert.ok(clipHolds(clip, null));
+  assert.ok(!clipHolds(clip, { x: 99, y: 110, width: 10, height: 10 }));
+  assert.ok(!clipHolds(clip, { x: 140, y: 110, width: 11, height: 10 }));
+  assert.ok(!clipHolds(clip, { x: 120, y: 135, width: 10, height: 6 }));
+});
+
+test('pageRectOf:the page rectangle of a clip, grown one device px; it covers the dirty rectangle', () => {
   for (const [m, w, h] of [
     [pageMatrix(1632, 2112, 816, 1056, 816, 1056, null), 1632, 2112],
     [pageMatrix(4000, 3000, 3264, 4224, 816, 1056, { x: 1000, y: 1200, width: 2000, height: 1500 }), 4000, 3000],

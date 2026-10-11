@@ -76,6 +76,15 @@ export function deviceClip(rect: Rect, m: PageMatrix, width: number, height: num
 }
 
 /**
+ * Whether `outer` holds all of `inner` (null, nothing on the bitmap: yes). A stroke whose device
+ * pixels the clip holds is rasterised the same clipped or not.
+ */
+export function clipHolds(outer: Clip, inner: Clip | null): boolean {
+  return !inner || (inner.x >= outer.x && inner.y >= outer.y && inner.x + inner.width <= outer.x + outer.width
+    && inner.y + inner.height <= outer.y + outer.height);
+}
+
+/**
  * The page px rectangle a device clip covers, grown by `grow` device px each way: what a stroke
  * must meet (by its bounds) to put any pixel inside the clip, antialiasing included.
  */
