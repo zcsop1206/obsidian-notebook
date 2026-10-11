@@ -11,7 +11,7 @@ import { InkView, type InkClipboard } from './ink/view';
 import { RenameHandler } from './ink/rename';
 import { importNotice, importPdf, PdfNameModal, PdfSourceModal, type PdfChoice } from './ink/pdf-import';
 import { PdfPages, type PdfNote } from './ink/pdf';
-import { setSharpPdfRenderer } from './ink/renderer';
+import { setSharpPdfRenderer, setThinLineBoost } from './ink/renderer';
 import type { PdfTemplate } from './format/template';
 import { paperSize, type NotePaper } from './format/page';
 import { isTemplateName } from './format/template';
@@ -225,9 +225,10 @@ export default class NotebookPlugin extends Plugin {
 
   /** The advanced pen settings changed (#69): open ink views apply the thin-line boost. */
   penTuningChanged() {
+    const redraw = setThinLineBoost(this.settings.advancedPen.boost);
     for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_INK)) {
       const view = leaf.view;
-      if (view instanceof InkView) view.penTuningChanged();
+      if (view instanceof InkView) view.penTuningChanged(redraw);
     }
   }
 

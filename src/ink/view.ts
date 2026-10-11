@@ -980,9 +980,13 @@ export class InkView extends FileView {
     return this.pen.nib === 'uniform' ? tuningFields(this.tuning) : {};
   }
 
-  /** The advanced pen settings changed: redraw the pages if the thin-line boost now draws differently. */
-  penTuningChanged() {
-    if (setThinLineBoost(this.tuning.boost)) {
+  /**
+   * The advanced pen settings changed: redraw the pages if the thin-line boost now draws
+   * differently. `redraw`: whether it does, when the plugin has already set the boost (it is one
+   * setting for every view, so only the first view to set it would see the change).
+   */
+  penTuningChanged(redraw = setThinLineBoost(this.tuning.boost)) {
+    if (redraw) {
       for (const pv of this.pages) if (pv.bitmap) this.renderPage(pv);
       if (this.ghost?.bitmap) this.renderGhost();
     }
