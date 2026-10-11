@@ -22,7 +22,8 @@ import { Toolbar } from './toolbar';
 import { splitStroke } from './split';
 import { bandNeed, bitmapBand, emptyGhostPages, inksGhost, layoutPages, MARGIN, mostVisiblePage, pageAtY, pagesInBand, type Band, type Layout, type PageBox } from './layout';
 import { anchorAt, clampZoom, navStatsLines, Navigator, newNavStats, scrollToKeep, zoomStep, type NavStats } from './navigate';
-import { currentTheme, MAX_CANVAS_PIXELS, PageBitmap, pageTheme, releaseScratch, sameBand, strokeColor, TemplateImages, warmOutlines, type TemplateSource, type Theme } from './renderer';
+import { currentTheme, MAX_CANVAS_PIXELS, PageBitmap, pageTheme, pdfStats, releaseScratch, sameBand, strokeBounds, strokeColor, TemplateImages, warmOutlines, type TemplateSource, type Theme } from './renderer';
+import { unionRects, type Rect } from './dirty';
 import { SpatialIndex } from './spatial';
 import { PagesPanel } from './pages-panel';
 import { NoteStore, type NoteFiles, type PageSlot, type TemplatesBefore } from './store';
@@ -80,6 +81,17 @@ export interface InkStats {
   rebands?: number;
   /** Time of the last full page render, in ms. */
   lastRenderMs: number;
+  /** Time of the last page redraw (#68), partial or full, in ms, and which it was. */
+  redrawMs?: number;
+  redrawKind?: 'partial' | 'full';
+  /**
+   * Redraws of page bitmaps (#68): full (renderPage, drawing a page from scratch) and partial
+   * (renderRect) in all; the full ones the last stroke's commit caused (`stroke`), and those
+   * during the last eraser drag (`erase`) over its `eraseFrames` erase calls (a frame each).
+   */
+  redraws?: { full: number; partial: number; stroke: number; erase: number; eraseFrames: number };
+  /** Sharp PDF renders (#68, renderer.ts's pdfStats): the last one's render time, tiles and cancellations. */
+  pdf?: typeof pdfStats;
   /** Time from starting to load the note to its visible pages drawn, in ms. */
   openMs: number;
   /** File writes completed by this view. */
@@ -131,6 +143,20 @@ interface PageView {
   next?: { bitmap: PageBitmap; pending: number | null; waiting: boolean } | null;
 }
 
+/** The stats overlay's lines about page redraws and sharp PDF renders (#68). */
+export function redrawStatsLines(s: InkStats): string[] {
+  const r = s.redraws, out: string[] = [];
+  const ms = (n: number | undefined) => (n === undefined || !Number.isFinite(n) ? '-' : n.toFixed(2));
+  if (r) {
+    out.push(`redraw: last ${s.redrawKind ?? '-'} ${ms(s.redrawMs)} ms; full redraws: ${r.stroke} at the last stroke, ${r.erase} in the last erase (${r.eraseFrames} frames); ${r.full} full, ${r.partial} partial in all`);
+  }
+  const p = s.pdf;
+  if (p && p.requested) {
+    out.push(`pdf: last sharp render ${ms(p.renderMs)} ms in ${p.tiles} tiles (longest ${ms(p.tileMaxMs)} ms); ${p.received}/${p.requested} received, ${p.cancelled} tiles cancelled by the pen; cache ${(p.sharpPixels / 1e6).toFixed(1)}M px`);
+  }
+  return out;
+}
+
 /** NoteStore's file access through the vault API, so Obsidian's embeds and caches follow. */
 export function vaultFiles(app: App): NoteFiles {
   const vault = app.vault;
@@ -176,7 +202,10 @@ export function vaultFiles(app: App): NoteFiles {
 }
 
 export class InkView extends FileView {
-  stats: InkStats = { pagesLoaded: 0, pagesRendered: 0, lastRenderMs: 0, openMs: 0, saves: 0, pen: newPenStats(), nav: newNavStats() };
+  stats: InkStats = {
+    pagesLoaded: 0, pagesRendered: 0, lastRenderMs: 0, openMs: 0, saves: 0, pen: newPenStats(), nav: newNavStats(),
+    redraws: { full: 0, partial: 0, stroke: 0, erase: 0, eraseFrames: 0 }, pdf: pdfStats,
+  };
   /** The settings of the next stroke. */
   pen: PenSettings = { ...DEFAULT_PEN };
   /** The highlighter's colour and size (the pen's `tool` says which one is in use). */
@@ -859,14 +888,47 @@ export class InkView extends FileView {
     const t0 = performance.now();
     pv.bitmap!.render(page, this.theme, this.template(pv, page), this.hiddenOn(pv), this.imageReady(pv));
     pv.pending = null;
-    this.stats.lastRenderMs = performance.now() - t0;
+    this.stats.lastRenderMs = this.stats.redrawMs = performance.now() - t0;
+    this.stats.redrawKind = 'full';
+    this.stats.redraws!.full++;
   }
 
-  /** The page's rasterised template, or null (then it's redrawn when the image is ready). */
+  /**
+   * Redraws only `rect` (page px) of a page's bitmap (#68: erasing, see renderRect), or the
+   * whole page when its bitmap isn't finished yet (the pump is still drawing it). A band being
+   * drawn off screen (#52) is dropped, since strokes changed under it.
+   */
+  private redrawRect(pv: PageView, rect: Rect | null) {
+    const page = this.store?.page(pv.slot);
+    if (!pv.bitmap || !page || !rect) return;
+    if (pv.pending != null) {
+      this.renderPage(pv);
+      return;
+    }
+    this.dropNext(pv);
+    const t0 = performance.now();
+    pv.bitmap.renderRect(page, this.theme, this.template(pv, page), rect, this.hiddenOn(pv), this.imageReady(pv));
+    this.stats.redrawMs = performance.now() - t0;
+    this.stats.redrawKind = 'partial';
+    this.stats.redraws!.partial++;
+  }
+
+  private templateCallbacks = new WeakMap<PageView, () => void>();
+
+  /**
+   * The page's rasterised template, or null (then it's redrawn when the image is ready). The
+   * callback is the same function for a page every time (#68), so a page waiting for a sharp
+   * PDF render is redrawn once when it arrives, however often it was asked for meanwhile.
+   */
   private template(pv: PageView, page: Page): TemplateSource | null {
-    const t = this.templates.layer(page.template, page.size, pv.bitmap!, this.theme, () => {
-      if (pv.bitmap && this.pages.includes(pv)) this.renderPage(pv);
-    });
+    let ready = this.templateCallbacks.get(pv);
+    if (!ready) {
+      ready = () => {
+        if (pv.bitmap && this.pages.includes(pv)) this.renderPage(pv);
+      };
+      this.templateCallbacks.set(pv, ready);
+    }
+    const t = this.templates.layer(page.template, page.size, pv.bitmap!, this.theme, ready);
     return t === 'loading' ? null : t;
   }
 
@@ -919,8 +981,17 @@ export class InkView extends FileView {
     store.addStroke(pv.slot, stroke);
     pv.spatial?.add(stroke);
     if (stroke.tool === 'highlighter') this.dropNext(pv); // a band being drawn has its highlighter layer already (#52)
-    if (pv.bitmap && pv.pending == null) pv.bitmap.addStroke(page, stroke, this.theme, this.template(pv, page));
-    else this.renderPage(pv);
+    const full = this.stats.redraws!.full;
+    if (pv.bitmap && pv.pending == null) {
+      // A highlighter redraws only the part of the page it covers (#68).
+      const t0 = performance.now();
+      if (pv.bitmap.addStroke(page, stroke, this.theme, this.template(pv, page), this.imageReady(pv)) === 'partial') {
+        this.stats.redrawMs = performance.now() - t0;
+        this.stats.redrawKind = 'partial';
+        this.stats.redraws!.partial++;
+      }
+    } else this.renderPage(pv);
+    this.stats.redraws!.stroke = this.stats.redraws!.full - full;
     this.updateStats();
     if (!freehand) {
       this.recordStrokes('Add stroke', pv.slot.id, [{ index: page.strokes.length - 1, stroke }], true);
@@ -1006,19 +1077,29 @@ export class InkView extends FileView {
     const page = this.store && index >= 0 ? this.store.page(pv.slot) : null;
     if (!page) return;
     if (!pv.spatial) pv.spatial = new SpatialIndex(page.size, page.strokes);
-    if (start) this.lastErase = this.lastSplit = null; // a new drag: its first change is a new undo step
+    const redraws = this.stats.redraws!;
+    if (start) {
+      this.lastErase = this.lastSplit = null; // a new drag: its first change is a new undo step
+      this.eraseFullBase = redraws.full; // #68: full redraws during this drag
+      redraws.eraseFrames = 0;
+    }
     const ids = pv.spatial.hitPath(path, radius, this.eraseHits);
     if (ids.length) {
       if (mode === 'stroke') tally.removed += this.eraseStrokes(index, ids, !start).length;
       else this.splitStrokes(index, ids, path, radius, !start, tally);
     }
     ids.length = 0;
+    redraws.eraseFrames++;
+    redraws.erase = redraws.full - this.eraseFullBase;
   }
+
+  /** Full redraws before the eraser drag in progress began (#68). */
+  private eraseFullBase = 0;
 
   /**
    * The partial eraser (#15): cuts the part of each of these strokes within `radius` of `path`
    * out of it (see split.ts), replacing the stroke by its remnants at its index, as one undoable
-   * edit; keeps the page's eraser index in step and redraws the page once. With `join`, the
+   * edit; keeps the page's eraser index in step and redraws where the cut strokes were (#68). With `join`, the
    * edit joins the previous one of the same drag (as eraseStrokes does), so a drag is one undo
    * step. Undo puts the originals back and takes the remnants out, latest first; redo cuts
    * again with the same remnants (same ids). Saved by the autosave.
@@ -1049,7 +1130,9 @@ export class InkView extends FileView {
       } else tally.removed++;
     }
     if (!cuts.length) return;
-    this.redrawPage(pageId);
+    // Only where the cut strokes were (#68): the remnants lie within them.
+    this.redrawRect(pv, unionRects(cuts.map(c => strokeBounds(c.stroke))));
+    this.updateStats();
     const last = this.lastSplit, depth = this.history.labels.length;
     if (join && last && last.store === store && last.pageId === pageId && last.depth === depth && !this.history.canRedo) {
       last.cuts.push(...cuts);
@@ -1186,7 +1269,7 @@ export class InkView extends FileView {
   }
 
   private renderStats() {
-    if (this.statsShown) this.statsEl.setText([...penStatsLines(this.stats.pen, this.pen), ...eraseStatsLines(this.input.lastErase), ...this.lassoStatsLines(), ...navStatsLines(this.stats.nav)].join('\n'));
+    if (this.statsShown) this.statsEl.setText([...penStatsLines(this.stats.pen, this.pen), ...eraseStatsLines(this.input.lastErase), ...this.lassoStatsLines(), ...navStatsLines(this.stats.nav), ...redrawStatsLines(this.stats)].join('\n'));
   }
 
   // ---- adding pages
@@ -1525,7 +1608,7 @@ export class InkView extends FileView {
 
   /**
    * Removes these strokes from page `pageIndex` as one undoable edit, keeps the page's eraser
-   * index in step and redraws the page once. Every erase goes through here (the eraser, #7, via
+   * index in step and redraws the part of the page they covered (#68). Every erase goes through here (the eraser, #7, via
    * eraseAlong). With `join`, the removal joins the previous erase if that was on the same page
    * and is still the latest edit, so one eraser drag (erasing over many frames) is one undo
    * step. Returns the removed strokes with the indices they had (see NoteStore.removeStrokes);
@@ -1539,7 +1622,8 @@ export class InkView extends FileView {
     const removed = store.removeStrokes(pageId, ids);
     if (!removed.length) return removed;
     if (pv.spatial) for (const r of removed) pv.spatial.remove(r.stroke.id);
-    this.redrawPage(pageId);
+    this.redrawRect(pv, unionRects(removed.map(r => strokeBounds(r.stroke)))); // only where they were (#68)
+    this.updateStats();
     const last = this.lastErase, depth = this.history.labels.length;
     if (join && last && last.store === store && last.pageId === pageId && last.depth === depth && !this.history.canRedo) {
       last.batches.push(removed);
