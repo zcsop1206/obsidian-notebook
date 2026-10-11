@@ -122,7 +122,7 @@ try:
         page.on('console', lambda m: m.type == 'error' and errors.append(m.text))
         page.goto(f'http://localhost:{port}/test/harness.html')
         page.add_script_tag(url=f'http://localhost:{port}/test/out/view-fixture.js')
-        page.evaluate("async () => { window.p = await loadPlugin(); }")
+        page.evaluate("async () => { window.pluginData = { hintsShown: true }; window.p = await loadPlugin(); }")  # no first-run hint (#71) over the pages
         page.evaluate(HELPERS)
         ev = page.evaluate
 

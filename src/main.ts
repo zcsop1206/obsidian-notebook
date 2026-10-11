@@ -171,6 +171,13 @@ export default class NotebookPlugin extends Plugin {
     await this.saveData(this.settings);
   }
 
+  /** Redraws the toolbar of every open ink view, after a setting it shows changed (the toolbar size, #71). */
+  refreshInkViews() {
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_INK)) {
+      if (leaf.view instanceof InkView) leaf.view.toolbar?.render();
+    }
+  }
+
   /** A command shown only when an ink view is active. */
   private addInkCommand(id: string, name: string, run: (view: InkView) => void) {
     this.addCommand({

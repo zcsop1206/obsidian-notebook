@@ -190,12 +190,39 @@ export function nextEraserSize(size: number): number {
   return ERASER_SIZES.find(s => s > size) ?? ERASER_SIZES[0];
 }
 
-// ---- the toolbar (#10): size stepping, favourite presets and the saved tool state
+// ---- the toolbar (#10): size stepping, the size slider (#71), favourite presets and the saved tool state
 
 /** `size` moved one 0.5 px step thinner (dir -1) or thicker (+1), clamped for the tool. */
 export function stepSize(tool: 'pen' | 'highlighter', size: number, dir: -1 | 1): number {
   const next = size + dir * SIZE_STEP;
   return tool === 'highlighter' ? clampHighlighterSize(next) : clampSize(next);
+}
+
+// ---- the size slider (#71)
+
+/** The size range of the pen or the highlighter, in page px. */
+export function sizeRange(tool: 'pen' | 'highlighter'): { min: number; max: number } {
+  return tool === 'highlighter' ? { min: HIGHLIGHTER_MIN_SIZE, max: HIGHLIGHTER_MAX_SIZE } : { min: MIN_SIZE, max: MAX_SIZE };
+}
+
+/**
+ * The size at position `u` (0 to 1) of the pickers' size slider (#71). The scale is logarithmic,
+ * so the fine sizes most writing uses get as much of the track as the thick ones: the pen's quick
+ * sizes 1.5, 2.5 and 4 px sit at about a third, a half and three fifths of it (on a linear scale
+ * all three would crowd into its first quarter). Rounded to the 0.5 px grid and clamped for the tool.
+ */
+export function sliderSize(tool: 'pen' | 'highlighter', u: number): number {
+  const { min, max } = sizeRange(tool);
+  const t = Math.min(1, Math.max(0, Number.isFinite(u) ? u : 0));
+  const s = min * Math.pow(max / min, t);
+  return tool === 'highlighter' ? clampHighlighterSize(s) : clampSize(s);
+}
+
+/** Where `size` sits on the size slider, 0 to 1: the inverse of sliderSize. */
+export function sliderPosition(tool: 'pen' | 'highlighter', size: number): number {
+  const { min, max } = sizeRange(tool);
+  const s = Math.min(max, Math.max(min, Number.isFinite(size) ? size : min));
+  return Math.log(s / min) / Math.log(max / min);
 }
 
 /** A favourite: a tool with its colour, size and (for the pen) nib, applied with one tap. */

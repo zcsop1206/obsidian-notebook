@@ -151,20 +151,35 @@
 }
 
 /*
- * The ink toolbar (#10): one row of 40 px icon buttons that wraps onto a second row when the
- * view is narrow (never scrolls sideways). Tools on the left, favourite presets in the middle,
- * page actions on the right.
+ * The ink toolbar (#10, #71): one row that never wraps. Tools on the left, the inline colours
+ * (900 px and up), the favourite presets, then the page actions; when they don't fit, all but
+ * undo and redo fold into "⋯" (src/ink/toolbar-layout.ts picks the layout by measuring). The
+ * buttons are 44 px, or 36 px with "Toolbar size: Compact". The rules are prefixed with
+ * .nb-ink-view so Obsidian's own button styles (padding, min sizes on mobile) don't win.
  */
 .nb-ink-toolbar {
+  --nb-ink-button: 44px;
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   justify-content: space-between;
-  gap: 4px 12px;
+  gap: 8px;
   flex: none;
   padding: 4px 8px;
+  /* Only at widths where even the narrowest layout overflows (a phone): scrolls, never wraps. */
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
   border-bottom: 1px solid var(--background-modifier-border);
   background: var(--background-primary, #fff);
+}
+
+.nb-ink-toolbar::-webkit-scrollbar {
+  display: none;
+}
+
+.nb-ink-toolbar.is-compact {
+  --nb-ink-button: 36px;
 }
 
 .nb-ink-group {
@@ -174,10 +189,13 @@
   flex: none;
 }
 
-.nb-ink-toolbar button.nb-ink-button {
-  width: 40px;
-  min-width: 40px;
-  height: 40px;
+.nb-ink-view .nb-ink-toolbar button.nb-ink-button {
+  position: relative;
+  box-sizing: border-box;
+  width: var(--nb-ink-button);
+  min-width: var(--nb-ink-button);
+  height: var(--nb-ink-button);
+  min-height: 0;
   margin: 0;
   padding: 0;
   display: inline-flex;
@@ -188,26 +206,176 @@
   background: transparent;
   box-shadow: none;
   color: var(--icon-color, var(--text-muted, #666));
+  font-size: var(--font-ui-small, 13px);
   cursor: pointer;
 }
 
-.nb-ink-toolbar button.nb-ink-button:hover {
+.nb-ink-view .nb-ink-toolbar button.nb-ink-button:hover {
   background: var(--background-modifier-hover, rgba(0, 0, 0, 0.06));
 }
 
-.nb-ink-toolbar button.nb-ink-button.is-active {
+.nb-ink-view .nb-ink-toolbar button.nb-ink-button.is-active {
   background: var(--interactive-accent, #7b6cd9);
   color: var(--text-on-accent, #fff);
 }
 
-.nb-ink-toolbar button.nb-ink-button:disabled {
+.nb-ink-view .nb-ink-toolbar button.nb-ink-button:disabled {
   opacity: 0.35;
   cursor: default;
 }
 
-.nb-ink-toolbar button.nb-ink-button svg {
+.nb-ink-view .nb-ink-toolbar button.nb-ink-button > svg {
   width: 20px;
   height: 20px;
+  flex: none;
+}
+
+/* The page actions that fold into "⋯" (#71), and "⋯" itself, shown only when folded. */
+.nb-ink-view .nb-ink-toolbar.is-collapsed button.nb-ink-collapsible,
+.nb-ink-view .nb-ink-toolbar:not(.is-collapsed) button.nb-ink-more {
+  display: none;
+}
+
+/* "Page" and "Import" with their labels on wide layouts (#71). */
+.nb-ink-view .nb-ink-toolbar.has-labels button.nb-ink-button.has-label {
+  width: auto;
+  gap: 6px;
+  padding: 0 10px 0 8px;
+}
+
+.nb-ink-toolbar:not(.has-labels) .nb-ink-button-label {
+  display: none;
+}
+
+.nb-ink-button-label {
+  white-space: nowrap;
+}
+
+/*
+ * The tools at a glance (#71): pen and highlighter in their colour (the icon and a 3 px bar
+ * under it as long as the size), the eraser's mode as a badge, and a chevron on the active
+ * tool. The active tool is ringed rather than filled so its colour stays readable. Default
+ * black is the theme's ink colour (src/ink/renderer.ts, LIGHT.ink / DARK.ink).
+ */
+.nb-ink-tool.is-default-ink {
+  --nb-tool-color: #1f1f1f;
+}
+
+.theme-dark .nb-ink-tool.is-default-ink {
+  --nb-tool-color: #e6e3de;
+}
+
+.nb-ink-view .nb-ink-toolbar button.nb-ink-tool.is-active {
+  background: var(--background-modifier-active-hover, rgba(123, 108, 217, 0.15));
+  box-shadow: inset 0 0 0 2px var(--interactive-accent, #7b6cd9);
+  color: var(--text-normal, #222);
+}
+
+.nb-ink-view .nb-ink-toolbar button.nb-ink-tool.nb-ink-tool-pen,
+.nb-ink-view .nb-ink-toolbar button.nb-ink-tool.nb-ink-tool-highlighter {
+  color: var(--nb-tool-color, var(--text-normal, #222));
+}
+
+.nb-ink-view .nb-ink-toolbar button.nb-ink-tool-pen > svg,
+.nb-ink-view .nb-ink-toolbar button.nb-ink-tool-highlighter > svg {
+  margin-bottom: 5px;
+}
+
+.nb-ink-tool-bar {
+  position: absolute;
+  left: 50%;
+  bottom: 5px;
+  height: 3px;
+  transform: translateX(-50%);
+  border-radius: 2px;
+  background: var(--nb-tool-color, currentColor);
+}
+
+.nb-ink-tool-highlighter .nb-ink-tool-bar {
+  opacity: 0.8;
+}
+
+.nb-ink-view .nb-ink-toolbar button.nb-ink-eraser > svg {
+  margin-bottom: 8px;
+}
+
+.nb-ink-tool-badge {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 2px;
+  font-size: 9px;
+  line-height: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-align: center;
+  text-transform: uppercase;
+  color: var(--text-muted, #666);
+  pointer-events: none;
+}
+
+.nb-ink-tool-chevron {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  display: none;
+  width: 10px;
+  height: 10px;
+  color: var(--interactive-accent, #7b6cd9);
+  pointer-events: none;
+}
+
+.nb-ink-tool.is-active .nb-ink-tool-chevron {
+  display: block;
+}
+
+.nb-ink-view .nb-ink-toolbar .nb-ink-tool-chevron svg {
+  display: block;
+  width: 10px;
+  height: 10px;
+  margin: 0;
+  stroke-width: 3px;
+}
+
+/* The inline colours (#71): 26 px swatches, room for the pen's 8 always kept so nothing shifts. */
+.nb-ink-inline-colors {
+  min-width: calc(8 * 26px + 7 * 2px);
+}
+
+.nb-ink-toolbar:not(.has-strip) .nb-ink-inline-colors {
+  display: none;
+}
+
+.nb-ink-view .nb-ink-toolbar button.nb-ink-inline-swatch {
+  width: 26px;
+  min-width: 26px;
+}
+
+.nb-ink-inline-dot {
+  display: block;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1px solid var(--background-modifier-border);
+  box-sizing: border-box;
+  background: var(--nb-swatch, #1f1f1f);
+}
+
+.nb-ink-inline-swatch.is-highlighter .nb-ink-inline-dot {
+  border-radius: 4px;
+  opacity: 0.85;
+}
+
+.theme-dark .nb-ink-inline-swatch.is-default-ink .nb-ink-inline-dot {
+  background: #e6e3de;
+}
+
+.nb-ink-view .nb-ink-toolbar button.nb-ink-inline-swatch.is-active {
+  background: transparent;
+}
+
+.nb-ink-inline-swatch.is-active .nb-ink-inline-dot {
+  box-shadow: 0 0 0 2px var(--background-primary, #fff), 0 0 0 4px var(--interactive-accent, #7b6cd9);
 }
 
 /* A favourite: a dot as wide as its stroke, or a bar for the highlighter; dashed when empty. */
@@ -230,14 +398,53 @@
   background: #e6e3de;
 }
 
-.nb-ink-toolbar button.nb-ink-preset.is-active {
+.nb-ink-view .nb-ink-toolbar button.nb-ink-preset.is-active {
   background: var(--background-modifier-hover, rgba(0, 0, 0, 0.06));
   box-shadow: inset 0 0 0 2px var(--interactive-accent, #7b6cd9);
 }
 
-.nb-ink-toolbar button.nb-ink-preset.is-empty {
+.nb-ink-view .nb-ink-toolbar button.nb-ink-preset.is-empty {
   outline: 1px dashed var(--text-faint, #999);
   outline-offset: -8px;
+}
+
+/* The first-run hint under the toolbar (#71), until dismissed. */
+.nb-ink-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  padding: 4px 4px 4px 12px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary-alt, var(--background-secondary, #f4f4f4));
+  color: var(--text-muted, #555);
+  font-size: var(--font-ui-small, 13px);
+}
+
+.nb-ink-hint-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.nb-ink-view button.nb-ink-hint-close {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  min-height: 0;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  color: var(--icon-color, var(--text-muted, #666));
+  cursor: pointer;
+}
+
+.nb-ink-hint-close svg {
+  width: 16px;
+  height: 16px;
 }
 
 /* The picker: a popover under its button, over the pages. */
@@ -339,9 +546,109 @@
 
 .nb-ink-size-value {
   min-width: 52px;
-  text-align: center;
+  text-align: right;
   font-size: var(--font-ui-small, 13px);
   font-variant-numeric: tabular-nums;
+}
+
+/*
+ * The size slider (#71): −, the slider with the quick sizes as ticks under it, +. The thumb's
+ * centre runs over the track, inset by its radius (11 px), and so do the ticks; --nb-u is the
+ * position, 0 to 1, on the slider's log scale (src/ink/pen.ts, sliderPosition).
+ */
+.nb-ink-picker-row.nb-ink-sizes,
+.nb-ink-picker-row.nb-ink-hl-sizes {
+  align-items: flex-start;
+}
+
+.nb-ink-slider-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  width: 100%;
+}
+
+.nb-ink-slider-head .nb-ink-picker-label {
+  width: auto;
+}
+
+.nb-ink-slider-wrap {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+.nb-ink-slider {
+  position: relative;
+  height: 32px;
+  touch-action: none;
+  cursor: pointer;
+  outline: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.nb-ink-slider-track {
+  position: absolute;
+  left: 11px;
+  right: 11px;
+  top: 14px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--background-modifier-border, #ddd);
+  overflow: hidden;
+}
+
+.nb-ink-slider-fill {
+  width: calc(var(--nb-u, 0) * 100%);
+  height: 100%;
+  background: var(--interactive-accent, #7b6cd9);
+}
+
+.nb-ink-slider-thumb {
+  position: absolute;
+  top: 5px;
+  left: calc(11px + var(--nb-u, 0) * (100% - 22px));
+  width: 22px;
+  height: 22px;
+  margin-left: -11px;
+  box-sizing: border-box;
+  border-radius: 50%;
+  border: 2px solid var(--interactive-accent, #7b6cd9);
+  background: var(--background-primary, #fff);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  pointer-events: none;
+}
+
+.nb-ink-slider:focus-visible .nb-ink-slider-thumb {
+  box-shadow: 0 0 0 3px var(--background-modifier-border-focus, rgba(123, 108, 217, 0.45));
+}
+
+.nb-ink-slider-ticks {
+  position: relative;
+  height: 24px;
+}
+
+.nb-ink-picker .nb-ink-slider-ticks button {
+  position: absolute;
+  top: 2px;
+  left: calc(11px + var(--nb-u, 0) * (100% - 22px));
+  transform: translateX(-50%);
+  min-width: 22px;
+  min-height: 0;
+  height: 22px;
+  padding: 0 2px;
+  font-size: var(--font-ui-smaller, 12px);
+  font-variant-numeric: tabular-nums;
+}
+
+.nb-ink-picker .nb-ink-slider-ticks button::before {
+  content: '';
+  position: absolute;
+  top: -6px;
+  left: 50%;
+  width: 1px;
+  height: 5px;
+  background: var(--text-faint, #999);
 }
 
 .nb-ink-preview {
@@ -360,6 +667,26 @@
 .nb-ink-picker .nb-ink-menu-item {
   justify-content: flex-start;
   text-align: left;
+}
+
+/* Menu groups (#71): the page menu's headings and separators; a toggle's state in "⋯". */
+.nb-ink-menu-heading {
+  margin-bottom: -4px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller, 12px);
+  font-weight: 600;
+}
+
+.nb-ink-menu-sep {
+  height: 1px;
+  margin: 0 -10px;
+  background: var(--background-modifier-border);
+}
+
+.nb-ink-picker .nb-ink-menu-item.is-on::after {
+  content: '✓';
+  margin-left: auto;
+  padding-left: 12px;
 }
 
 /* Pen stats overlay ("Toggle ink stats overlay"). */
@@ -808,7 +1135,7 @@
 }
 
 /* The page indicator in the toolbar ("37 / 812", #64): a text button; a tap asks for a page. */
-.nb-ink-toolbar button.nb-ink-page-indicator {
+.nb-ink-view .nb-ink-toolbar button.nb-ink-button.nb-ink-page-indicator {
   width: auto;
   min-width: 36px;
   padding: 0 8px;
@@ -817,7 +1144,7 @@
   white-space: nowrap;
 }
 
-.nb-ink-toolbar button.nb-ink-page-indicator.is-empty {
+.nb-ink-view .nb-ink-toolbar button.nb-ink-button.nb-ink-page-indicator.is-empty {
   display: none;
 }
 

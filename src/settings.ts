@@ -1,11 +1,13 @@
 // Plugin settings: the paper size and template of new ink notes, and the ink toolbar's tools and
-// favourite presets (#10), the templates folder (#21) and the favourite templates (#54).
+// favourite presets (#10), the templates folder (#21), the favourite templates (#54), and the
+// toolbar's button size and whether its first-run hint was dismissed (#71).
 import { PluginSettingTab, Setting, type App, type Plugin } from 'obsidian';
 import type { Paper } from './format/page';
 import { BUILT_IN_TEMPLATES, isTemplateName } from './format/template';
 import { isFavourite, parseFavourites, toggleFavourite } from './ink/favourites';
 import { DEFAULT_PRESETS, DEFAULT_TOOL_STATE, parsePresets, parseToolState, type PenPreset, type ToolState } from './ink/pen';
 import { canonicalName, isCustomName, templateRegistry } from './ink/templates';
+import { DEFAULT_TOOLBAR_SIZE, parseToolbarSize, type ToolbarSize } from './ink/toolbar-layout';
 
 export interface NotebookSettings {
   /** Paper size of new ink notes. */
@@ -25,11 +27,15 @@ export interface NotebookSettings {
   favouriteTemplates: string[];
   /** Whether new notes start with the first favourite template (else `template`) (#54). */
   favouriteDefault: boolean;
+  /** The ink toolbar's buttons: compact 36 px or comfortable 44 px (#71). */
+  toolbarSize: ToolbarSize;
+  /** Whether the ink view's first-run hint was dismissed (#71); until then each ink view shows it. */
+  hintsShown: boolean;
 }
 
 export const DEFAULT_SETTINGS: NotebookSettings = {
   paper: 'letter', template: 'blank', tools: DEFAULT_TOOL_STATE, presets: [...DEFAULT_PRESETS], templatesFolder: 'templates/ink',
-  favouriteTemplates: [], favouriteDefault: true,
+  favouriteTemplates: [], favouriteDefault: true, toolbarSize: DEFAULT_TOOLBAR_SIZE, hintsShown: false,
 };
 
 /** Settings from saved data, ignoring unknown or invalid values (with a warning for a template). */
@@ -47,12 +53,16 @@ export function parseSettings(data: unknown): NotebookSettings {
     templatesFolder,
     favouriteTemplates: parseFavourites(d.favouriteTemplates),
     favouriteDefault: typeof d.favouriteDefault === 'boolean' ? d.favouriteDefault : DEFAULT_SETTINGS.favouriteDefault,
+    toolbarSize: parseToolbarSize(d.toolbarSize),
+    hintsShown: d.hintsShown === true,
   };
 }
 
 interface SettingsHost extends Plugin {
   settings: NotebookSettings;
   saveSettings(): Promise<void>;
+  /** Brings open ink views in line with changed settings (the toolbar size, #71). */
+  refreshInkViews?(): void;
 }
 
 export class NotebookSettingTab extends PluginSettingTab {
@@ -102,6 +112,18 @@ export class NotebookSettingTab extends PluginSettingTab {
         .setValue(this.plugin.settings.templatesFolder)
         .onChange(async value => {
           this.plugin.settings.templatesFolder = value.trim() || DEFAULT_SETTINGS.templatesFolder;
+          await this.plugin.saveSettings();
+        }));
+    new Setting(containerEl)
+      .setName('Toolbar size')
+      .setDesc('The ink toolbar\'s buttons: compact (36 px) fits more on a narrow screen, comfortable (44 px) is easier to hit.')
+      .addDropdown(d => d
+        .addOption('compact', 'Compact')
+        .addOption('comfortable', 'Comfortable')
+        .setValue(this.plugin.settings.toolbarSize)
+        .onChange(async value => {
+          this.plugin.settings.toolbarSize = parseToolbarSize(value);
+          this.plugin.refreshInkViews?.();
           await this.plugin.saveSettings();
         }));
     this.favourites(containerEl, customs);

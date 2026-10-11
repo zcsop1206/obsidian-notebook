@@ -1,12 +1,16 @@
 // The toolbar (#10): size stepping, favourite presets (parsing, matching) and the saved tool
-// state read back from settings.
+// state read back from settings; #71: the size slider's scale, the layouts the toolbar tries,
+// the size bar under the pen and highlighter buttons, and the toolbar size setting.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  DEFAULT_ERASER, DEFAULT_HIGHLIGHTER, DEFAULT_PEN, DEFAULT_PRESETS, matchesPreset, MAX_PRESETS, parsePreset, parsePresets,
-  parseToolState, presetOf, stepSize,
+  DEFAULT_ERASER, DEFAULT_HIGHLIGHTER, DEFAULT_PEN, DEFAULT_PRESETS, HIGHLIGHTER_SIZES, matchesPreset, MAX_PRESETS, parsePreset,
+  parsePresets, parseToolState, presetOf, SIZE_PRESETS, sizeRange, sliderPosition, sliderSize, stepSize,
 } from '../../src/ink/pen';
 import { previewPoints } from '../../src/ink/picker';
+import {
+  parseToolbarSize, SIZE_BAR_MAX, sizeBarWidth, STRIP_MIN_WIDTH, TOOLBAR_BUTTON_PX, toolbarLayouts,
+} from '../../src/ink/toolbar-layout';
 
 /** Runs fn with console.warn captured; returns the warnings. */
 function warnings(fn: () => void): string[] {
@@ -115,4 +119,71 @@ test('toolbar: the preview curve stays inside its canvas', () => {
   const pts = previewPoints(220, 60);
   assert.ok(pts.length > 10);
   for (const p of pts) assert.ok(p.x > 0 && p.x < 220 && p.y > 0 && p.y < 60 && p.p > 0 && p.p <= 1);
+});
+
+// ---- #71
+
+test('size slider: every 0.5 px size round-trips through its position; the ends are the limits', () => {
+  for (const tool of ['pen', 'highlighter'] as const) {
+    const { min, max } = sizeRange(tool);
+    assert.equal(sliderSize(tool, 0), min);
+    assert.equal(sliderSize(tool, 1), max);
+    assert.equal(sliderSize(tool, -3), min);
+    assert.equal(sliderSize(tool, 7), max);
+    assert.equal(sliderSize(tool, NaN), min);
+    let last = -1;
+    for (let s = min; s <= max; s += 0.5) {
+      const u = sliderPosition(tool, s);
+      assert.ok(u >= 0 && u <= 1 && u > last, `${tool} ${s}`);
+      last = u;
+      assert.equal(sliderSize(tool, u), s, `${tool} ${s}`);
+    }
+  }
+});
+
+test('size slider: sizes come in 0.5 px steps and grow with the position', () => {
+  let prev = 0;
+  for (let i = 0; i <= 1000; i++) {
+    const s = sliderSize('pen', i / 1000);
+    assert.equal(s * 2, Math.round(s * 2));
+    assert.ok(s >= prev);
+    prev = s;
+  }
+});
+
+test('size slider: the quick sizes are spread out as ticks, not crowded at the start', () => {
+  const pen = SIZE_PRESETS.map(s => sliderPosition('pen', s));
+  assert.ok(pen[0] > 0.25 && pen[2] < 0.7, String(pen));
+  for (let i = 1; i < pen.length; i++) assert.ok(pen[i] - pen[i - 1] > 0.1, String(pen)); // over 18 px apart on a 182 px track
+  const hl = HIGHLIGHTER_SIZES.map(s => sliderPosition('highlighter', s));
+  assert.ok(hl[1] - hl[0] > 0.1, String(hl));
+});
+
+test('toolbar layout: the colour strip from 900 px; labels drop first, then the page actions fold', () => {
+  assert.deepEqual(toolbarLayouts(768), [
+    { strip: false, collapsed: false, labels: true }, { strip: false, collapsed: false, labels: false }, { strip: false, collapsed: true, labels: false },
+  ]);
+  assert.deepEqual(toolbarLayouts(STRIP_MIN_WIDTH - 1).map(l => l.strip), [false, false, false]);
+  assert.deepEqual(toolbarLayouts(STRIP_MIN_WIDTH), [
+    { strip: true, collapsed: false, labels: true }, { strip: true, collapsed: false, labels: false }, { strip: true, collapsed: true, labels: false },
+    { strip: false, collapsed: true, labels: false },
+  ]);
+  for (const w of [320, 768, 900, 1024, 1366]) assert.ok(toolbarLayouts(w).slice(-1)[0].collapsed, String(w)); // the last resort folds
+});
+
+test('toolbar: the size bar grows with the size over each tool\'s range and fits a compact button', () => {
+  assert.equal(sizeBarWidth('pen', 0.5), 4);
+  assert.equal(sizeBarWidth('pen', 16), SIZE_BAR_MAX);
+  assert.equal(sizeBarWidth('highlighter', 4), 4);
+  assert.equal(sizeBarWidth('highlighter', 48), SIZE_BAR_MAX);
+  assert.ok(sizeBarWidth('pen', 1.5) < sizeBarWidth('pen', 2.5) && sizeBarWidth('pen', 2.5) < sizeBarWidth('pen', 4));
+  assert.equal(sizeBarWidth('pen', 99), SIZE_BAR_MAX);
+  assert.ok(SIZE_BAR_MAX < TOOLBAR_BUTTON_PX.compact);
+});
+
+test('toolbar size setting: compact 36 px or comfortable 44 px, comfortable by default and for bad values', () => {
+  assert.equal(parseToolbarSize(undefined), 'comfortable');
+  assert.equal(parseToolbarSize('compact'), 'compact');
+  assert.equal(parseToolbarSize('huge'), 'comfortable');
+  assert.deepEqual(TOOLBAR_BUTTON_PX, { compact: 36, comfortable: 44 });
 });

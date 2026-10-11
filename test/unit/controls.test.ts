@@ -94,7 +94,11 @@ test('controls: a Pencil touch on any marked control is left alone wherever it i
   const thumb = new El('div', ['nb-ink-control', 'nb-pages-thumb'], new El('div', ['nb-pages-list'], panel));
   const frame = new El('div', ['nb-pages-frame'], thumb);
   const picker = new El('div', ['nb-ink-control', 'nb-ink-picker']);
-  for (const el of [thumb, frame, picker, new El('span', ['nb-ink-control'], picker)]) {
+  // #71: the size slider (a div with role slider) and its parts, and the toolbar's hint banner.
+  const slider = new El('div', ['nb-ink-control', 'nb-ink-slider'], picker);
+  const sliderThumb = new El('div', ['nb-ink-control', 'nb-ink-slider-thumb'], slider);
+  const hintText = new El('span', ['nb-ink-hint-text'], new El('div', ['nb-ink-control', 'nb-ink-hint']));
+  for (const el of [thumb, frame, picker, new El('span', ['nb-ink-control'], picker), slider, sliderThumb, hintText]) {
     for (const type of ['touchstart', 'touchmove'] as const) assert.equal(stylus(touch(type, el, 'stylus')), false, `${type} on ${el.tag}`);
   }
   // An unmarked element outside the view is still blocked by the window listener mid-stroke.
