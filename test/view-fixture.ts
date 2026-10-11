@@ -3,7 +3,7 @@
 // the ink view wrote) and a generator for large notes, on window.ink.
 import { newPageId } from '../src/format/ids';
 import { newNote, readNote, writeNote } from '../src/format/note';
-import { centreline, isStroked, outlinePath, polygon, refit, smoothCurve, strokeOutline, strokePath } from '../src/format/outline';
+import { centreline, isStroked, outlinePath, polygon, refit, smoothCurve, stabilise, strokeGeometry, strokeOutline, strokePath } from '../src/format/outline';
 import { newPage, readPage, writePage } from '../src/format/page';
 import { parseTemplateName, templateName } from '../src/format/template';
 import { densePage } from './fixture';
@@ -50,4 +50,4 @@ function pdfNote(folder: string, name: string, pages: number, size: { width: num
 }
 
 (window as unknown as { ink: unknown }).ink = { readPage, writePage, readNote, writeNote, templateName, parseTemplateName, largeNote, pdfNote, strokePath, strokeOutline, polygon,
-  outlinePath, centreline, isStroked, refit, smoothCurve, canvasPath, paintPath, centrelineArea };
+  outlinePath, centreline, isStroked, refit, smoothCurve, canvasPath, paintPath, centrelineArea, strokeGeometry, stabilise };

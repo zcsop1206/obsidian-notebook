@@ -223,6 +223,24 @@ export default class NotebookPlugin extends Plugin {
     return best;
   }
 
+  /** The advanced pen settings changed (#69): open ink views apply the thin-line boost. */
+  penTuningChanged() {
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_INK)) {
+      const view = leaf.view;
+      if (view instanceof InkView) view.penTuningChanged();
+    }
+  }
+
+  /** CSS px per page px of an open ink view at 100% zoom (the pen lab's 100%, #69), or null. */
+  inkFitScale(): number | null {
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_INK)) {
+      const view = leaf.view;
+      const k = view instanceof InkView ? view.fitScale() : null;
+      if (k) return k;
+    }
+    return null;
+  }
+
   /** A command, shown only in an open ink note, that opens the template chooser. */
   private addTemplateCommand(id: string, name: string, scope: 'page' | 'all') {
     this.addCommand({

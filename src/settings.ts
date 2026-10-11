@@ -1,10 +1,14 @@
 // Plugin settings: the paper size and template of new ink notes, and the ink toolbar's tools and
-// favourite presets (#10), the templates folder (#21) and the favourite templates (#54).
+// favourite presets (#10), the templates folder (#21), the favourite templates (#54) and the
+// uniform pen's advanced tunables (#69: "Advanced pen", saved into each new uniform stroke).
 import { PluginSettingTab, Setting, type App, type Plugin } from 'obsidian';
 import type { Paper } from './format/page';
 import { BUILT_IN_TEMPLATES, isTemplateName } from './format/template';
 import { isFavourite, parseFavourites, toggleFavourite } from './ink/favourites';
-import { DEFAULT_PRESETS, DEFAULT_TOOL_STATE, parsePresets, parseToolState, type PenPreset, type ToolState } from './ink/pen';
+import {
+  DEFAULT_PRESETS, DEFAULT_TOOL_STATE, DEFAULT_TUNING, parsePresets, parseToolState, parseTuning, SMOOTHING_LEVELS, STABILISER_LEVELS,
+  TAPER_LEVELS, type PenPreset, type PenTuning, type ToolState,
+} from './ink/pen';
 import { canonicalName, isCustomName, templateRegistry } from './ink/templates';
 
 export interface NotebookSettings {
@@ -25,11 +29,13 @@ export interface NotebookSettings {
   favouriteTemplates: string[];
   /** Whether new notes start with the first favourite template (else `template`) (#54). */
   favouriteDefault: boolean;
+  /** The uniform pen's smoothing, stabiliser, end taper and thin-line boost (#69). */
+  advancedPen: PenTuning;
 }
 
 export const DEFAULT_SETTINGS: NotebookSettings = {
   paper: 'letter', template: 'blank', tools: DEFAULT_TOOL_STATE, presets: [...DEFAULT_PRESETS], templatesFolder: 'templates/ink',
-  favouriteTemplates: [], favouriteDefault: true,
+  favouriteTemplates: [], favouriteDefault: true, advancedPen: { ...DEFAULT_TUNING },
 };
 
 /** Settings from saved data, ignoring unknown or invalid values (with a warning for a template). */
@@ -47,12 +53,15 @@ export function parseSettings(data: unknown): NotebookSettings {
     templatesFolder,
     favouriteTemplates: parseFavourites(d.favouriteTemplates),
     favouriteDefault: typeof d.favouriteDefault === 'boolean' ? d.favouriteDefault : DEFAULT_SETTINGS.favouriteDefault,
+    advancedPen: parseTuning(d.advancedPen),
   };
 }
 
 interface SettingsHost extends Plugin {
   settings: NotebookSettings;
   saveSettings(): Promise<void>;
+  /** The advanced pen settings changed (#69): open ink views redraw if the boost changed. */
+  penTuningChanged?(): void;
 }
 
 export class NotebookSettingTab extends PluginSettingTab {
@@ -105,6 +114,39 @@ export class NotebookSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         }));
     this.favourites(containerEl, customs);
+    this.advancedPen(containerEl);
+  }
+
+  /**
+   * The uniform pen's tunables (#69). Each new uniform stroke is written with them (the next
+   * stroke shows a change, no reload needed); strokes already written keep theirs.
+   */
+  private advancedPen(containerEl: HTMLElement) {
+    const s = this.plugin.settings;
+    new Setting(containerEl).setName('Advanced pen').setHeading()
+      .setDesc("For the uniform pen. Each new stroke is written with these, so changing them never changes ink already written. Compare them in the ink debug view's pen lab.");
+    const changed = async () => {
+      await this.plugin.saveSettings();
+      this.plugin.penTuningChanged?.();
+    };
+    const choice = (name: string, desc: string, key: 'smooth' | 'stab' | 'taper', levels: readonly (readonly [number, string])[]) =>
+      new Setting(containerEl).setName(name).setDesc(desc).setClass(`nb-advanced-pen-${key}`).addDropdown(d => {
+        for (const [v, label] of levels) d.addOption(String(v), label);
+        d.setValue(String(s.advancedPen[key])).onChange(async value => {
+          s.advancedPen = { ...s.advancedPen, [key]: Number(value) };
+          await changed();
+        });
+      });
+    choice('Smoothing', "How far the line is smoothed when the pen lifts (and live): the refit's radius.", 'smooth', SMOOTHING_LEVELS);
+    choice('Stabiliser', "Smooths the line as it is written, like the pressure pen's streamline. The file keeps the raw samples.", 'stab', STABILISER_LEVELS);
+    choice('End taper', 'Tapers the start and end of each stroke, in multiples of the pen size.', 'taper', TAPER_LEVELS);
+    new Setting(containerEl).setName('Thin-line boost')
+      .setDesc('Below 150% zoom, draws lines under 1.5 px at least 2 device pixels wide in the editor, so they read as ink rather than grey. Files and PDFs are unchanged.')
+      .setClass('nb-advanced-pen-boost')
+      .addToggle(t => t.setValue(s.advancedPen.boost).onChange(async on => {
+        s.advancedPen = { ...s.advancedPen, boost: on };
+        await changed();
+      }));
   }
 
   /** Favourite templates (#54): a toggle per template; starred ones come first wherever templates are chosen. */

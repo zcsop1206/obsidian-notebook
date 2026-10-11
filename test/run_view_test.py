@@ -6418,6 +6418,198 @@ try:
               r['pan']['covers'] and r['pan']['rebands'] >= 1 and all(m_['w'] * m_['h'] <= 16_000_000 for m_ in r['pan']['maps']), r['pan'])
         # ======== end of 32. The thin pen and 1000% zoom (#60) ========
 
+        # ======== 33. The uniform pen's advanced settings (#69) ========
+        # Smoothing, the stabiliser and the end taper are set in the settings ("Advanced pen") and
+        # saved into each new uniform stroke; with the defaults (every section above) strokes are
+        # as before. The thin-line boost changes only the editor's bitmaps. The pen lab in the
+        # debug view draws a fixture word with each variant.
+        r = ev("""async () => {
+          await p.createInkNote('Tuned', '', 'letter', 'blank');
+          await T.sleep(150);
+          view.setZoom(1);
+          view.setTool('pen');
+          view.setPen({ nib: 'uniform', color: '#000000', size: 2.5 });
+          const defaults = JSON.parse(JSON.stringify(p.settings.advancedPen));
+          await T.pen(0, T.loops(100, 100, 300), { predict: 0 });
+          const s0 = view.store.page(view.store.slots[0]).strokes[0];
+          // The settings tab's Advanced pen section, changed as the owner would.
+          const tab = p.settingTabs[0];
+          tab.display();
+          const box = k => tab.containerEl.querySelector(`.nb-advanced-pen-${k} select, .nb-advanced-pen-${k} input`);
+          const opts = ['smooth', 'stab', 'taper'].map(k => [...box(k).options].map(o => o.textContent));
+          const values = ['smooth', 'stab', 'taper'].map(k => box(k).value);
+          const set = (k, v) => { const e = box(k); e.value = v; e.dispatchEvent(new Event('change')); };
+          set('smooth', '3'); set('stab', '0.35'); set('taper', '2');
+          await T.sleep(20);
+          const saved = JSON.parse(JSON.stringify(pluginData && pluginData.advancedPen));
+          // The next stroke, mid-stroke and then committed, with no reload.
+          T.pts69 = T.loops(100, 160, 300);
+          await T.pen(0, T.pts69, { predict: 0, up: false });
+          const inp = view.input, live = inp.live, pts = inp.livePoints, style = { ...live.style };
+          const trace = live.trace.points.map(q => ({ ...q }));
+          const asCommitted = ink.strokePath({ ...style, points: trace });
+          const out = { defaults, keys0: Object.keys(s0).join(), opts, values, saved, style,
+            liveSame: inp.livePath === ink.strokePath({ ...style, points: pts }, true), liveIsCommitted: inp.livePath === asCommitted,
+            liveEnds: ink.strokeGeometry({ ...style, points: pts }, true).ends.split('Z').length - 1, frozen: live.frozen };
+          T.penUp(0, T.pts69[T.pts69.length - 1]);
+          const s1 = view.store.page(view.store.slots[0]).strokes[1];
+          out.s1 = [s1.smooth, s1.stab, s1.taper];
+          out.committed = ink.strokePath(s1) === asCommitted;
+          // The pressure nib is unchanged by the advanced pen (out of scope).
+          view.setPen({ nib: 'pressure' });
+          await T.pen(0, T.loops(300, 100, 200), { predict: 0 });
+          view.setPen({ nib: 'uniform' });
+          out.pressureKeys = Object.keys(view.store.page(view.store.slots[0]).strokes[2]).join();
+          return out;
+        }""")
+        print('advanced pen (#69):', r)
+        check('advanced pen (#69): the defaults are today\'s pen (smoothing 1.5, no stabiliser, no taper, no boost); a stroke gets no new fields',
+              r['defaults'] == {'smooth': 1.5, 'stab': 0, 'taper': 0, 'boost': False} and r['keys0'] == 'id,tool,nib,color,size,points', r)
+        check('advanced pen: the settings tab has Smoothing (Off/Light/Normal/Strong/Max), Stabiliser (Off/Light/Normal/Strong), End taper (Off/Short/Long), at the defaults',
+              [len(o) for o in r['opts']] == [5, 4, 3] and r['opts'][0][2].startswith('Normal') and r['values'] == ['1.5', '0', '0'], r['opts'])
+        check('advanced pen: changing them saves the settings', r['saved'] == {'smooth': 3, 'stab': 0.35, 'taper': 2, 'boost': False}, r['saved'])
+        check('advanced pen: the next stroke is written with them, no reload (smooth 3, stab 0.35, taper 2)', r['s1'] == [3, 0.35, 2], r['s1'])
+        check('advanced pen: live, the stroke is drawn from the stabilised refit with its tapered ends, as the committed stroke of the points so far',
+              r['liveSame'] and r['liveIsCommitted'] and r['liveEnds'] == 2 and r['committed'], r)
+        check('advanced pen: the pressure nib gets none of them', r['pressureKeys'] == 'id,tool,nib,color,size,points', r['pressureKeys'])
+
+        # (2) the saved file: the tapered stroke's group, the metadata; the SVG on its own draws as the editor does
+        path69 = ev("() => view.store.slots[0].path")
+        r = ev(f"""async () => {{
+          await view.save();
+          const text = fs.get('{path69}'), mem = view.store.page(view.store.slots[0]).strokes, disk = ink.readPage(text).strokes;
+          const g = ink.strokeGeometry(mem[1]);
+          const group = text.includes(`<g data-id="${{mem[1].id}}"><path class="u" fill="none" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" d="${{g.d}}"/><path class="i" d="${{g.ends}}"/></g>`);
+          const meta = JSON.parse(/<!\\[CDATA\\[([\\s\\S]*)\\]\\]>/.exec(text)[1]);
+          return {{ group, keys: meta.strokes.map(s => Object.keys(s).join()), back: [disk[1].smooth, disk[1].stab, disk[1].taper],
+                   same: ink.writePage(ink.readPage(text)) === text }};
+        }}""")
+        check('advanced pen file: a tapered stroke is <g data-id> of its stroked middle (class u) and filled ends (class i)', r['group'], r)
+        check('advanced pen file: the metadata has smooth, stab and taper after size, only on the stroke written with them; read and written back unchanged',
+              r['keys'] == ['id,tool,nib,color,size,points', 'id,tool,nib,color,size,smooth,stab,taper,points', 'id,tool,nib,color,size,points']
+              and r['back'] == [3, 0.35, 2] and r['same'], r)
+        r = ev(f"""async () => {{
+          // The page file as an <img> (as Obsidian's reading view, GitHub or a browser draw it) against the editor's painting, at 4x.
+          const img = new Image();
+          img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(fs.get('{path69}'));
+          await img.decode();
+          const R = 4, W = 200 * R, H = 120 * R;
+          const draw = file => {{
+            const c = document.createElement('canvas');
+            c.width = W; c.height = H;
+            const g = c.getContext('2d');
+            g.fillStyle = '#fff'; g.fillRect(0, 0, W, H);
+            if (file) g.drawImage(img, -80 * R, -60 * R, 816 * R, 1056 * R);
+            else {{
+              g.setTransform(R, 0, 0, R, -80 * R, -60 * R);
+              for (const s of view.store.page(view.store.slots[0]).strokes.slice(0, 2)) {{
+                const geo = ink.strokeGeometry(s);
+                ink.paintPath(g, s, ink.canvasPath(s, geo.d), '#1f1f1f', geo.ends ? new Path2D(geo.ends) : null);
+              }}
+            }}
+            return g.getImageData(0, 0, W, H).data;
+          }};
+          const a = draw(true), b = draw(false);
+          let diff = 0, inkSum = 0;
+          for (let k = 0; k < a.length; k += 4) {{ diff += Math.abs(a[k] - b[k]); inkSum += 255 - b[k]; }}
+          return {{ err: diff / inkSum, inkSum }};
+        }}""")
+        print('advanced pen: the page file drawn on its own against the editor\'s painting at 4x:', r)
+        check('advanced pen file: drawn on its own, the file matches the editor\'s painting of the tapered and plain strokes (grey error under 0.03)',
+              r['inkSum'] > 100000 and r['err'] < 0.03, r)
+
+        # (3) settings back to the defaults: new strokes as before; the note reopened renders the same
+        r = ev("""async () => {
+          const before = T.pages()[0].querySelector('canvas.nb-ink-bitmap').getContext('2d').getImageData(0, 0, 400, 400).data;
+          const tab = p.settingTabs[0];
+          tab.display();
+          for (const [k, v] of [['smooth', '1.5'], ['stab', '0'], ['taper', '0']]) {
+            const e = tab.containerEl.querySelector(`.nb-advanced-pen-${k} select`);
+            e.value = v; e.dispatchEvent(new Event('change'));
+          }
+          await T.sleep(20);
+          await T.pen(0, T.loops(100, 220, 200), { predict: 0 });
+          const s = view.store.page(view.store.slots[0]).strokes;
+          const keys = Object.keys(s[s.length - 1]).join();
+          // Undo it, so the page is as before, then reopen the note.
+          await view.undo();
+          await view.save();
+          const leaf = app.workspace.getLeaf(false);
+          await leaf.openFile(app.vault.getFile('Physics.md'));
+          await T.sleep(50);
+          await leaf.openFile(app.vault.getFile('Tuned.md'));
+          await T.sleep(400);
+          const after = T.pages()[0].querySelector('canvas.nb-ink-bitmap').getContext('2d').getImageData(0, 0, 400, 400).data;
+          let diff = 0, inked = 0;
+          for (let k = 0; k < before.length; k += 4) { if (before[k] !== after[k]) diff++; if (before[k] < 128) inked++; }
+          const back = view.store.page(view.store.slots[0]).strokes.map(x => [x.smooth, x.stab, x.taper]);
+          return { keys, diff, inked, back, settings: JSON.parse(JSON.stringify(p.settings.advancedPen)) };
+        }""")
+        check('advanced pen: back at the defaults, a new stroke has no new fields', r['keys'] == 'id,tool,nib,color,size,points', r)
+        check('advanced pen: the note reopened after the settings change renders the same (every bitmap pixel) and keeps each stroke\'s settings',
+              r['inked'] > 1000 and r['diff'] == 0 and r['back'][1] == [3, 0.35, 2], r)
+
+        # (4) the thin-line boost: lines under 1.5 px below 150% darker in the bitmap only; the file unchanged
+        r = ev(f"""async () => {{
+          view.setZoom(1);
+          view.setPen({{ size: 0.5 }});
+          await T.pen(0, Array.from({{ length: 300 }}, (_, j) => [100 + j * 0.5, 300 + 0.1 * j, 0.1]), {{ predict: 0 }});
+          view.setPen({{ size: 2.5 }});
+          await view.save();
+          const text = fs.get('{path69}');
+          const dark = () => {{
+            const c = T.pages()[0].querySelector('canvas.nb-ink-bitmap'), s = c.width / 816;
+            const d = c.getContext('2d').getImageData(Math.round(95 * s), Math.round(290 * s), Math.round(160 * s), Math.round(45 * s)).data;
+            let n = 0;
+            for (let k = 0; k < d.length; k += 4) if (d[k] < 100) n++;
+            return n;
+          }};
+          const tab = p.settingTabs[0];
+          tab.display();
+          const toggle = tab.containerEl.querySelector('.nb-advanced-pen-boost input');
+          const off = dark();
+          toggle.checked = true; toggle.dispatchEvent(new Event('change'));
+          await T.sleep(50);
+          const on = dark(), saved = pluginData.advancedPen.boost;
+          view.setZoom(2);
+          await T.sleep(300);
+          const on2 = dark();
+          toggle.checked = false; toggle.dispatchEvent(new Event('change'));
+          await T.sleep(50);
+          const off2 = dark();
+          view.setZoom(1);
+          await T.sleep(300);
+          return {{ off, on, on2, off2, saved, file: fs.get('{path69}') === text, after: dark() }};
+        }}""")
+        print('thin-line boost: dark pixels of a 0.5 px line at 100% off/on, at 200% on/off:', r)
+        check('thin-line boost (#69): on, a 0.5 px line at 100% (about 1 device px) has more fully inked pixels; saved in the settings',
+              r['on'] > 1.5 * r['off'] and r['saved'] is True and r['after'] == r['off'], r)
+        check('thin-line boost: not at 200% (the line is already over 2 device px), and the file is unchanged', r['on2'] == r['off2'] and r['on2'] > 0 and r['file'], r)
+
+        # (5) the pen lab, in the ink debug view
+        r = ev("""async () => {
+          await p.openDebugView();
+          await T.sleep(50);
+          view.contentEl.querySelector('.nbspike-lab-toggle').click();
+          const lab = view.lab, cells = [...lab.el.querySelectorAll('.nbspike-lab-cell')];
+          const inked = c => { const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; let n = 0; for (let k = 0; k < d.length; k += 4) if (d[k] < 128) n++; return n; };
+          const out = { names: cells.map(c => c.dataset.name), canvases: cells.map(c => [...c.querySelectorAll('canvas')].map(inked)),
+                        zooms: [...cells[0].querySelectorAll('canvas')].map(c => c.dataset.zoom), hidden: view.page.style.display };
+          lab.el.querySelector('.nbspike-lab-size').click();  // 0.5 px
+          out.thin = [...lab.el.querySelectorAll('.nbspike-lab-cell')].map(c => inked(c.querySelectorAll('canvas')[1]));
+          return out;
+        }""")
+        page.locator('.nbspike-lab').screenshot(path=os.path.join(OUT, 'pen_lab.png'))
+        print('pen lab: ink pixels per cell (100%, 400%):', dict(zip(r['names'], r['canvases'])))
+        check('pen lab (#69): the debug view shows the variants side by side (today, your settings, each smoothing, stabiliser and taper level, the boost)',
+              len(r['names']) == 12 and r['names'][0] == "Today's pen" and r['names'][1] == 'Your settings' and r['hidden'] == 'none', r['names'])
+        check('pen lab: each variant is drawn at 100% and 400%, with ink, and the variants differ',
+              all(len(c) == 2 and c[0] > 50 and c[1] > 16 * c[0] * 0.5 for c in r['canvases']) and r['zooms'] == ['1', '4']
+              and len(set(c[1] for c in r['canvases'][2:])) >= 8, r['canvases'])
+        check('pen lab: the size buttons redraw it thinner', all(t < c[1] for t, c in zip(r['thin'], r['canvases'])), r['thin'])
+        ev("() => view.toggleLab()")
+        # ======== end of 33. The uniform pen's advanced settings (#69) ========
+
         # --- unload removes the patch
         r = ev("""async () => {
           p.unload();

@@ -7,7 +7,7 @@
 // ink view, not a Modal, so the page stays visible; closed by a tap elsewhere (starting to
 // write included), Escape, or tapping its button again. Choosing an option leaves it open so
 // that colour, nib and size can all be set in one visit.
-import { strokePath } from '../format/outline';
+import { strokeGeometry } from '../format/outline';
 import type { Nib, Point } from '../format/page';
 import {
   COLOR_PRESETS, DEFAULT_PEN, ERASER_SIZES, HIGHLIGHTER_COLORS, HIGHLIGHTER_SIZES, MAX_PRESETS, SIZE_PRESETS, stepSize,
@@ -40,6 +40,8 @@ export interface PickerHost {
   presets(): readonly (PenPreset | null)[];
   savePreset(index: number): void;
   theme(): Theme;
+  /** The advanced pen's fields a new pen stroke gets (#69), for the preview. */
+  strokeTuning?(): { smooth?: number; stab?: number; taper?: number };
   chooseTemplate(scope: 'add' | 'page' | 'all'): void;
   paperLabel(): string | null;
   /** Whether strokes were copied (#11), and pasting them into the current page. */
@@ -336,10 +338,11 @@ export class Picker {
     ctx.fillStyle = theme.paper;
     ctx.fillRect(0, 0, PREVIEW_W, PREVIEW_H);
     const points = previewPoints();
-    const style = kind === 'pen' ? { tool: 'pen' as const, nib, size } : { tool: 'highlighter' as const, size };
-    const d = strokePath({ ...style, points });
+    // The pen as its next stroke will be written, with the advanced pen's taper and smoothing (#69).
+    const style = kind === 'pen' ? { tool: 'pen' as const, nib, size, ...this.host.strokeTuning?.() } : { tool: 'highlighter' as const, size };
+    const g = strokeGeometry({ ...style, points });
     if (kind === 'highlighter') ctx.globalAlpha = HIGHLIGHT_ALPHA;
-    paintPath(ctx, style, canvasPath(style, d), color === DEFAULT_PEN.color ? theme.ink : color);
+    paintPath(ctx, style, canvasPath(style, g.d), color === DEFAULT_PEN.color ? theme.ink : color, g.ends ? new Path2D(g.ends) : null);
     ctx.globalAlpha = 1;
     this.previews++;
   }
