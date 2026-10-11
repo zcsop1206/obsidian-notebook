@@ -448,7 +448,29 @@ export class InkView extends FileView {
 
   async onRename(file: TFile) {
     this.store?.renamed(file.path);
+    this.toolbar?.render(); // the title (#72)
     await super.onRename(file);
+  }
+
+  /**
+   * Renames the open note from the toolbar's title (#72) through fileManager.renameFile, as the
+   * file explorer does: RenameHandler (#26) moves the page folder and Obsidian's link update (#62)
+   * runs. The name is cleaned as a new note's is. Resolves to why it couldn't, or null.
+   */
+  async renameNote(name: string): Promise<string | null> {
+    const file = this.file;
+    if (!file) return null;
+    const base = cleanName(name);
+    if (base === file.basename) return null;
+    const dir = file.parent && !file.parent.isRoot() ? file.parent.path + '/' : '';
+    const path = `${dir}${base}.md`;
+    if (this.app.vault.getAbstractFileByPath(path)) return `There is already a note named "${base}" here.`;
+    try {
+      await this.app.fileManager.renameFile(file, path);
+    } catch (e) {
+      return `Couldn't rename the note: ${(e as Error).message}`;
+    }
+    return null;
   }
 
   /** Writes everything changed now. */
@@ -1935,6 +1957,8 @@ export class InkView extends FileView {
       setRulerAngle: a => this.setRulerAngle(a),
       rulerUnit: () => this.rulerUnit,
       setRulerUnit: u => this.setRulerUnit(u),
+      title: () => (this.store && this.file ? this.file.basename : ''),
+      rename: name => this.renameNote(name),
     });
   }
 
