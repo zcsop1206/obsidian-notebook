@@ -197,14 +197,16 @@ try:
         page.goto(f'http://localhost:{port}/test/harness.html')
         page.add_script_tag(url=f'http://localhost:{port}/test/out/view-fixture.js')
         page.evaluate(HELPERS)
-        page.evaluate("async () => { window.original = obsidian.WorkspaceLeaf.prototype.setViewState; window.p = await loadPlugin(); }")
+        # The sections up to 32 make notes in the vault root: notes folder '' (#72; section 33 tests the default, notebook/),
+        # and start without the notebook library (#73; section 34 tests it).
+        page.evaluate("async () => { window.original = obsidian.WorkspaceLeaf.prototype.setViewState; window.pluginData = { notesFolder: '', libraryOnStartup: false }; window.p = await loadPlugin(); }")
         ev = page.evaluate
 
-        # --- 1. New ink note, through the command's modal
+        # --- 1. New ink note, through the dialog of "New ink note with options…" (#72)
         r = ev("""async () => {
-          commands['new-ink-note'].callback();
+          commands['new-ink-note-options'].callback();
           const m = modals[0], input = m.contentEl.querySelector('input');
-          const had = input.value;
+          const had = input.value, today = obsidian.moment().format('YYYY-MM-DD [Note]');
           input.value = 'Physics';
           input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
           for (let i = 0; i < 50 && !(window.view && view.getViewType() === 'notebook-ink'); i++) await T.sleep(20);
@@ -214,12 +216,12 @@ try:
           const note = ink.readNote(md, 'Physics'), pg = ink.readPage(fs.get(svgs[0]));
           const el = T.pages()[0], sc = view.contentEl.querySelector('.nb-ink-scroll');
           const scale = (sc.clientWidth - 32) / 816;
-          return { had, modals: modals.length, md, svgs, pages: note.pages, paper: note.paper, id: pg.id, size: pg.size, strokes: pg.strokes.length,
+          return { had, today, modals: modals.length, md, svgs, pages: note.pages, paper: note.paper, id: pg.id, size: pg.size, strokes: pg.strokes.length,
             type: view.getViewType(), file: view.file.path, els: T.pages().length, w: el.offsetWidth, h: el.offsetHeight,
             ew: Math.round(816 * scale), eh: Math.round(1056 * scale), ink: T.ink(0) };
         }""")
         print('new note:', {k: r[k] for k in ('svgs', 'pages', 'size', 'w', 'h', 'ew', 'eh')})
-        check('new: the modal suggests "Untitled ink note" and closes on Enter', r['had'] == 'Untitled ink note' and r['modals'] == 0, r['had'])
+        check('new: the dialog suggests the dated name a tap would give (#72) and closes on Enter', r['had'] == r['today'] and r['modals'] == 0, [r['had'], r['today']])
         check('new: Physics.md with one page file', len(r['svgs']) == 1 and r['md'].startswith('---\nink: 1\npaper: letter\ntemplate: blank\n---\n'), r)
         check('new: the index embeds the page (readNote round trip)', r['pages'] == [r['id']] and r['svgs'][0] == f"Physics/{r['id']}.svg", r)
         check('new: the page is an empty Letter page (readPage round trip)', r['size'] == {'width': 816, 'height': 1056} and r['strokes'] == 0, r)
@@ -469,7 +471,7 @@ try:
           sel.dispatchEvent(new Event('change'));
           await T.sleep(10);
           const saved = pluginData && pluginData.template;
-          commands['new-ink-note'].callback();
+          commands['new-ink-note-options'].callback();
           const m = modals[0], selects = [...m.contentEl.querySelectorAll('select')];
           const defaults = selects.map(s => s.value);
           selects[0].value = 'a4';
@@ -2880,10 +2882,10 @@ try:
             strip: !!view.contentEl.querySelector('.nb-ink-strip, .nb-ink-provisional') };
         }""")
         print('toolbar:', {k: r[k] for k in ('groups', 'buttons', 'lasso', 'ruler', 'header')})
-        check('toolbar: tools, presets and page actions in three groups; the provisional strip is gone',
-              r['groups'] == ['nb-ink-tools', 'nb-ink-presets', 'nb-ink-page-actions'] and not r['strip'], r)
-        check('toolbar: 17 buttons (Import, #54, and the page indicator, #64, among them), each a 40 px target; all but the five presets and the page indicator have an icon',
-              r['buttons'] == 17 and r['icons'] == 11 and all(w >= 40 and h >= 40 for w, h in r['size']), r)
+        check('toolbar: tools, presets and page actions in three groups, then the title (#72); the provisional strip is gone',
+              r['groups'] == ['nb-ink-tools', 'nb-ink-presets', 'nb-ink-page-actions', 'nb-ink-title-group'] and not r['strip'], r)
+        check('toolbar: 18 buttons (Import, #54, the page indicator, #64, and the title, #72, among them), each a 40 px target; all but the five presets and the page indicator have an icon',
+              r['buttons'] == 18 and r['icons'] == 12 and all(w >= 40 and h >= 40 for w, h in r['size']), r)
         check('toolbar: the lasso is a tool (#11); the ruler is a toggle (#20)', r['lasso'] == [False, 'Lasso'] and r['ruler'] == [False, 'Ruler'], r)
         check('toolbar: every tool is one tap from every other', r['taps'] == [True] * 6, r['taps'])
         check('toolbar: "Open as markdown" stays the header action', r['header'] == ['Open as markdown'], r['header'])
@@ -3594,7 +3596,7 @@ try:
           T.dark = async () => { document.body.classList.add('theme-dark'); app.workspace.trigger('css-change'); await T.sleep(100); };
           /** Fills the new-note dialog (name, template value) and creates the note; waits for it to open. */
           T.newNote = async (name, template, paper) => {
-            commands['new-ink-note'].callback();
+            commands['new-ink-note-options'].callback();
             const m = modals[modals.length - 1], selects = [...m.contentEl.querySelectorAll('select')];
             const options = [...selects[1].options].map(o => o.value), papers = [...selects[0].options].map(o => o.textContent);
             if (paper) { selects[0].value = paper; selects[0].dispatchEvent(new Event('change')); }
@@ -3704,7 +3706,7 @@ try:
           await T.sleep(150);
           const last = view.store.page(view.store.slots[view.store.slots.length - 1]);
           // The new-note dialog: Paper → Custom size… (3 x 2 in).
-          commands['new-ink-note'].callback();
+          commands['new-ink-note-options'].callback();
           const nm = modals[modals.length - 1], paperSel = nm.contentEl.querySelectorAll('select')[0];
           paperSel.value = 'custom'; paperSel.dispatchEvent(new Event('change'));
           const sm = modals[modals.length - 1];
@@ -5013,7 +5015,7 @@ try:
         }""")
         print('controls audit:', {'base': r['base']['n'], 'kinds': r['base']['kinds'], 'pickers': {k: v['n'] for k, v in r['pickers'].items()}, 'selmenu': r['selmenu']['n']})
         check('controls audit: toolbar, preset slots, Pages panel thumbnails and buttons, footer and ruler label: Pencil never prevented, all marked',
-              r['base']['n'] >= 24 and r['base']['bad'] == [] and r['base']['kinds']['toolbar'] == 17 and r['base']['kinds']['panel'] >= 6
+              r['base']['n'] >= 24 and r['base']['bad'] == [] and r['base']['kinds']['toolbar'] == 18 and r['base']['kinds']['panel'] >= 6
               and r['base']['kinds']['footer'] == 2 and r['base']['kinds']['ruler'] == 1, r['base'])
         check('controls audit: every picker (pen with the ruler row, highlighter, eraser, lasso, page settings, Import #54): Pencil never prevented, all marked',
               all(v['bad'] == [] and v['n'] >= 1 and v['kind'] == k for k, v in r['pickers'].items()) and r['pickers']['pen']['n'] >= 20
@@ -5207,7 +5209,7 @@ try:
           const fields = m => [...m.modalEl.querySelectorAll('input, select, textarea, button, .suggestion-item')];
           const focusTest = els => els.filter(el => el.matches('input, select')).map(el => { document.body.focus(); T.pencilTap(el, { click: false }); el.focus(); return document.activeElement === el; });
           // New ink note: name, paper, template, Create.
-          commands['new-ink-note'].callback();
+          commands['new-ink-note-options'].callback();
           await T.sleep(20);
           let m = modal(), els = fields(m);
           out.newNote = { n: els.length, selects: els.filter(e => e.tagName === 'SELECT').length, bad: T.audit(els).filter(b => b[1] !== 'not marked as a control'), focus: focusTest(els) };
@@ -5929,7 +5931,7 @@ try:
 
         r = ev("""async () => {
           T.top().close();
-          commands['new-ink-note'].callback();
+          commands['new-ink-note-options'].callback();
           const nm = T.top(), sel = nm.contentEl.querySelectorAll('select')[1];
           const opts = [...sel.options].map(o => [o.value, o.textContent]), value = sel.value;
           nm.contentEl.querySelector('input.nb-ink-name').value = 'From favourite';
@@ -6417,6 +6419,744 @@ try:
         check('zoom 1000%: after panning the bands follow and cover the view, each within 16M pixels',
               r['pan']['covers'] and r['pan']['rebands'] >= 1 and all(m_['w'] * m_['h'] <= 16_000_000 for m_ in r['pan']['maps']), r['pan'])
         # ======== end of 32. The thin pen and 1000% zoom (#60) ========
+
+        # ======== 33. One-tap new note and rename from the view (#72) ========
+        # A fresh plugin with the default settings (notes folder notebook/, name pattern YYYY-MM-DD [Note]),
+        # "now" fixed at 2026-10-10 09:00 (window.mockNow, read by the mock's moment).
+        r = ev("""async () => {
+          await app.workspace.activeLeaf?.detach();
+          p.unload();
+          window.pluginData = { libraryOnStartup: false };  // the library (#73) is section 34's
+          window.mockNow = new Date(2026, 9, 10, 9, 0).getTime();
+          window.p = await loadPlugin();
+          T.ribbon = () => p.ribbon.find(x => x.title === 'New ink note').el;
+          T.tb = sel => T.bar().querySelector(sel);
+          T.waitFor = async (f, ms = 3000) => { const t = performance.now(); while (!f() && performance.now() - t < ms) await T.sleep(20); return f(); };
+          T.title = () => T.tb('.nb-ink-title');
+          T.renameInput = () => T.bar().querySelector('input.nb-ink-title-input');
+          const s = p.settings;
+          return { folder: s.notesFolder, pattern: s.newNoteName, nb: dirs.has('notebook') };
+        }""")
+        check('one tap: the defaults are the notes folder "notebook" and the pattern "YYYY-MM-DD [Note]"; the folder does not exist yet',
+              r == {'folder': 'notebook', 'pattern': 'YYYY-MM-DD [Note]', 'nb': False}, r)
+
+        # (1) A ribbon tap: a dated note in notebook/ (created), open and writable at once, the pen ready.
+        r = ev("""async () => {
+          p.settings.tools = { ...p.settings.tools, pen: { ...p.settings.tools.pen, tool: 'eraser' } };  // the last tool used was the eraser
+          const m0 = modals.length, t0 = performance.now();
+          T.ribbon().click();
+          await T.waitFor(() => window.view && view.getViewType() === 'notebook-ink' && view.store && view.file.path === 'notebook/2026-10-10 Note.md' && T.pages().length);
+          const ms = performance.now() - t0;
+          const tool = view.pen.tool;
+          await T.stroke(0, T.wave(100, 200), 'pen', 7, 0);
+          await view.save();
+          const md = fs.get('notebook/2026-10-10 Note.md'), note = ink.readNote(md, '2026-10-10 Note');
+          return { ms, tool, modals: modals.length - m0, file: view.file.path, folder: dirs.has('notebook'), pages: note.pages.length, paper: note.paper,
+            template: note.template, strokes: T.strokesOnDisk(view.store.slots[0].path), ink: T.ink(0), store: view.store.folder };
+        }""")
+        print(f"one tap: open and writable in {r['ms']:.0f} ms")
+        check('one tap: the ribbon icon creates notebook/2026-10-10 Note.md (folder created) with no dialog and opens it',
+              r['modals'] == 0 and r['file'] == 'notebook/2026-10-10 Note.md' and r['folder'] and r['pages'] == 1 and r['store'] == 'notebook/2026-10-10 Note', r)
+        check('one tap: open within a second, the pen ready (not the eraser used last), and the first stroke saves',
+              r['ms'] < 1000 and r['tool'] == 'pen' and r['strokes'] == 1 and r['ink'] > 500, r)
+        check('one tap: the default template and paper from the settings', r['paper'] == 'letter' and r['template'] == 'blank', r)
+
+        # (2) A second tap the same day makes "… 1"; the command "New ink note" does the same.
+        r = ev("""async () => {
+          T.ribbon().click();
+          await T.waitFor(() => view.file && view.file.path === 'notebook/2026-10-10 Note 1.md' && view.store);
+          const second = view.file.path;
+          commands['new-ink-note'].callback();
+          await T.waitFor(() => view.file && view.file.path === 'notebook/2026-10-10 Note 2.md' && view.store);
+          // A folder named like the next note takes the name too.
+          await app.vault.createFolder('notebook/2026-10-10 Note 3');
+          commands['new-ink-note'].callback();
+          await T.waitFor(() => view.file && view.file.path === 'notebook/2026-10-10 Note 4.md' && view.store);
+          return { second, third: fs.has('notebook/2026-10-10 Note 2.md'), fourth: view.file.path, modals: modals.length };
+        }""")
+        check('one tap: a second tap the same day makes "… 1", the command "… 2", a taken folder name is skipped',
+              r == {'second': 'notebook/2026-10-10 Note 1.md', 'third': True, 'fourth': 'notebook/2026-10-10 Note 4.md', 'modals': 0}, r)
+
+        # (3) Shift+click and a long press on the icon, and "New ink note with options…", open today's dialog prefilled.
+        r = ev("""async () => {
+          const out = {}, n0 = [...fs.keys()].length;
+          T.ribbon().dispatchEvent(new MouseEvent('click', { shiftKey: true, bubbles: true }));
+          let m = modals[modals.length - 1];
+          out.shift = { open: modals.length, name: m && m.contentEl.querySelector('input.nb-ink-name').value, title: m && m.titleEl.textContent,
+            selects: m && m.contentEl.querySelectorAll('select').length };
+          m?.close();
+          // A long press: pointerdown, held 700 ms, released; the click that ends it doesn't also create a note.
+          const el = T.ribbon(), pe = (type, extra = {}) => el.dispatchEvent(new PointerEvent(type, { pointerId: 5, pointerType: 'touch', clientX: 10, clientY: 10, bubbles: true, cancelable: true, ...extra }));
+          pe('pointerdown');
+          await T.sleep(700);
+          pe('pointerup');
+          el.click();
+          await T.sleep(300);
+          m = modals[modals.length - 1];
+          out.long = { open: modals.length, name: m && m.contentEl.querySelector('input.nb-ink-name').value };
+          m?.close();
+          commands['new-ink-note-options'].callback();
+          m = modals[modals.length - 1];
+          out.command = { open: modals.length, name: m.contentEl.querySelector('input.nb-ink-name').value };
+          m.contentEl.querySelector('input.nb-ink-name').value = 'Options';
+          m.contentEl.querySelectorAll('select')[1].value = 'grid-5mm';
+          m.contentEl.querySelectorAll('select')[1].dispatchEvent(new Event('change'));
+          m.contentEl.querySelector('button.mod-cta').click();
+          await T.waitFor(() => view.file && view.file.path === 'notebook/Options.md' && view.store);
+          out.created = { file: view.file.path, template: ink.readNote(fs.get('notebook/Options.md'), 'Options').template, files: [...fs.keys()].length - n0 };
+          return out;
+        }""")
+        check('options: Shift+click on the icon opens the New ink note dialog (name, paper, template) prefilled with the next dated name',
+              r['shift'] == {'open': 1, 'name': '2026-10-10 Note 5', 'title': 'New ink note', 'selects': 2}, r['shift'])
+        check('options: a long press on the icon opens the dialog once and creates nothing', r['long'] == {'open': 1, 'name': '2026-10-10 Note 5'}, r['long'])
+        check('options: the command "New ink note with options…" opens it too; Create makes the note in the notes folder with the chosen template',
+              r['command'] == {'open': 1, 'name': '2026-10-10 Note 5'} and r['created'] == {'file': 'notebook/Options.md', 'template': 'grid-5mm', 'files': 2}, r)
+
+        # (4) The settings: the pattern with a live example, the folder (nested, created on first use).
+        r = ev("""async () => {
+          const tab = p.settingTabs[0];
+          tab.display();
+          const item = name => tab.containerEl.querySelector(`.setting-item[data-name="${name}"]`);
+          const desc = () => item('New note name').querySelector('.setting-item-description').textContent;
+          const type = (name, v) => { const i = item(name).querySelector('input'); i.value = v; i.dispatchEvent(new Event('input')); };
+          const before = desc();
+          type('New note name', '[Lecture] YYYY-MM-DD');
+          const after = desc();
+          type('Notes folder', '/School/Physics/');
+          await T.sleep(20);
+          const saved = { name: pluginData.newNoteName, folder: pluginData.notesFolder };
+          T.ribbon().click();
+          await T.waitFor(() => view.file && view.file.path === 'School/Physics/Lecture 2026-10-10.md' && view.store);
+          const file = view.file.path;
+          type('New note name', '');
+          type('Notes folder', 'notebook');
+          return { before, after, saved, file, reset: [p.settings.newNoteName, p.settings.notesFolder] };
+        }""")
+        check('settings: "New note name" shows a live example of the name today, updated as the pattern is typed',
+              '"2026-10-10 Note"' in r['before'] and '"Lecture 2026-10-10"' in r['after'], r)
+        check('settings: the pattern and folder are saved; a tap then creates School/Physics/Lecture 2026-10-10.md, folders made',
+              r['saved'] == {'name': '[Lecture] YYYY-MM-DD', 'folder': 'School/Physics'} and r['file'] == 'School/Physics/Lecture 2026-10-10.md', r)
+        check('settings: an empty pattern is the default one', r['reset'] == ['YYYY-MM-DD [Note]', 'notebook'], r['reset'])
+
+        # (5) The title at the toolbar's right end: the name when wide, a pencil icon when narrow.
+        widths = {}
+        for w in (1200, 768):
+            page.set_viewport_size({'width': w + 40, 'height': 800})
+            ev(f"() => {{ document.getElementById('leaf').style.width = '{w}px'; }}")
+            page.wait_for_timeout(250)
+            widths[w] = ev("""() => {
+              const b = T.title(), text = b.querySelector('.nb-ink-title-text'), icon = b.querySelector('svg'), bar = T.bar().getBoundingClientRect(), r = b.getBoundingClientRect();
+              const buttons = [...T.bar().querySelectorAll('button')].filter(e => e.offsetParent !== null);
+              return { text: text.offsetParent !== null ? text.textContent : null, icon: !!icon && getComputedStyle(icon).display !== 'none', narrow: T.bar().classList.contains('is-narrow'),
+                right: Math.round(bar.right - r.right), last: buttons[buttons.length - 1] === b, rows: new Set(buttons.map(e => Math.round(e.getBoundingClientRect().top))).size,
+                label: b.getAttribute('aria-label') };
+            }""")
+            page.locator('.nb-ink-toolbar').screenshot(path=os.path.join(OUT, f'title_{w}.png'))
+        page.set_viewport_size({'width': 1000, 'height': 700})
+        ev("() => { document.getElementById('leaf').style.width = ''; }")
+        page.wait_for_timeout(200)
+        print('title button:', widths)
+        check("title: on a wide toolbar the note's name, last in the toolbar at its right end",
+              widths[1200]['text'] == 'Lecture 2026-10-10' and not widths[1200]['icon'] and widths[1200]['last'] and widths[1200]['right'] <= 16, widths[1200])
+        check('title: on a narrow toolbar (768 px) a pencil icon, still at the right end, at most two rows',
+              widths[768]['text'] is None and widths[768]['icon'] and widths[768]['narrow'] and widths[768]['last'] and widths[768]['right'] <= 16 and widths[768]['rows'] <= 2, widths[768])
+
+        # (6) Rename from the title, with an unsaved stroke, under each link format: the pages move along
+        # (RenameHandler, #26), the embeds stay relative and a note linking to it follows (fileManager.renameFile, #62).
+        T_rename = """async ({ name, to, format }) => {
+          app.vault.setConfig('newLinkFormat', format);
+          await p.createInkNote(name, 'notebook', 'letter', 'blank');
+          await T.waitFor(() => view.file && view.file.basename === name && view.store && T.pages().length);
+          const id = view.store.slots[0].id;
+          await T.stroke(0, T.wave(100, 200), 'pen', 7, 0);
+          await view.save();
+          await app.vault.create(`Links ${name}.md`, `See [the note](notebook/${encodeURI(name)}.md) and its page ![](notebook/${encodeURI(name)}/${id}.svg)\\n`);
+          await T.stroke(0, T.wave(100, 400), 'pen', 7, 0);
+          const unsaved = view.store.unsaved, n0 = notices.length;
+          T.title().click();
+          const input = T.renameInput(), shown = { value: input && input.value, selected: input && input.selectionStart === 0 && input.selectionEnd === input.value.length,
+            focused: document.activeElement === input, hidden: T.title().style.display === 'none' };
+          input.value = to;
+          input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+          await T.waitFor(() => view.file.basename === to && !view.store.unsaved, 3000);
+          await T.sleep(300);
+          await view.save();
+          const md = fs.get(`notebook/${to}.md`), links = fs.get(`Links ${name}.md`);
+          const linkTarget = links.match(/\\]\\(([^)]*\\.md)\\)/)[1], pageTarget = links.match(/!\\[\\]\\(([^)]*)\\)/)[1];
+          const r = { id, unsaved, shown, file: view.file.path, folder: view.store.folder, index: T.index(`notebook/${to}.md`), files: T.under(`notebook/${to}`),
+            old: T.under(`notebook/${name}`).length + (fs.has(`notebook/${name}.md`) ? 1 : 0) + (dirs.has(`notebook/${name}`) ? 1 : 0),
+            strokes: T.strokesIn(`notebook/${to}`), notices: notices.slice(n0), title: T.title().querySelector('.nb-ink-title-text').textContent, input: !!T.renameInput(),
+            embedRelative: md.includes(`](${to.replace(/ /g, '%20')}/${id}.svg)`),
+            link: app.metadataCache.getFirstLinkpathDest(decodeURI(linkTarget), `Links ${name}.md`)?.path ?? null,
+            pageLink: app.metadataCache.getFirstLinkpathDest(decodeURI(pageTarget), `Links ${name}.md`)?.path ?? null };
+          r.ink = T.ink(0);
+          return r;
+        }"""
+        for k, fmt in enumerate(['shortest', 'relative', 'absolute']):
+            name, to = f'Title {k}', f'Renamed {k}'
+            r = page.evaluate(T_rename, {'name': name, 'to': to, 'format': fmt})
+            what = f'title rename ({fmt} links)'
+            check(f'{what}: a tap turns the title into a field holding the name, selected', r['shown'] == {'value': name, 'selected': True, 'focused': True, 'hidden': True}, r['shown'])
+            check(f'{what}: the note, its page folder and the unsaved stroke move; nothing is left behind',
+                  r['unsaved'] and r['file'] == f'notebook/{to}.md' and r['folder'] == f'notebook/{to}' and r['files'] == [f"notebook/{to}/{r['id']}.svg"]
+                  and r['old'] == 0 and r['strokes'] == [2] and r['ink'] > 500 and r['notices'] == [], r)
+            check(f'{what}: the embeds are relative, a link to the note follows it, the title shows the new name',
+                  r['index'] == {'folder': to, 'pages': [r['id']]} and r['embedRelative'] and r['link'] == f'notebook/{to}.md'
+                  and r['title'] == to and not r['input'], r)
+            # A link from another note to one of its pages (as "Copy embed for this page" makes) isn't checked: the
+            # page folder moves with vault.rename (#26), which Obsidian's link update doesn't see. Printed for the record.
+            print(f"{what}: a link to its page from another note now resolves to {r['pageLink']}")
+        ev("() => app.vault.setConfig('newLinkFormat', 'shortest')")
+
+        # (7) Collisions, Escape and leaving the field.
+        r = ev("""async () => {
+          const out = {}, rename = async (to, how = 'Enter') => {
+            T.title().click();
+            const input = T.renameInput();
+            input.value = to;
+            if (how === 'blur') input.blur(); else input.dispatchEvent(new KeyboardEvent('keydown', { key: how, bubbles: true }));
+            await T.sleep(300);
+          };
+          const n0 = notices.length;
+          await rename('Renamed 0');  // a note of that name is there
+          out.taken = { file: view.file.path, notice: notices.slice(n0) };
+          await rename('Elsewhere', 'Escape');
+          out.escape = { file: view.file.path, input: !!T.renameInput(), shown: T.title().style.display !== 'none' };
+          await rename('By blur', 'blur');
+          out.blur = view.file.path;
+          // Only a folder of that name (no note): the note is renamed, its pages stay where they are (#26's collision), with a notice.
+          await app.vault.createFolder('notebook/Folder only');
+          const n1 = notices.length;
+          await rename('Folder only');
+          await view.save();
+          out.folder = { file: view.file.path, folder: view.store.folder, notices: notices.slice(n1), strokes: T.strokesIn('notebook/By blur'), ink: T.ink(0) };
+          await rename('  a/b: c?  ');
+          out.cleaned = view.file.path;
+          return out;
+        }""")
+        check('title rename: a name taken by another note renames nothing and says so',
+              r['taken']['file'] == 'notebook/Renamed 2.md' and len(r['taken']['notice']) == 1 and 'already a note' in r['taken']['notice'][0], r['taken'])
+        check('title rename: Escape keeps the name; leaving the field renames', r['escape'] == {'file': 'notebook/Renamed 2.md', 'input': False, 'shown': True}
+              and r['blur'] == 'notebook/By blur.md', r)
+        check('title rename: a taken folder name keeps the pages where they are, with the notice, and the note shows them',
+              r['folder']['file'] == 'notebook/Folder only.md' and r['folder']['folder'] == 'notebook/By blur' and len(r['folder']['notices']) == 1
+              and 'already exists' in r['folder']['notices'][0] and r['folder']['strokes'] == [2] and r['folder']['ink'] > 500, r['folder'])
+        check('title rename: characters that break names are cleaned', r['cleaned'] == 'notebook/a b c.md', r['cleaned'])
+
+        # (8) The Pencil: a Pencil tap opens the field and reaches it (section 29's audit of the title and the field).
+        r = ev("""async () => {
+          const b = T.title();
+          const auditButton = T.audit([b]);
+          const [start, move] = T.pencilTap(b);
+          const input = T.renameInput();
+          const auditInput = input ? T.audit([input]) : ['no field'];
+          const [inputStart] = input ? T.pencilTap(input, { click: false }) : [true];
+          const focus = document.activeElement === input && !inputStart;
+          input.value = 'Pencil';
+          input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+          await T.sleep(300);
+          return { auditButton, start, move, open: !!input, auditInput, focus, file: view.file.path };
+        }""")
+        check('title rename with the Pencil: the title and the field take Pencil touches (not prevented, marked as controls) and rename',
+              r == {'auditButton': [], 'start': False, 'move': False, 'open': True, 'auditInput': [], 'focus': True, 'file': 'notebook/Pencil.md'}, r)
+        ev("() => { delete window.mockNow; }")
+        # ======== end of 33. One-tap new note and rename from the view (#72) ========
+
+        # ======== 34. The notebook library (#73) ========
+        # An empty vault (the earlier sections' files are set aside and put back at the end), the plugin
+        # reloaded with the default settings: the library opens on startup. Mouse, Pencil and finger taps
+        # and long presses; card actions (section 17's rename and move scenarios through them); subjects;
+        # PDF import into the open subject; page folders hidden in a mock file explorer; 50 notes. The view is 900 x 1400 here.
+        page.set_viewport_size({'width': 1000, 'height': 1500})
+        ev("() => { document.getElementById('leaf').style.height = '1400px'; }")
+        r = ev("""async () => {
+          for (const leaf of [...app.workspace.leaves]) await leaf.detach();
+          p.unload();
+          T.saved = { fs: new Map(fs), dirs: new Set(dirs), mtimes: new Map(mtimes) };
+          fs.clear(); dirs.clear(); mtimes.clear();
+          app.vault.setConfig('newLinkFormat', 'shortest');
+          window.pluginData = null;
+          window.mockNow = new Date(2026, 9, 10, 9, 0).getTime();
+          window.p = await loadPlugin();
+          T.waitFor = async (f, ms = 3000) => { const t = performance.now(); while (!f() && performance.now() - t < ms) await T.sleep(20); return f(); };
+          // The clipboard as the mock first had it (earlier sections replace it to make it fail).
+          Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async t => { clipboardWrites.push(t); } } });
+          T.lib = () => app.workspace.getLeavesOfType('notebook-library')[0]?.view ?? null;
+          T.showLib = async () => { await p.openLibrary(); await T.lib().refresh(); };
+          T.libEl = sel => T.lib().contentEl.querySelector(sel);
+          T.cards = () => [...T.lib().contentEl.querySelectorAll('.nb-lib-card')];
+          T.card = name => T.cards().find(c => c.querySelector('.nb-lib-name')?.textContent === name);
+          T.sections = () => [...T.lib().contentEl.querySelectorAll('.nb-lib-subject')].map(s => [s.querySelector('.nb-lib-subject-label').textContent,
+            [...s.querySelectorAll('.nb-lib-name')].map(n => n.textContent)]);
+          T.section = label => [...T.lib().contentEl.querySelectorAll('.nb-lib-subject')].find(s => s.querySelector('.nb-lib-subject-label').textContent === label);
+          T.menu = () => window.lastMenu ? window.lastMenu.items.map(i => i.title) : null;
+          T.pick = title => { const row = [...document.querySelectorAll('.menu .menu-item')].find(e => e.dataset.title === title); row.click(); };
+          T.ptr = (el, type, pointerType, id = 31) => { const r = el.getBoundingClientRect();
+            el.dispatchEvent(new PointerEvent(type, { pointerId: id, pointerType, isPrimary: true, clientX: r.left + 20, clientY: r.top + 20, bubbles: true, cancelable: true, button: 0, buttons: type === 'pointerup' ? 0 : 1 })); };
+          /** A long press on el with this pointer type: down, held 700 ms, up, then the click the browser sends. */
+          T.longPress = async (el, pointerType) => { T.ptr(el, 'pointerdown', pointerType); await T.sleep(700); T.ptr(el, 'pointerup', pointerType); el.click(); await T.sleep(50); };
+          /** A tap: down, up, click (and for the Pencil and fingers the touch events, never prevented). */
+          T.tap = (el, pointerType) => { T.ptr(el, 'pointerdown', pointerType); const t = pointerType === 'mouse' ? false : T.touch(el, 'touchstart', pointerType === 'pen' ? 'stylus' : 'direct');
+            T.ptr(el, 'pointerup', pointerType); el.click(); return t; };
+          await T.waitFor(() => T.lib() && app.workspace.activeLeaf?.view === T.lib());
+          await T.lib().ready;
+          const lib = T.lib();
+          return { lib: !!lib, active: app.workspace.activeLeaf?.view === lib, empty: lib && T.libEl('.nb-lib-empty')?.textContent,
+            sections: lib && T.sections(), title: lib && T.libEl('.nb-lib-title').textContent };
+        }""")
+        check('library: opens on startup with no ink note open, empty, as the active tab',
+              r['lib'] and r['active'] and r['title'] == 'Notebook' and r['sections'] == [] and 'No notes yet' in (r['empty'] or ''), r)
+
+        # (1) New note from the library, a new subject, a note in the open subject (two taps from the library).
+        r = ev("""async () => {
+          T.libEl('.nb-lib-new').click();
+          await T.waitFor(() => view.getViewType() === 'notebook-ink' && view.file?.path === 'notebook/2026-10-10 Note.md' && view.store);
+          const first = view.file.path;
+          await T.showLib();
+          T.libEl('.nb-lib-new-subject').click();
+          let m = modals[modals.length - 1];
+          const title = m.titleEl.textContent;
+          m.contentEl.querySelector('input').value = 'Physics';
+          m.contentEl.querySelector('button.mod-cta').click();
+          await T.waitFor(() => dirs.has('notebook/Physics'));
+          await T.sleep(250);
+          await T.lib().ready;
+          const afterSubject = T.sections();
+          // Open the subject (a tap on its name), then + : a note in it.
+          T.section('Physics').querySelector('.nb-lib-subject-name').click();
+          const open = [T.lib().subject, T.libEl('.nb-lib-title').textContent, T.libEl('.nb-lib-back').classList.contains('is-hidden')];
+          T.libEl('.nb-lib-new').click();
+          await T.waitFor(() => view.getViewType() === 'notebook-ink' && view.file?.path === 'notebook/Physics/2026-10-10 Note.md' && view.store);
+          return { first, title, afterSubject, open, second: view.file.path };
+        }""")
+        check('library: + makes a dated note in the notes folder and opens it', r['first'] == 'notebook/2026-10-10 Note.md', r)
+        check('library: "New subject" makes a folder in the notes folder, shown as an empty subject',
+              r['title'] == 'New subject' and r['afterSubject'] == [['notebook', ['2026-10-10 Note']], ['Physics', []]], r)
+        check('library: a tap on a subject opens it; + then makes the note there (two taps)',
+              r['open'] == ['notebook/Physics', 'Physics', False] and r['second'] == 'notebook/Physics/2026-10-10 Note.md', r)
+
+        # Five notes in Physics with ink, one in Chem, and one PDF note in the vault root.
+        r = ev("""async () => {
+          await app.vault.createFolder('notebook/Chem');
+          for (const [name, folder] of [['Waves', 'notebook/Physics'], ['Optics', 'notebook/Physics'], ['Heat', 'notebook/Physics'], ['Motion', 'notebook/Physics'], ['Acids', 'notebook/Chem']]) {
+            window.mockNow += 60000;
+            await p.createInkNote(name, folder, 'letter', 'blank');
+            await T.waitFor(() => view.file?.basename === name && view.store && T.pages().length);
+            view.setTool('pen');
+            await T.stroke(0, T.wave(100, 200), 'pen', 7, 0);
+            await view.save();
+          }
+          for (const leaf of app.workspace.getLeavesOfType('notebook-ink')) await leaf.detach();
+          await T.showLib();
+          T.lib().openSubject(null);
+          await T.sleep(50);
+          return { sections: T.sections(), ink: app.workspace.getLeavesOfType('notebook-ink').length };
+        }""")
+        check('library: subjects in order (notes folder, its subjects by name), notes newest first',
+              r['sections'] == [['notebook', ['2026-10-10 Note']], ['Chem', ['Acids']], ['Physics', ['Motion', 'Heat', 'Optics', 'Waves', '2026-10-10 Note']]], r)
+
+        # (2) Cards: name, pages and date, a thumbnail of the first page drawn lazily and cached by the page's mtime.
+        r = ev("""async () => {
+          const lib = T.lib();
+          await T.waitFor(() => lib.thumbsDone, 5000);
+          const card = T.card('Waves'), img = card.querySelector('img.nb-lib-thumb-img');
+          await img.decode();
+          const c = document.createElement('canvas'); c.width = img.naturalWidth; c.height = img.naturalHeight;
+          const g = c.getContext('2d'); g.drawImage(img, 0, 0);
+          const d = g.getImageData(0, 0, c.width, c.height).data;
+          let dark = 0; for (let k = 0; k < d.length; k += 4) if (d[k] < 120 && d[k + 3] > 200) dark++;
+          const thumbs = [...fs.keys()].filter(k => k.startsWith('.obsidian/plugins/notebook/thumbs/'));
+          return { meta: card.querySelector('.nb-lib-meta').textContent, w: img.naturalWidth, h: img.naturalHeight, dark, thumbs: thumbs.length,
+            stats: { ...p.thumbs.stats }, vaultFiles: app.vault.getFiles().some(f => f.path.includes('thumbs')) };
+        }""")
+        check('cards: name, "1 page · Today"', r['meta'] == '1 page · Today', r)
+        check('cards: the first page is drawn at 160 px wide (device resolution), with its ink, and cached in the plugin\'s folder, not the vault',
+              r['w'] == 320 and abs(r['h'] - 414) <= 1 and r['dark'] > 50 and r['thumbs'] == r['stats']['drawn'] >= 7 and not r['vaultFiles'], r)
+        # Writing on the page changes its mtime: the next library visit draws it again and drops the old file.
+        r = ev("""async () => {
+          await T.lib().leaf.detach();
+          const leaf = app.workspace.getLeaf('tab');
+          await leaf.openFile(app.vault.getFile('notebook/Physics/Waves.md'));
+          await T.waitFor(() => view.store && T.pages().length);
+          await T.stroke(0, T.wave(100, 500), 'pen', 7, 0);
+          await view.save();
+          const before = { ...p.thumbs.stats };
+          await T.showLib();
+          await T.waitFor(() => T.lib().thumbsDone, 5000);
+          const thumbs = [...fs.keys()].filter(k => k.startsWith('.obsidian/plugins/notebook/thumbs/'));
+          return { drawn: p.thumbs.stats.drawn - before.drawn, cached: p.thumbs.stats.cached - before.cached, dropped: p.thumbs.stats.dropped - before.dropped, n: thumbs.length };
+        }""")
+        check('cards: a page written since is drawn again (its old thumbnail deleted); the others come from the cache',
+              r['drawn'] == 1 and r['dropped'] == 1 and r['cached'] >= 6 and r['n'] == 7, r)
+
+        # (3) Search and collapse.
+        r = ev("""async () => {
+          const lib = T.lib(), s = T.libEl('.nb-lib-search');
+          s.value = 'OPT'; s.dispatchEvent(new Event('input'));
+          const found = T.sections();
+          s.value = 'nothing like it'; s.dispatchEvent(new Event('input'));
+          const none = T.libEl('.nb-lib-empty')?.textContent;
+          s.value = ''; s.dispatchEvent(new Event('input'));
+          T.section('Physics').querySelector('.nb-lib-collapse').click();
+          const collapsed = [T.section('Physics').classList.contains('is-collapsed'), T.section('Physics').querySelectorAll('.nb-lib-card').length];
+          T.section('Physics').querySelector('.nb-lib-collapse').click();
+          return { found, none, collapsed, back: T.section('Physics').querySelectorAll('.nb-lib-card').length };
+        }""")
+        check('search: filters by name (any case), hiding subjects without a match', r['found'] == [['Physics', ['Optics']]] and r['none'] == 'No notes match.', r)
+        check('subjects collapse and expand from their header', r['collapsed'] == [True, 0] and r['back'] == 5, r)
+
+        # (4) Taps open notes (mouse, Pencil, finger); long presses (Pencil, finger) and ⋯ (mouse) open the actions, opening nothing.
+        r = ev("""async () => {
+          const out = {};
+          for (const [kind, name] of [['mouse', 'Optics'], ['pen', 'Heat'], ['touch', 'Motion']]) {
+            await T.showLib();
+            const prevented = T.tap(T.card(name).querySelector('.nb-lib-thumb'), kind);
+            await T.waitFor(() => view.getViewType() === 'notebook-ink' && view.file?.basename === name && view.store);
+            out[kind] = { file: view.file.path, prevented };
+          }
+          for (const leaf of app.workspace.getLeavesOfType('notebook-ink')) await leaf.detach();
+          for (const kind of ['pen', 'touch']) {
+            await T.showLib();
+            const n = app.workspace.leaves.length;
+            await T.longPress(T.card('Acids'), kind);
+            out['long ' + kind] = { menu: T.menu(), opened: app.workspace.leaves.length - n };
+            window.lastMenu?.hide();
+          }
+          T.card('Acids').querySelector('.nb-lib-more').click();
+          out.more = T.menu();
+          window.lastMenu?.hide();
+          // Every control in the library takes the Pencil (touches never prevented).
+          out.audit = T.interactive(T.lib().contentEl).flatMap(el => [T.touch(el, 'touchstart', 'stylus'), T.touch(el, 'touchmove', 'stylus'), T.touch(el, 'touchmove', 'direct')]).filter(Boolean).length;
+          out.n = T.interactive(T.lib().contentEl).length;
+          return out;
+        }""")
+        actions = ['Rename', 'Move to subject…', 'Duplicate', 'Export as PDF', 'Copy embed of first page', 'Delete']
+        check('library taps: a mouse click, a Pencil tap and a finger tap on a card open the note (touches not prevented)',
+              r['mouse']['file'] == 'notebook/Physics/Optics.md' and r['pen'] == {'file': 'notebook/Physics/Heat.md', 'prevented': False}
+              and r['touch'] == {'file': 'notebook/Physics/Motion.md', 'prevented': False}, r)
+        check('library long press: the Pencil and a finger open the card\'s actions and open no note; so does ⋯ with the mouse',
+              r['long pen'] == {'menu': actions, 'opened': 0} and r['long touch'] == {'menu': actions, 'opened': 0} and r['more'] == actions, r)
+        check('library: no control in it has its Pencil or finger touches prevented (it scrolls natively)', r['n'] > 20 and r['audit'] == 0, r)
+
+        # (5) Section 17's scenarios through the cards: rename and move an open note with an unsaved stroke, a collision, a closed note.
+        r = ev("""async () => {
+          const out = {};
+          const renameCard = async (name, to) => {
+            await T.showLib();
+            T.card(name).querySelector('.nb-lib-more').click();
+            T.pick('Rename');
+            const input = T.libEl('input.nb-lib-rename');
+            const shown = input && input.value;
+            input.value = to;
+            input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+            await T.sleep(400);
+            await T.lib().ready;
+            return shown;
+          };
+          // (1) open, unsaved stroke, renamed from its card
+          const leaf = app.workspace.getLeaf('tab');
+          await leaf.openFile(app.vault.getFile('notebook/Physics/Optics.md'));
+          await T.waitFor(() => view.store && T.pages().length);
+          const ink = view, id = ink.store.slots[0].id;
+          await T.stroke(0, T.wave(100, 400), 'pen', 7, 0);
+          const unsaved = ink.store.unsaved;
+          const shown = await renameCard('Optics', 'Light');
+          await ink.save();
+          out.rename = { shown, unsaved, file: ink.file.path, folder: ink.store.folder, index: T.index('notebook/Physics/Light.md'), files: T.under('notebook/Physics/Light'),
+            old: T.under('notebook/Physics/Optics').length + (dirs.has('notebook/Physics/Optics') ? 1 : 0), strokes: T.strokesIn('notebook/Physics/Light'), card: !!T.card('Light'), id };
+          // (2) open, unsaved stroke, moved to Chem from its card (the note's tab shown to write in it)
+          app.workspace.revealLeaf(leaf);
+          await T.sleep(150);
+          await T.stroke(0, T.wave(100, 600), 'pen', 7, 0);
+          await T.showLib();
+          T.card('Light').querySelector('.nb-lib-more').click();
+          T.pick('Move to subject…');
+          const chooser = modals[modals.length - 1], rows = [...chooser.contentEl.querySelectorAll('.suggestion-item')].map(e => e.textContent);
+          [...chooser.contentEl.querySelectorAll('.suggestion-item')].find(e => e.textContent === 'Chem').click();
+          await T.sleep(400);
+          await ink.save();
+          await T.lib().ready;
+          out.move = { rows, file: ink.file.path, folder: ink.store.folder, index: T.index('notebook/Chem/Light.md'), strokes: T.strokesIn('notebook/Chem/Light'),
+            old: T.under('notebook/Physics/Light').length, sections: T.sections().map(s => s[0] + ':' + s[1].join(',')) };
+          // (3) collision: a folder named like the new name is there; the pages stay, with a notice
+          await app.vault.createFolder('notebook/Chem/Taken');
+          const n0 = notices.length;
+          await renameCard('Light', 'Taken');
+          app.workspace.revealLeaf(leaf);
+          await T.sleep(150);
+          await T.stroke(0, T.wave(100, 800), 'pen', 7, 0);
+          await ink.save();
+          out.collision = { file: ink.file.path, folder: ink.store.folder, notices: notices.slice(n0), index: T.index('notebook/Chem/Taken.md'), strokes: T.strokesIn('notebook/Chem/Light') };
+          await leaf.detach();
+          // (5) a closed note: renamed, then moved, from its card; it reopens with its page
+          await renameCard('Heat', 'Thermo');
+          await T.showLib();
+          T.card('Thermo').querySelector('.nb-lib-more').click();
+          T.pick('Move to subject…');
+          [...modals[modals.length - 1].contentEl.querySelectorAll('.suggestion-item')].find(e => e.textContent === 'notebook').click();
+          await T.sleep(400);
+          out.closed = { index: T.index('notebook/Thermo.md'), files: T.under('notebook/Thermo').length, old: T.under('notebook/Physics/Heat').length + T.under('notebook/Physics/Thermo').length,
+            md: fs.get('notebook/Thermo.md') };
+          await T.showLib();
+          T.card('Thermo').click();
+          await T.waitFor(() => view.getViewType() === 'notebook-ink' && view.file?.basename === 'Thermo' && view.store && T.pages().length);
+          out.closed.reopen = { strokes: view.store.page(view.store.slots[0]).strokes.length, ink: T.ink(0), error: view.store.slots[0].error };
+          await view.leaf.detach();
+          return out;
+        }""")
+        rn, mv, co, cl = r['rename'], r['move'], r['collision'], r['closed']
+        check('card rename (open note, unsaved stroke): an inline field with the name; the note, its page folder and the stroke move; relative embeds',
+              rn['shown'] == 'Optics' and rn['unsaved'] and rn['file'] == 'notebook/Physics/Light.md' and rn['folder'] == 'notebook/Physics/Light'
+              and rn['index'] == {'folder': 'Light', 'pages': [rn['id']]} and rn['files'] == [f"notebook/Physics/Light/{rn['id']}.svg"]
+              and rn['old'] == 0 and rn['strokes'] == [2] and rn['card'], rn)
+        check('card move (open note, unsaved stroke): "Move to subject…" lists the subjects; the pages follow and the stroke is saved there',
+              'Chem' in mv['rows'] and 'Unfiled (vault root)' in mv['rows'] and 'Physics' not in mv['rows'] and mv['file'] == 'notebook/Chem/Light.md'
+              and mv['folder'] == 'notebook/Chem/Light' and mv['index'] == {'folder': 'Light', 'pages': [rn['id']]} and mv['strokes'] == [3] and mv['old'] == 0
+              and 'Chem:Light,Acids' in mv['sections'], mv)
+        check('card rename onto a taken folder: the pages stay where they are, the embeds point there, with the notice',
+              co['file'] == 'notebook/Chem/Taken.md' and co['folder'] == 'notebook/Chem/Light' and co['index'] == {'folder': 'Light', 'pages': [rn['id']]}
+              and len(co['notices']) == 1 and 'already exists' in co['notices'][0] and co['strokes'] == [4], co)
+        check('card rename and move of a closed note: its page folder follows and it reopens with its page',
+              cl['index']['folder'] == 'Thermo' and cl['files'] == 1 and cl['old'] == 0 and cl['reopen']['strokes'] == 1 and cl['reopen']['ink'] > 500
+              and cl['reopen']['error'] is None, cl)
+
+        # (6) Duplicate, delete (to the trash, after a confirm), export, copy embed.
+        r = ev("""async () => {
+          const out = {};
+          await T.showLib();
+          T.card('Waves').querySelector('.nb-lib-more').click();
+          T.pick('Duplicate');
+          await T.waitFor(() => fs.has('notebook/Physics/Waves 1.md'));
+          await T.sleep(300);
+          const a = T.index('notebook/Physics/Waves.md'), b = T.index('notebook/Physics/Waves 1.md');
+          out.dup = { a, b, strokes: [T.strokesIn('notebook/Physics/Waves'), T.strokesIn('notebook/Physics/Waves 1')], card: !!T.card('Waves 1') };
+          // Delete: Cancel keeps it; Delete puts the note and its page folder in the trash, closing its tab.
+          const leaf = app.workspace.getLeaf('tab');
+          await leaf.openFile(app.vault.getFile('notebook/Physics/Waves 1.md'));
+          await T.waitFor(() => view.store);
+          await T.showLib();
+          const del = async ok => {
+            T.card('Waves 1').querySelector('.nb-lib-more').click();
+            T.pick('Delete');
+            await T.sleep(20);
+            const m = modals[modals.length - 1], text = m.contentEl.textContent;
+            m.contentEl.querySelector(ok ? '.nb-confirm-ok' : '.nb-confirm-cancel').click();
+            await T.sleep(400);
+            await T.lib().ready;
+            return text;
+          };
+          const text = await del(false);
+          const kept = fs.has('notebook/Physics/Waves 1.md');
+          await del(true);
+          out.del = { text, kept, md: fs.has('notebook/Physics/Waves 1.md'), folder: dirs.has('notebook/Physics/Waves 1'),
+            trash: [fs.has('.trash/notebook/Physics/Waves 1.md'), T.under('.trash/notebook/Physics/Waves 1').length], trashed: [...trashed],
+            open: app.workspace.getLeavesOfType('notebook-ink').length, card: !!T.card('Waves 1'), original: T.strokesIn('notebook/Physics/Waves') };
+          // Export (a closed note) and copy embed.
+          T.card('Waves').querySelector('.nb-lib-more').click();
+          T.pick('Export as PDF');
+          await T.waitFor(() => fs.has('notebook/Physics/Waves.pdf'));
+          const pdf = fs.get('notebook/Physics/Waves.pdf');
+          out.pdf = pdf && new TextDecoder().decode(pdf.slice(0, 8));
+          T.card('Waves').querySelector('.nb-lib-more').click();
+          T.pick('Copy embed of first page');
+          await T.sleep(50);
+          out.embed = clipboardWrites[clipboardWrites.length - 1];
+          out.page = `notebook/Physics/Waves/${a.pages[0]}.svg`;
+          return out;
+        }""")
+        d = r['dup']
+        check('card duplicate: "Waves 1" with its own page folder, new page ids and the same ink',
+              d['card'] and d['b']['folder'] == 'Waves 1' and len(d['b']['pages']) == 1 and d['b']['pages'] != d['a']['pages'] and d['strokes'][0] == d['strokes'][1] == [2], d)
+        check('card delete: asks first (Cancel keeps it); Delete puts the note and its page folder in the trash and closes its tab',
+              'trash' in r['del']['text'] and r['del']['kept'] and not r['del']['md'] and not r['del']['folder'] and r['del']['trash'] == [True, 1]
+              and r['del']['open'] == 0 and not r['del']['card'] and r['del']['original'] == [2], r['del'])
+        check('card export: the note as a PDF next to it', r['pdf'] == '%PDF-1.4', r['pdf'])
+        check('card copy embed: the first page as a markdown embed', r['embed'] == f"![]({r['page']})", r)
+
+        # (7) Subjects: rename (the notes and their pages follow), delete only when empty.
+        r = ev("""async () => {
+          const out = {};
+          await T.showLib();
+          const menu = label => { T.section(label).querySelector('.nb-lib-subject-more').click(); return T.menu(); };
+          out.notesMenu = menu('notebook'); window.lastMenu.hide();
+          out.menu = menu('Physics');
+          T.pick('Rename subject…');
+          const m = modals[modals.length - 1];
+          m.contentEl.querySelector('input').value = 'Physics 101';
+          m.contentEl.querySelector('button.mod-cta').click();
+          await T.waitFor(() => dirs.has('notebook/Physics 101'));
+          await T.sleep(400);
+          await T.lib().ready;
+          out.renamed = { index: T.index('notebook/Physics 101/Waves.md'), strokes: T.strokesIn('notebook/Physics 101/Waves'), sections: T.sections().map(s => s[0]) };
+          const n0 = notices.length;
+          menu('Physics 101'); T.pick('Delete subject');
+          await T.sleep(50);
+          out.full = { notices: notices.slice(n0), there: dirs.has('notebook/Physics 101') };
+          await app.vault.createFolder('notebook/Empty');
+          await T.sleep(300); await T.lib().ready;
+          menu('Empty'); T.pick('Delete subject');
+          await T.sleep(20);
+          modals[modals.length - 1].contentEl.querySelector('.nb-confirm-ok').click();
+          await T.sleep(300); await T.lib().ready;
+          out.empty = { there: dirs.has('notebook/Empty'), trashed: trashed.includes('notebook/Empty'), sections: T.sections().map(s => s[0]) };
+          return out;
+        }""")
+        check('subjects: the notes folder offers only "New note here"; others rename and delete too',
+              r['notesMenu'] == ['New note here'] and r['menu'] == ['New note here', 'Rename subject…', 'Delete subject'], r)
+        check('subjects: renaming one moves its notes with their pages; the library follows',
+              r['renamed']['index']['folder'] == 'Waves' and r['renamed']['strokes'] == [2] and 'Physics 101' in r['renamed']['sections'], r['renamed'])
+        check('subjects: one holding notes is not deleted, and the notice says how many; an empty one goes to the trash',
+              r['full']['there'] and len(r['full']['notices']) == 1 and 'holds 3 notes' in r['full']['notices'][0]
+              and not r['empty']['there'] and r['empty']['trashed'] and 'Empty' not in r['empty']['sections'], r)
+
+        # (8) Import PDF from the library goes into the open subject, and the library shows it.
+        r = ev("""async () => {
+          await app.vault.createFolder('Slides');
+          await app.vault.createBinary('Slides/deck.pdf', fakePdf([[612, 792], [612, 792]]));
+          await T.showLib();
+          T.section('Chem').querySelector('.nb-lib-subject-name').click();
+          T.libEl('.nb-lib-import').click();
+          await T.waitFor(() => modals.length && modals[modals.length - 1].titleEl.textContent === 'Import PDF as ink note');
+          [...modals[modals.length - 1].contentEl.querySelectorAll('.suggestion-item')].find(e => e.textContent.includes('Slides/deck.pdf')).click();
+          await T.sleep(50);
+          const nm = modals[modals.length - 1];
+          nm.contentEl.querySelector('input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+          await T.waitFor(() => view.getViewType() === 'notebook-ink' && view.file?.path === 'notebook/Chem/deck.md' && view.store, 8000);
+          await view.leaf.detach();
+          await T.showLib();
+          const shown = T.sections();
+          // The command, with the library's subject open, goes there too; with none open, to the notes folder.
+          const folders = [p.importFolder()];
+          T.lib().openSubject(null);
+          folders.push(p.importFolder());
+          return { shown, folders, pages: T.index('notebook/Chem/deck.md').pages.length };
+        }""")
+        check('import: a PDF imported from the library lands in the open subject and its card shows',
+              r['shown'] == [['Chem', ['deck', 'Taken', 'Acids']]] and r['pages'] == 2, r)
+        check('import: the command imports into the open subject, else the notes folder', r['folders'] == ['notebook/Chem', 'notebook'], r['folders'])
+
+        # (9) Page folders hidden in the file explorer, and nothing else.
+        r = ev("""async () => {
+          // A decoy: a plain note with a folder of the same name; and an ink note whose page folder also holds a markdown file.
+          await app.vault.create('notebook/Essay.md', '# Essay\\n');
+          await app.vault.createFolder('notebook/Essay');
+          await app.vault.create('notebook/Essay/figure.svg', '<svg xmlns="http://www.w3.org/2000/svg"/>');
+          await p.createInkNote('Mixed', 'notebook', 'letter', 'blank');
+          await T.waitFor(() => view.file?.basename === 'Mixed' && view.store);
+          await view.leaf.detach();
+          await app.vault.create('notebook/Mixed/todo.md', 'todo');
+          const ex = openFileExplorer();
+          await T.sleep(400);
+          await p.explorer.update();
+          await T.sleep(100);
+          const state = () => [...ex.containerEl.querySelectorAll('.nav-folder-title')].map(t => [t.dataset.path,
+            t.closest('.nav-folder').classList.contains('nb-ink-pages-folder'), getComputedStyle(t.closest('.nav-folder')).display === 'none']);
+          const files = () => [...ex.containerEl.querySelectorAll('.nav-file-title')].filter(t => t.offsetParent !== null).map(t => t.dataset.path);
+          const out = { before: state(), files: files() };
+          // A new note: the explorer re-renders (new elements); its page folder is hidden again.
+          const renders = explorerRenders;
+          await p.createInkNote('Fresh', 'notebook/Chem', 'letter', 'blank');
+          await T.waitFor(() => view.file?.basename === 'Fresh' && view.store);
+          await view.save();
+          await T.sleep(600);
+          out.fresh = { renders: explorerRenders - renders, row: state().find(s => s[0] === 'notebook/Chem/Fresh') };
+          // Off: nothing hidden; on again.
+          const tab = p.settingTabs[0];
+          tab.display();
+          const toggle = tab.containerEl.querySelector('.setting-item[data-name="Hide page folders in the file explorer"] input');
+          toggle.checked = false; toggle.dispatchEvent(new Event('change'));
+          await T.sleep(200);
+          out.off = state().filter(s => s[1] || s[2]).length;
+          toggle.checked = true; toggle.dispatchEvent(new Event('change'));
+          await T.sleep(200);
+          out.on = state().filter(s => s[1]).length;
+          out.marked = p.explorer.marked;
+          await view.leaf.detach();
+          return out;
+        }""")
+        hidden = sorted(s[0] for s in r['before'] if s[1] and s[2])
+        shown = sorted(s[0] for s in r['before'] if not s[1] and not s[2])
+        print('explorer: hidden', hidden, 'shown', shown)
+        want_hidden = ['notebook/2026-10-10 Note', 'notebook/Chem/Acids', 'notebook/Chem/Light', 'notebook/Chem/deck', 'notebook/Physics 101/2026-10-10 Note',
+                       'notebook/Physics 101/Motion', 'notebook/Physics 101/Waves', 'notebook/Thermo']
+        check('explorer: every ink note\'s page folder is marked nb-ink-pages-folder and hidden', hidden == want_hidden, hidden)
+        check('explorer: never a folder that isn\'t one (subjects, a plain note\'s folder, a page folder holding a note, an emptied collision folder)',
+              all(f in shown for f in ['notebook', 'notebook/Chem', 'notebook/Physics 101', 'notebook/Essay', 'notebook/Mixed', 'notebook/Chem/Taken', 'Slides']), shown)
+        check('explorer: the notes themselves stay visible', all(f in r['files'] for f in ['notebook/Chem/Acids.md', 'notebook/Essay.md', 'notebook/Mixed.md']), r['files'])
+        check('explorer: after it re-renders for a new note, the new page folder is hidden too', r['fresh']['renders'] >= 1 and r['fresh']['row'] and r['fresh']['row'][1] and r['fresh']['row'][2], r['fresh'])
+        check('explorer: the setting off shows everything; on hides them again', r['off'] == 0 and r['on'] == len(want_hidden) + 1 == r['marked'], r)
+
+        # (10) 50 notes: the library opens within 500 ms with cached thumbnails; thumbnails only for cards in view, never while a pen is down.
+        r = ev("""async () => {
+          for (const leaf of app.workspace.getLeavesOfType('notebook-library')) await leaf.detach();
+          dirs.add('notebook/Many');
+          for (let i = 0; i < 50; i++) {
+            const files = ink.largeNote('notebook/Many', `Note ${String(i).padStart(2, '0')}`, 1, 30);
+            for (const [path, text] of Object.entries(files)) { const d = path.slice(0, path.lastIndexOf('/')); if (!dirs.has(d)) dirs.add(d); externalWrite(path, text); }
+          }
+          await T.sleep(300);
+          const s0 = { ...p.thumbs.stats };
+          // A Pencil held down (in an ink view beside the library): nothing is drawn until it lifts.
+          window.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 77, pointerType: 'pen', bubbles: true }));
+          let lib = await p.openLibrary();
+          await lib.ready;
+          await T.sleep(600);
+          const held = p.thumbs.stats.drawn - s0.drawn;
+          window.dispatchEvent(new PointerEvent('pointerup', { pointerId: 77, pointerType: 'pen', bubbles: true }));
+          await T.waitFor(() => lib.thumbsDone, 15000);
+          const drawn = p.thumbs.stats.drawn - s0.drawn, cards = T.cards().length;
+          // Again, with the thumbnails cached (once the draws asked for, cards just below the view among them, are done).
+          await p.thumbs.idle();
+          await lib.leaf.detach();
+          const s1 = { ...p.thumbs.stats }, t0 = performance.now();
+          lib = await p.openLibrary();
+          await lib.ready;
+          await T.waitFor(() => lib.thumbsDone, 5000);
+          const ms = performance.now() - t0;
+          return { held, drawn, cards, ms, renderMs: lib.stats.renderMs, cached: p.thumbs.stats.cached - s1.cached, redrawn: p.thumbs.stats.drawn - s1.drawn, waited: p.thumbs.stats.waited - s0.waited };
+        }""")
+        print(f"library with {r['cards']} notes: open with cached thumbnails in {r['ms']:.0f} ms (list {r['renderMs']:.0f} ms); {r['drawn']} thumbnails drawn the first time")
+        check('library: nothing is drawn while a Pencil is down; drawing resumes when it lifts', r['held'] == 0 and r['waited'] >= 1 and r['drawn'] >= 1, r)
+        check('library: thumbnails are drawn only for the cards in view (lazily), not for all of them', r['cards'] >= 60 and r['drawn'] < 30, r)
+        check('library: with 60 notes and cached thumbnails it opens, thumbnails shown, within 500 ms', r['ms'] < 500 and r['redrawn'] == 0 and r['cached'] >= 1, r)
+        page.locator('#leaf').screenshot(path=os.path.join(OUT, 'library.png'))
+
+        # (11) On startup: not when an ink note is open, or when the setting is off.
+        r = ev("""async () => {
+          for (const leaf of app.workspace.getLeavesOfType('notebook-library')) await leaf.detach();
+          const leaf = app.workspace.getLeaf('tab');
+          await leaf.openFile(app.vault.getFile('notebook/Thermo.md'));
+          await T.waitFor(() => view.store);
+          p.unload();
+          window.p = await loadPlugin();
+          const withInk = app.workspace.getLeavesOfType('notebook-library').length;
+          await leaf.detach();
+          p.unload();
+          window.pluginData = { ...(pluginData || {}), libraryOnStartup: false };
+          window.p = await loadPlugin();
+          const off = app.workspace.getLeavesOfType('notebook-library').length;
+          p.unload();
+          window.pluginData = { ...pluginData, libraryOnStartup: true };
+          window.p = await loadPlugin();
+          const on = app.workspace.getLeavesOfType('notebook-library').length;
+          return { withInk, off, on };
+        }""")
+        check('library on startup: not when an ink note is open or the setting is off; otherwise it opens', r == {'withInk': 0, 'off': 0, 'on': 1}, r)
+
+        # Put the earlier sections' vault back for the checks after this one.
+        ev("""async () => {
+          for (const leaf of [...app.workspace.leaves]) await leaf.detach();
+          app.workspace.sideLeaves.length = 0;
+          document.getElementById('explorer')?.remove();
+          fs.clear(); dirs.clear(); mtimes.clear();
+          for (const [k, v] of T.saved.fs) fs.set(k, v);
+          for (const d of T.saved.dirs) dirs.add(d);
+          for (const [k, v] of T.saved.mtimes) mtimes.set(k, v);
+          delete window.mockNow;
+          document.getElementById('leaf').style.height = '';
+        }""")
+        page.set_viewport_size({'width': 1000, 'height': 700})
+        # ======== end of 34. The notebook library (#73) ========
 
         # --- unload removes the patch
         r = ev("""async () => {

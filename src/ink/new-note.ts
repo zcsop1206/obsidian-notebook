@@ -3,7 +3,12 @@
 // a custom template (#21, #54: its page's size) sets the note's paper to its size, so pages added
 // later have it too; "Custom size…" in the paper list asks for a size in inches or mm. Favourite
 // templates (#54) come first in the list.
-import { Modal, normalizePath, Setting, TFolder, type App } from 'obsidian';
+//
+// One tap (#72): the ribbon icon and "New ink note" create a note at once, named from the
+// `newNoteName` pattern, in the notes folder (`notesFolder`, created on first use), with the
+// default template; the dialog is "New ink note with options…" (or a long press or Shift+click
+// on the ribbon icon), its name prefilled with the name a tap would give.
+import { Modal, moment, normalizePath, Setting, TFolder, type App } from 'obsidian';
 import { newPageId } from '../format/ids';
 import { newNote, pagePath, PAPERS, writeNote } from '../format/note';
 import { newPage, paperSize, sizePaper, writePage, type NotePaper, type Paper } from '../format/page';
@@ -12,10 +17,37 @@ import { cleanName, DEFAULT_NAME, uniqueName } from './names';
 import { SizeModal, templateItems } from './template-chooser';
 import { canonicalName, isCustomName, templateRegistry } from './templates';
 
+/**
+ * Now, formatted with moment's `pattern` (#72), as daily notes are. Obsidian's typings declare
+ * `moment` as the module namespace, which isn't callable here, so it is cast to what it is.
+ */
+export const formatNow = (pattern: string): string => (moment as unknown as () => { format(p: string): string })().format(pattern);
+
 /** The folder for a new note: the active file's, else the vault root ('' ). */
 export function targetFolder(app: App): string {
   const parent = app.workspace.getActiveFile()?.parent;
   return parent && !parent.isRoot() ? parent.path : '';
+}
+
+/** Creates the folder and any missing parents ('' is the vault root, which always exists). */
+export async function ensureFolder(app: App, path: string): Promise<void> {
+  const vault = app.vault;
+  let acc = '';
+  for (const part of path.split('/').filter(Boolean)) {
+    acc = acc ? `${acc}/${part}` : part;
+    if (vault.getAbstractFileByPath(acc)) continue;
+    try {
+      await vault.createFolder(acc);
+    } catch (e) {
+      if (!vault.getAbstractFileByPath(acc)) throw e; // else something else created it meanwhile
+    }
+  }
+}
+
+/** Whether a new note can't be named `name` in `folder`: its `.md` or its page folder is taken. */
+export function nameTaken(app: App, folder: string, name: string): boolean {
+  const vault = app.vault, dir = folder ? normalizePath(folder) + '/' : '';
+  return !!vault.getAbstractFileByPath(normalizePath(`${dir}${name}.md`)) || !!vault.getAbstractFileByPath(normalizePath(dir + name));
 }
 
 /**
@@ -40,9 +72,9 @@ export async function createInkNote(app: App, folder: string, name: string, pape
     if (size) paper = sizePaper(size);
   }
   const vault = app.vault;
+  await ensureFolder(app, folder); // the notes folder, on first use (#72)
   const dir = folder ? normalizePath(folder) + '/' : '';
-  const base = uniqueName(cleanName(name), n =>
-    !!vault.getAbstractFileByPath(normalizePath(`${dir}${n}.md`)) || !!vault.getAbstractFileByPath(normalizePath(dir + n)));
+  const base = uniqueName(cleanName(name), n => nameTaken(app, folder, n));
   const note = newNote(base, paper, template);
   const page = newPage(newPageId([]), paperSize(paper), first);
   note.pages = [page.id];
@@ -76,14 +108,15 @@ export function paperLabel(paper: NotePaper): string {
 
 /** Asks for the new note's name, paper and template. Enter or Create confirms. */
 export class NewNoteModal extends Modal {
-  constructor(app: App, private defaults: { paper: NotePaper; template: string }, private onChoose: (choice: NewNoteChoice) => void) {
+  /** `name` prefills the name field (#72: the name a one-tap note would get), else DEFAULT_NAME. */
+  constructor(app: App, private defaults: { paper: NotePaper; template: string; name?: string }, private onChoose: (choice: NewNoteChoice) => void) {
     super(app);
   }
 
   onOpen() {
     this.titleEl.setText('New ink note');
     const input = this.contentEl.createEl('input', { type: 'text', cls: 'nb-ink-name' });
-    input.value = DEFAULT_NAME;
+    input.value = this.defaults.name ?? DEFAULT_NAME;
     let paper = this.defaults.paper;
     const registry = templateRegistry();
     const entries = registry?.entries ?? [];

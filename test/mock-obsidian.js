@@ -52,20 +52,24 @@
   // ---- files
   window.fs = new Map();
   window.dirs = new Set();
+  // Modification times (#73: the library sorts by them and keys thumbnails on them), strictly increasing.
+  window.mtimes = new Map();
+  let clock = 0;
+  const touch = p => { clock = Math.max(Date.now(), clock + 1); mtimes.set(p, clock); };
   const adapter = {
     async exists(p) { return fs.has(p) || dirs.has(p); },
     async mkdir(p) { dirs.add(p); },
-    async write(p, d) { fs.set(p, String(d)); },
+    async write(p, d) { fs.set(p, String(d)); touch(p); },
     async read(p) { if (!fs.has(p)) throw new Error('ENOENT ' + p); return fs.get(p); },
     async append(p, d) { if (!fs.has(p)) throw new Error('append to missing ' + p); fs.set(p, fs.get(p) + d); },
-    async writeBinary(p, b) { fs.set(p, new Uint8Array(b.slice(0))); },
+    async writeBinary(p, b) { fs.set(p, new Uint8Array(b.slice(0))); touch(p); },
     async appendBinary(p, b) { const old = fs.get(p); const n = new Uint8Array(old.length + b.byteLength); n.set(old); n.set(new Uint8Array(b), old.length); fs.set(p, n); },
     async readBinary(p) { return fs.get(p).slice().buffer; },
     async list(p) {
       const kids = q => q.startsWith(p + '/') && !q.slice(p.length + 1).includes('/');
       return { files: [...fs.keys()].filter(kids), folders: [...dirs].filter(kids) };
     },
-    async remove(p) { fs.delete(p); },
+    async remove(p) { fs.delete(p); mtimes.delete(p); },
     async rmdir(p, rec) { for (const k of [...fs.keys()]) if (k.startsWith(p + '/')) fs.delete(k); for (const k of [...dirs]) if (k === p || k.startsWith(p + '/')) dirs.delete(k); },
   };
   window.adapter = adapter;
@@ -87,7 +91,7 @@
   class TFile extends TAbstractFile {
     get basename() { return this.name.includes('.') ? this.name.slice(0, this.name.lastIndexOf('.')) : this.name; }
     get extension() { return this.name.includes('.') ? this.name.slice(this.name.lastIndexOf('.') + 1) : ''; }
-    get stat() { const d = fs.get(this.path); return { size: d ? d.length : 0, mtime: 0, ctime: 0 }; }
+    get stat() { const d = fs.get(this.path); return { size: d ? d.length : 0, mtime: mtimes.get(this.path) ?? 0, ctime: 0 }; }
   }
   class TFolder extends TAbstractFile {
     isRoot() { return this.path === '/'; }
@@ -114,6 +118,7 @@
       if (!fs.has(file.path)) throw new Error('modify: no file ' + file.path);
       vault.writes.push(file.path);
       fs.set(file.path, text);
+      touch(file.path);
       this.trigger('modify', file);
     },
     async create(path, text) {
@@ -122,6 +127,7 @@
       if (dir && !dirs.has(dir)) throw new Error('create: no folder ' + dir);
       vault.writes.push(path);
       fs.set(path, text);
+      touch(path);
       const f = this.getFile(path);
       this.trigger('create', f);
       return f;
@@ -159,10 +165,10 @@
       };
       if (isDir) {
         for (const p of [...dirs].filter(inside).sort()) { const n = newPath + p.slice(old.length); dirs.delete(p); dirs.add(n); moveObj('dir:' + p, p, n); }
-        for (const p of [...fs.keys()].filter(inside).sort()) { const n = newPath + p.slice(old.length); const d = fs.get(p); fs.delete(p); fs.set(n, d); moveObj(p, p, n); }
+        for (const p of [...fs.keys()].filter(inside).sort()) { const n = newPath + p.slice(old.length); const d = fs.get(p); fs.delete(p); fs.set(n, d); mtimes.set(n, mtimes.get(p)); mtimes.delete(p); moveObj(p, p, n); }
       } else {
         if (!fs.has(old)) throw new Error('rename: no file ' + old);
-        const d = fs.get(old); fs.delete(old); fs.set(newPath, d); moveObj(old, old, newPath);
+        const d = fs.get(old); fs.delete(old); fs.set(newPath, d); mtimes.set(newPath, mtimes.get(old)); mtimes.delete(old); moveObj(old, old, newPath);
       }
       vault.renames.push([old, newPath]);
       for (const [obj, p] of moved) this.trigger('rename', obj, p);
@@ -175,19 +181,25 @@
       if (dir && !dirs.has(dir)) throw new Error('createBinary: no folder ' + dir);
       vault.writes.push(path);
       fs.set(path, new Uint8Array(data.slice(0)));
+      touch(path);
       const f = this.getFile(path);
       this.trigger('create', f);
       return f;
     },
     async readBinary(file) { const d = fs.get(file.path); if (!(d instanceof Uint8Array)) throw new Error('readBinary: not binary ' + file.path); return d.slice().buffer; },
-    getFiles() { return [...fs.keys()].map(p => this.getFile(p)); },
+    // The config folder and the trash aren't vault files, as in Obsidian.
+    getFiles() { return [...fs.keys()].filter(p => !/^\.(obsidian|trash)\//.test(p)).map(p => this.getFile(p)); },
+    getMarkdownFiles() { return this.getFiles().filter(f => f.extension === 'md'); },
+    configDir: '.obsidian',
     /** Paths written through modify/create, in order (for tests). */
     writes: [],
   });
   /** Tests: change a file as a sync would, with the vault's modify event. */
+  window.trashed = [];
   window.externalWrite = (path, text) => {
     const existed = fs.has(path);
     fs.set(path, text);
+    touch(path);
     vault.trigger(existed ? 'modify' : 'create', vault.getFile(path));
   };
 
@@ -292,6 +304,31 @@
         }
         await this.updateAllLinks(refs);
       });
+    },
+    /**
+     * Obsidian's trash (#73): a file, or a folder with everything in it, moves to `.trash/` (out of
+     * the vault's files), with a 'delete' event for each file and folder. window.trashed lists the paths.
+     */
+    async trashFile(file) {
+      const old = file.path, isDir = file instanceof TFolder;
+      const inside = p => p === old || p.startsWith(old + '/');
+      const files = isDir ? [...fs.keys()].filter(inside).sort() : [old];
+      const folders = isDir ? [...dirs].filter(inside).sort().reverse() : [];
+      for (const p of files) {
+        const d = fs.get(p);
+        fs.delete(p); mtimes.delete(p);
+        fs.set('.trash/' + p, d);
+        const f = fileObjects.get(p) || new TFile(p);
+        fileObjects.delete(p);
+        vault.trigger('delete', f);
+      }
+      for (const p of folders) {
+        dirs.delete(p);
+        const f = fileObjects.get('dir:' + p) || new TFolder(p);
+        fileObjects.delete('dir:' + p);
+        vault.trigger('delete', f);
+      }
+      window.trashed.push(old);
     },
     /** While the "update links?" dialog is up (alwaysUpdateLinks off): call with true or false. */
     answer: null,
@@ -451,9 +488,10 @@
   }
 
   class Workspace extends Events {
-    constructor(app) { super(); this.app = app; this.leaves = []; this.activeLeaf = null; }
+    constructor(app) { super(); this.app = app; this.leaves = []; this.sideLeaves = []; this.activeLeaf = null; }
     onLayoutReady(cb) { cb(); }
-    getLeavesOfType(type) { return this.leaves.filter(l => l.view && l.view.getViewType() === type); }
+    getLeavesOfType(type) { return [...this.leaves, ...this.sideLeaves].filter(l => l.view && l.view.getViewType() === type); }
+    requestSaveLayout() {}
     getLeaf(newLeaf) {
       if (!newLeaf && this.activeLeaf) return this.activeLeaf;
       const leaf = new WorkspaceLeaf(this.app);
@@ -468,15 +506,81 @@
     getMostRecentLeaf() { return this.activeLeaf; }
   }
 
+  // The file explorer (#73 hides page folders in it): a side leaf in #explorer, beside #leaf, whose
+  // items are rebuilt (new elements, as Obsidian's are when it re-renders) a moment after each
+  // vault change. Items: .tree-item.nav-folder > .tree-item-self.nav-folder-title[data-path] and
+  // .nav-folder-children, and .nav-file > .nav-file-title[data-path]. window.openFileExplorer()
+  // opens it; window.explorerRenders counts its renders.
+  window.explorerRenders = 0;
+  class FileExplorerView extends View {
+    getViewType() { return 'file-explorer'; }
+    getDisplayText() { return 'Files'; }
+    render() {
+      explorerRenders++;
+      const root = this.contentEl;
+      root.empty();
+      const box = root.createDiv({ cls: 'nav-files-container' });
+      const add = (parent, folder) => {
+        const kids = folder.children.filter(c => !c.name.startsWith('.'));
+        const folders = kids.filter(c => c instanceof TFolder).sort((a, b) => a.name.localeCompare(b.name));
+        const files = kids.filter(c => c instanceof TFile).sort((a, b) => a.name.localeCompare(b.name));
+        for (const f of folders) {
+          const item = parent.createDiv({ cls: 'tree-item nav-folder' });
+          const title = item.createDiv({ cls: 'tree-item-self nav-folder-title', text: f.name });
+          title.dataset.path = f.path;
+          add(item.createDiv({ cls: 'tree-item-children nav-folder-children' }), f);
+        }
+        for (const f of files) {
+          const item = parent.createDiv({ cls: 'tree-item nav-file' });
+          const title = item.createDiv({ cls: 'tree-item-self nav-file-title', text: f.name });
+          title.dataset.path = f.path;
+        }
+      };
+      add(box, vault.getRoot());
+    }
+  }
+  window.openFileExplorer = () => {
+    const ws = app.workspace, leaf = new WorkspaceLeaf(app), v = new FileExplorerView(leaf);
+    leaf.view = v;
+    const host = document.getElementById('explorer') || document.body.createDiv();
+    host.id = 'explorer';
+    host.appendChild(leaf.containerEl);
+    leaf.containerEl.appendChild(v.containerEl);
+    ws.sideLeaves.push(leaf);
+    v.load();
+    let timer = 0;
+    const later = () => { clearTimeout(timer); timer = setTimeout(() => v.render(), 30); };
+    for (const name of ['create', 'delete', 'rename']) v.registerEvent(vault.on(name, later));
+    v.render();
+    ws.trigger('layout-change');
+    return v;
+  };
+
   const app = { vault, metadataCache, fileManager };
   app.workspace = new Workspace(app);
   window.app = app;
 
   // ---- menus, modals, settings
+  // A menu shown (#73) is a .menu of .menu-item rows in the body; a click on a row runs it and
+  // closes the menu, as in Obsidian. window.lastMenu is the latest one shown.
   class Menu {
-    constructor() { this.items = []; }
+    constructor() { this.items = []; this.dom = null; }
     addItem(cb) { const item = { title: '', icon: '', click: null, setTitle(t) { this.title = t; return this; }, setIcon(i) { this.icon = i; return this; }, onClick(f) { this.click = f; return this; } }; cb(item); this.items.push(item); return this; }
     addSeparator() { return this; }
+    showAtPosition(pos) {
+      window.lastMenu?.hide();
+      const dom = this.dom = document.body.createDiv({ cls: 'menu' });
+      dom.style.cssText = `position:fixed;left:${pos.x}px;top:${pos.y}px;background:#fff;border:1px solid #ccc;z-index:10`;
+      for (const item of this.items) {
+        const row = dom.createDiv({ cls: 'menu-item', text: item.title });
+        row.dataset.title = item.title;
+        row.addEventListener('click', e => { this.hide(); item.click?.(e); });
+      }
+      window.lastMenu = this;
+      return this;
+    }
+    showAtMouseEvent(e) { return this.showAtPosition({ x: e.clientX || 0, y: e.clientY || 0 }); }
+    hide() { this.dom?.remove(); this.dom = null; if (window.lastMenu === this) window.lastMenu = null; return this; }
   }
   window.modals = [];
   class Modal {
@@ -534,7 +638,7 @@
   window.commands = commands;
   window.pluginData = null;
   class Plugin extends Component {
-    constructor() { super(); this.app = app; this.settingTabs = []; this.ribbon = []; }
+    constructor() { super(); this.app = app; this.settingTabs = []; this.ribbon = []; this.manifest = { id: 'notebook', dir: '.obsidian/plugins/notebook' }; }
     registerView(t, f) { viewTypes[t] = f; }
     addRibbonIcon(icon, title, cb) { const el = document.createElement('div'); el.setAttribute('aria-label', title); el.addEventListener('click', cb); this.ribbon.push({ icon, title, el }); return el; }
     addCommand(c) { commands[c.id] = c; return c; }
@@ -556,6 +660,25 @@
     svg.setAttribute('viewBox', '0 0 24 24');
     svg.innerHTML = `<rect x="1" y="1" width="22" height="22" rx="5" fill="none" stroke="currentColor"/><text x="12" y="16" font-size="10" text-anchor="middle" fill="currentColor">${name.slice(0, 2)}</text>`;
     el.prepend(svg);
+  };
+  // moment, as Obsidian exports it (#72 names new notes with it): moment(date?) with format() of
+  // the tokens a name pattern is likely to use and `[text]` kept as written. window.mockNow (a
+  // date or timestamp) fixes "now" for tests.
+  const pad = (n, w = 2) => String(n).padStart(w, '0');
+  const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  const moment = d => {
+    const t = new Date(d ?? window.mockNow ?? Date.now());
+    const tokens = {
+      YYYY: () => String(t.getFullYear()), YY: () => pad(t.getFullYear() % 100), MMMM: () => MONTHS[t.getMonth()], MMM: () => MONTHS[t.getMonth()].slice(0, 3),
+      MM: () => pad(t.getMonth() + 1), M: () => String(t.getMonth() + 1), DD: () => pad(t.getDate()), D: () => String(t.getDate()),
+      dddd: () => DAYS[t.getDay()], ddd: () => DAYS[t.getDay()].slice(0, 3), HH: () => pad(t.getHours()), H: () => String(t.getHours()),
+      mm: () => pad(t.getMinutes()), ss: () => pad(t.getSeconds()),
+    };
+    return {
+      toDate: () => t,
+      format: p => p.replace(/\[([^\]]*)\]|YYYY|YY|MMMM|MMM|MM|M|DD|D|dddd|ddd|HH|H|mm|ss/g, (m, text) => text !== undefined ? text : tokens[m]()),
+    };
   };
   const Platform = { isMobile: false, isMobileApp: false, isIosApp: false, isDesktop: true, isDesktopApp: true };
 
@@ -608,7 +731,7 @@
   window.obsidian = {
     Plugin, Component, View, ItemView, FileView, MarkdownView, Notice, Events, TAbstractFile, TFile, TFolder,
     WorkspaceLeaf, Menu, Modal, FuzzySuggestModal, PluginSettingTab, Setting, Platform, normalizePath, setIcon,
-    loadPdfJs,
+    loadPdfJs, moment,
   };
 
   window.loadPlugin = async () => {

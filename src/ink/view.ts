@@ -35,6 +35,7 @@ import { isFavourite } from './favourites';
 import { addImageTemplateFlow, addPdfTemplateFlow } from './pdf-template';
 import { ImageSourceModal, importNotice, PdfSourceModal, renderPdfPages, stripPdf, type PdfChoice } from './pdf-import';
 import { cleanName } from './names';
+import { renameNote } from './note-actions';
 import type { ImportKind } from './picker';
 import { centreOn, encodeClip, isIdentity, lassoSelect, moveBy, resizeBy, resizeScale, strokesBounds, transformStroke, withIds, type Box, type Transform } from './lasso';
 import { hitSelection, SelectionMenu, SelectionOverlay } from './selection';
@@ -448,7 +449,17 @@ export class InkView extends FileView {
 
   async onRename(file: TFile) {
     this.store?.renamed(file.path);
+    this.toolbar?.render(); // the title (#72)
     await super.onRename(file);
+  }
+
+  /**
+   * Renames the open note from the toolbar's title (#72) through fileManager.renameFile, as the
+   * file explorer does: RenameHandler (#26) moves the page folder and Obsidian's link update (#62)
+   * runs. The name is cleaned as a new note's is. Resolves to why it couldn't, or null.
+   */
+  async renameNote(name: string): Promise<string | null> {
+    return this.file ? renameNote(this.app, this.file, name) : null; // shared with the library's cards (#73)
   }
 
   /** Writes everything changed now. */
@@ -1935,6 +1946,8 @@ export class InkView extends FileView {
       setRulerAngle: a => this.setRulerAngle(a),
       rulerUnit: () => this.rulerUnit,
       setRulerUnit: u => this.setRulerUnit(u),
+      title: () => (this.store && this.file ? this.file.basename : ''),
+      rename: name => this.renameNote(name),
     });
   }
 

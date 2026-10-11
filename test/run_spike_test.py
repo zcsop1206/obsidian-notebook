@@ -32,7 +32,8 @@ try:
         page.on('pageerror', lambda e: errors.append(str(e)))
         page.on('console', lambda m: m.type == 'error' and errors.append(m.text))
         page.goto(f'http://localhost:{port}/test/harness.html')
-        page.evaluate("async () => { window.p = await loadPlugin(); await p.openDebugView(); }")
+        # Without the notebook library on startup (#73), which would open beside the debug view.
+        page.evaluate("async () => { window.pluginData = { libraryOnStartup: false }; window.p = await loadPlugin(); await p.openDebugView(); }")
 
         # --- ink: synthetic pen strokes with varying pressure, one touch, one tap, one real mouse stroke
         page.evaluate("""async () => {

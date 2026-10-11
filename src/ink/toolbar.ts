@@ -4,6 +4,9 @@
 // settings, Import (#54: a menu of PDFs and images, once or as templates) and the Pages panel toggle. Tapping the tool already in use opens its picker (a
 // popover under the button, see picker.ts); so every tool, preset and picker option is at most
 // two taps away. The toolbar knows nothing of the store: the view hands it a ToolbarHost.
+// At the right end (#72), the note's title: its name on a wide toolbar, a pencil icon on a narrow
+// one; a tap turns it into a text field that renames the note (Enter or leaving the field
+// renames, Escape keeps the name), through the host, which renames with fileManager.renameFile.
 //
 // Pencil taps (#53): the view's stylus blocker (blockStylusTouch, input.ts) is on the pages
 // scroller only, so the toolbar takes the Pencil as a finger; every element here is still a
@@ -14,11 +17,14 @@ import {
   type ToolKind,
 } from './pen';
 import { Picker, type PickerHost } from './picker';
+import { Notice } from 'obsidian';
 
 /** How long a press on a preset slot must last to save the current settings into it, in ms. */
 export const LONG_PRESS_MS = 550;
 /** Movement that cancels a long press, in CSS px. */
 const PRESS_SLOP = 10;
+/** Below this toolbar width the title is a pencil icon, above it the note's name (#72), in CSS px. */
+export const TITLE_WIDE = 960;
 
 export interface ToolbarHost extends PickerHost {
   pen(): Readonly<PenSettings>;
@@ -48,6 +54,10 @@ export interface ToolbarHost extends PickerHost {
   /** The ruler (#20): whether it's shown, and showing or hiding it. */
   rulerOn?(): boolean;
   toggleRuler?(): void;
+  /** The open note's name, '' with none (#72). */
+  title?(): string;
+  /** Renames the open note (#72); resolves to why it couldn't, or null. */
+  rename?(name: string): Promise<string | null>;
 }
 
 type Tool = { tool: ToolKind; icon: string; label: string };
@@ -103,7 +113,64 @@ export class Toolbar {
     // The current page and the page count; a tap asks for a page to go to (#64).
     this.pageEl = this.button(page, 'nb-ink-page-indicator', null, 'Go to page', () => host.goToPage?.());
     this.pageEl.setAttribute('aria-haspopup', 'dialog');
+    this.titleGroup = group('nb-ink-title-group');
+    this.titleEl = this.button(this.titleGroup, 'nb-ink-title', 'pencil', 'Rename this note', () => this.startRename());
+    this.titleEl.createSpan({ cls: 'nb-ink-title-text' });
+    // The name on a wide toolbar, the icon on a narrow one (#72).
+    this.resize = new ResizeObserver(() => this.el.toggleClass('is-narrow', this.el.clientWidth < TITLE_WIDE));
+    this.resize.observe(this.el);
     this.render();
+  }
+
+  private titleGroup: HTMLElement;
+  private titleEl: HTMLButtonElement;
+  private resize: ResizeObserver;
+  /** The rename field while the title is being edited (#72). */
+  private renameEl: HTMLInputElement | null = null;
+
+  /** Whether the title is being edited (for tests). */
+  get renaming(): boolean {
+    return !!this.renameEl;
+  }
+
+  /** Turns the title into a text field holding the note's name, selected (#72). */
+  startRename() {
+    const name = this.host.title?.() ?? '';
+    if (!name || this.renameEl || !this.host.rename) return;
+    this.picker.close();
+    const input = this.renameEl = this.titleGroup.createEl('input', {
+      cls: 'nb-ink-control nb-ink-title-input', type: 'text', attr: { 'aria-label': 'Note name', enterkeyhint: 'done', autocapitalize: 'sentences' },
+    });
+    input.value = name;
+    this.titleEl.hide();
+    let done = false;
+    const finish = (keep: boolean) => {
+      if (done) return;
+      done = true;
+      const value = input.value;
+      input.remove();
+      this.renameEl = null;
+      this.titleEl.show();
+      if (keep || value.trim() === '' || value === name) return;
+      void this.host.rename!(value).then(why => {
+        if (why) new Notice(why);
+        this.render();
+      });
+    };
+    input.addEventListener('keydown', e => {
+      if (e.isComposing) return;
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        finish(false);
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        finish(true);
+      }
+    });
+    input.addEventListener('blur', () => finish(false));
+    input.focus();
+    input.select();
   }
 
   private pageEl: HTMLButtonElement;
@@ -157,6 +224,12 @@ export class Toolbar {
     this.mark(this.el.querySelector<HTMLElement>('.nb-ink-pages-toggle')!, h.pagesOpen());
     this.setPage(h.pageLabel?.() ?? '');
     this.mark(this.el.querySelector<HTMLElement>('.nb-ink-ruler')!, !!h.rulerOn?.());
+    const title = h.title?.() ?? '';
+    this.titleEl.querySelector('.nb-ink-title-text')!.textContent = title;
+    this.titleEl.toggleClass('is-empty', !title || !h.rename);
+    const label = title ? `${title}: rename this note` : 'Rename this note';
+    this.titleEl.setAttribute('aria-label', label);
+    this.titleEl.title = label;
     // A command or a preset switched tools: the other tool's picker no longer applies.
     const open = this.picker.openFor;
     if (open && open !== 'page' && open !== 'import' && open !== pen.tool) this.picker.close();
@@ -169,6 +242,7 @@ export class Toolbar {
 
   destroy() {
     this.picker.close();
+    this.resize.disconnect();
   }
 
   /** Opens the picker of the tool in use under its button (for tests and commands). */
