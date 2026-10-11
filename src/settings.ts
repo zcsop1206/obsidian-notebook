@@ -1,11 +1,14 @@
 // Plugin settings: the paper size and template of new ink notes, and the ink toolbar's tools and
-// favourite presets (#10), the templates folder (#21) and the favourite templates (#54).
+// favourite presets (#10), the templates folder (#21) and the favourite templates (#54); the name
+// pattern of one-tap new notes and the folder they go in (#72).
 import { PluginSettingTab, Setting, type App, type Plugin } from 'obsidian';
 import type { Paper } from './format/page';
 import { BUILT_IN_TEMPLATES, isTemplateName } from './format/template';
 import { isFavourite, parseFavourites, toggleFavourite } from './ink/favourites';
 import { DEFAULT_PRESETS, DEFAULT_TOOL_STATE, parsePresets, parseToolState, type PenPreset, type ToolState } from './ink/pen';
 import { canonicalName, isCustomName, templateRegistry } from './ink/templates';
+import { cleanFolder, DEFAULT_NAME_PATTERN, patternName } from './ink/names';
+import { formatNow } from './ink/new-note';
 
 export interface NotebookSettings {
   /** Paper size of new ink notes. */
@@ -25,11 +28,18 @@ export interface NotebookSettings {
   favouriteTemplates: string[];
   /** Whether new notes start with the first favourite template (else `template`) (#54). */
   favouriteDefault: boolean;
+  /**
+   * The name of a note made with one tap (#72): a moment pattern, as Obsidian's daily notes
+   * use (`YYYY-MM-DD [Note]`; text in square brackets is kept as written).
+   */
+  newNoteName: string;
+  /** The vault folder new notes go in (#72), created on first use; '' is the vault root. */
+  notesFolder: string;
 }
 
 export const DEFAULT_SETTINGS: NotebookSettings = {
   paper: 'letter', template: 'blank', tools: DEFAULT_TOOL_STATE, presets: [...DEFAULT_PRESETS], templatesFolder: 'templates/ink',
-  favouriteTemplates: [], favouriteDefault: true,
+  favouriteTemplates: [], favouriteDefault: true, newNoteName: DEFAULT_NAME_PATTERN, notesFolder: 'notebook',
 };
 
 /** Settings from saved data, ignoring unknown or invalid values (with a warning for a template). */
@@ -47,6 +57,8 @@ export function parseSettings(data: unknown): NotebookSettings {
     templatesFolder,
     favouriteTemplates: parseFavourites(d.favouriteTemplates),
     favouriteDefault: typeof d.favouriteDefault === 'boolean' ? d.favouriteDefault : DEFAULT_SETTINGS.favouriteDefault,
+    newNoteName: typeof d.newNoteName === 'string' && d.newNoteName.trim() ? d.newNoteName : DEFAULT_SETTINGS.newNoteName,
+    notesFolder: typeof d.notesFolder === 'string' ? cleanFolder(d.notesFolder) : DEFAULT_SETTINGS.notesFolder,
   };
 }
 
@@ -104,7 +116,37 @@ export class NotebookSettingTab extends PluginSettingTab {
           this.plugin.settings.templatesFolder = value.trim() || DEFAULT_SETTINGS.templatesFolder;
           await this.plugin.saveSettings();
         }));
+    this.newNotes(containerEl);
     this.favourites(containerEl, customs);
+  }
+
+  /** Where one-tap new notes go and how they are named (#72), with a live example of the name. */
+  private newNotes(containerEl: HTMLElement) {
+    const s = this.plugin.settings;
+    const name = new Setting(containerEl).setName('New note name');
+    const example = () => {
+      const text = patternName(s.newNoteName, formatNow, () => false);
+      name.descEl.setText(`A moment date pattern, as daily notes use; text in [brackets] is kept as written. Today: "${text}"`);
+    };
+    name.addText(t => t
+      .setPlaceholder(DEFAULT_NAME_PATTERN)
+      .setValue(s.newNoteName)
+      .onChange(async value => {
+        s.newNoteName = value.trim() ? value : DEFAULT_NAME_PATTERN;
+        example();
+        await this.plugin.saveSettings();
+      }));
+    example();
+    new Setting(containerEl)
+      .setName('Notes folder')
+      .setDesc('Where new ink notes go. Created when the first note is. Empty: the vault root.')
+      .addText(t => t
+        .setPlaceholder('notebook')
+        .setValue(s.notesFolder)
+        .onChange(async value => {
+          s.notesFolder = cleanFolder(value);
+          await this.plugin.saveSettings();
+        }));
   }
 
   /** Favourite templates (#54): a toggle per template; starred ones come first wherever templates are chosen. */

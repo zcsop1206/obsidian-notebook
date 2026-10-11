@@ -831,3 +831,49 @@
   width: 7em;
   font-size: 16px; /* no zoom on focus on the iPad */
 }
+
+/*
+ * The note's title at the toolbar's right end (#72): its name on a wide toolbar, a pencil icon
+ * on a narrow one; a tap turns it into a text field that renames the note.
+ */
+/* Right-aligned, also when it wraps onto a row of its own. */
+.nb-ink-title-group {
+  margin-left: auto;
+}
+
+.nb-ink-toolbar button.nb-ink-title {
+  width: auto;
+  max-width: 220px;
+}
+
+.nb-ink-toolbar:not(.is-narrow) button.nb-ink-title {
+  padding: 0 10px;
+}
+
+.nb-ink-toolbar:not(.is-narrow) button.nb-ink-title svg {
+  display: none;
+}
+
+.nb-ink-toolbar.is-narrow .nb-ink-title-text {
+  display: none;
+}
+
+.nb-ink-title-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-ui-small, 13px);
+  font-weight: 600;
+  color: var(--text-normal);
+}
+
+.nb-ink-toolbar button.nb-ink-title.is-empty {
+  display: none;
+}
+
+.nb-ink-toolbar input.nb-ink-title-input {
+  width: 200px;
+  max-width: 60vw;
+  height: 36px;
+  font-size: 16px; /* no zoom on focus on the iPad */
+}

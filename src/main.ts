@@ -3,7 +3,9 @@ import type { Hotkey } from 'obsidian';
 import { Recorder } from './debug/recorder';
 import { DebugView, VIEW_TYPE_DEBUG } from './debug/view';
 import { LOG_PREFIX } from './debug/util';
-import { createInkNote, NewNoteModal, targetFolder } from './ink/new-note';
+import { createInkNote, formatNow, nameTaken, NewNoteModal, targetFolder } from './ink/new-note';
+import { patternName } from './ink/names';
+import { LONG_PRESS_MS } from './ink/toolbar';
 import { cachedIsInk, installTakeover, VIEW_TYPE_INK } from './ink/takeover';
 import type { PenStats } from './ink/input';
 import type { NavStats } from './ink/navigate';
@@ -46,8 +48,19 @@ export default class NotebookPlugin extends Plugin {
     this.registerEvent(this.app.vault.on('rename', (file, oldPath) => void renames.onRename(file, oldPath)));
     // Embeds rewritten by Obsidian's link update go back to relative paths (#62).
     this.registerEvent(this.app.vault.on('modify', file => void renames.onModify(file)));
-    this.addRibbonIcon('pencil', 'New ink note', () => this.newInkNote());
-    this.addCommand({ id: 'new-ink-note', name: 'New ink note', callback: () => this.newInkNote() });
+    // One tap makes a note (#72); a long press or Shift+click on the icon asks first.
+    let pressed = false;
+    const ribbon = this.addRibbonIcon('pencil', 'New ink note', evt => {
+      if (pressed) pressed = false; // the click ending a long press
+      else if (evt.shiftKey) this.newInkNoteWithOptions();
+      else void this.newInkNote();
+    });
+    this.onLongPress(ribbon, () => {
+      pressed = true;
+      this.newInkNoteWithOptions();
+    });
+    this.addCommand({ id: 'new-ink-note', name: 'New ink note', callback: () => void this.newInkNote() });
+    this.addCommand({ id: 'new-ink-note-options', name: 'New ink note with options…', callback: () => this.newInkNoteWithOptions() });
     this.addCommand({
       id: 'open-as-ink-note',
       name: 'Open as ink note',
@@ -246,17 +259,60 @@ export default class NotebookPlugin extends Plugin {
     return defaultTemplateName(s.template, s.favouriteDefault, s.favouriteTemplates, n => isTemplateName(n) || !!this.templates.get(n));
   }
 
-  /** Asks for a name, paper and template, then creates the note in the active file's folder and opens it. */
-  newInkNote() {
-    const { paper } = this.settings;
-    // The dialog lists the custom templates loaded so far (the registry loads on layout ready and
-    // after each change to the templates folder).
-    new NewNoteModal(this.app, { paper, template: this.defaultTemplate() }, c => void this.createInkNote(c.name, undefined, c.paper, c.template)).open();
+  /**
+   * `run` after a press of LONG_PRESS_MS on `el` that didn't move (#72: the ribbon icon). The
+   * click that ends it still arrives; the caller ignores it.
+   */
+  private onLongPress(el: HTMLElement, run: () => void) {
+    let timer = 0, x = 0, y = 0;
+    const cancel = () => window.clearTimeout(timer);
+    this.registerDomEvent(el, 'pointerdown', e => {
+      cancel();
+      x = e.clientX;
+      y = e.clientY;
+      timer = window.setTimeout(run, LONG_PRESS_MS);
+    });
+    this.registerDomEvent(el, 'pointermove', e => {
+      if (Math.hypot(e.clientX - x, e.clientY - y) > 10) cancel();
+    });
+    for (const type of ['pointerup', 'pointercancel', 'pointerleave'] as const) this.registerDomEvent(el, type, cancel);
+    this.registerDomEvent(el, 'contextmenu', e => e.preventDefault()); // iOS's own long-press menu
+    this.register(cancel);
+  }
+
+  /** The name a note made now in `folder` would get (#72): the `newNoteName` pattern, made unique. */
+  newNoteName(folder = this.settings.notesFolder): string {
+    return patternName(this.settings.newNoteName, formatNow, n => nameTaken(this.app, folder, n));
   }
 
   /**
-   * Creates an ink note with one page and opens it in a new tab; returns its path. The paper
-   * and template (a template name) default to the settings (the template to defaultTemplate()).
+   * Creates a note at once (#72): named from the pattern, in the notes folder (created on first
+   * use), with the default template and its paper; opens it with the pen ready. Returns its path.
+   */
+  async newInkNote(folder = this.settings.notesFolder): Promise<string | null> {
+    const path = await this.createInkNote(this.newNoteName(folder), folder);
+    const view = this.app.workspace.getActiveViewOfType(InkView);
+    if (path && view && (view.pen.tool === 'eraser' || view.pen.tool === 'lasso')) view.setTool('pen');
+    return path;
+  }
+
+  /**
+   * Asks for a name (prefilled with the one a tap would give, #72), paper and template, then
+   * creates the note in the notes folder and opens it.
+   */
+  newInkNoteWithOptions(folder = this.settings.notesFolder) {
+    const { paper } = this.settings;
+    // The dialog lists the custom templates loaded so far (the registry loads on layout ready and
+    // after each change to the templates folder).
+    new NewNoteModal(this.app, { paper, template: this.defaultTemplate(), name: this.newNoteName(folder) },
+      c => void this.createInkNote(c.name, folder, c.paper, c.template)).open();
+  }
+
+  /**
+   * Creates an ink note with one page and opens it in a new tab; returns its path. The folder
+   * (created if missing) defaults to the active file's (the tests rely on it; the ribbon and
+   * commands pass the notes folder, #72), the paper and template (a template name) to the
+   * settings (the template to defaultTemplate()).
    */
   async createInkNote(name: string, folder = targetFolder(this.app), paper: NotePaper = this.settings.paper,
     template: string = this.defaultTemplate()): Promise<string | null> {

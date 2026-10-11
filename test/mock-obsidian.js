@@ -557,6 +557,25 @@
     svg.innerHTML = `<rect x="1" y="1" width="22" height="22" rx="5" fill="none" stroke="currentColor"/><text x="12" y="16" font-size="10" text-anchor="middle" fill="currentColor">${name.slice(0, 2)}</text>`;
     el.prepend(svg);
   };
+  // moment, as Obsidian exports it (#72 names new notes with it): moment(date?) with format() of
+  // the tokens a name pattern is likely to use and `[text]` kept as written. window.mockNow (a
+  // date or timestamp) fixes "now" for tests.
+  const pad = (n, w = 2) => String(n).padStart(w, '0');
+  const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  const moment = d => {
+    const t = new Date(d ?? window.mockNow ?? Date.now());
+    const tokens = {
+      YYYY: () => String(t.getFullYear()), YY: () => pad(t.getFullYear() % 100), MMMM: () => MONTHS[t.getMonth()], MMM: () => MONTHS[t.getMonth()].slice(0, 3),
+      MM: () => pad(t.getMonth() + 1), M: () => String(t.getMonth() + 1), DD: () => pad(t.getDate()), D: () => String(t.getDate()),
+      dddd: () => DAYS[t.getDay()], ddd: () => DAYS[t.getDay()].slice(0, 3), HH: () => pad(t.getHours()), H: () => String(t.getHours()),
+      mm: () => pad(t.getMinutes()), ss: () => pad(t.getSeconds()),
+    };
+    return {
+      toDate: () => t,
+      format: p => p.replace(/\[([^\]]*)\]|YYYY|YY|MMMM|MMM|MM|M|DD|D|dddd|ddd|HH|H|mm|ss/g, (m, text) => text !== undefined ? text : tokens[m]()),
+    };
+  };
   const Platform = { isMobile: false, isMobileApp: false, isIosApp: false, isDesktop: true, isDesktopApp: true };
 
   // ---- a fake pdf.js for loadPdfJs (#14). A fake PDF is text: `%PDF-FAKE` then one line per
@@ -608,7 +627,7 @@
   window.obsidian = {
     Plugin, Component, View, ItemView, FileView, MarkdownView, Notice, Events, TAbstractFile, TFile, TFolder,
     WorkspaceLeaf, Menu, Modal, FuzzySuggestModal, PluginSettingTab, Setting, Platform, normalizePath, setIcon,
-    loadPdfJs,
+    loadPdfJs, moment,
   };
 
   window.loadPlugin = async () => {
