@@ -16,3 +16,13 @@ await esbuild.build({
 });
 await esbuild.build({ ...common, entryPoints: ['test/make-fixture.ts'], outfile: 'test/out/make-fixture.js' });
 await esbuild.build({ ...common, platform: 'browser', format: 'iife', target: 'es2020', entryPoints: ['test/view-fixture.ts'], outfile: 'test/out/view-fixture.js' });
+// The study fixture for run_study_test.py: the obsidian import resolves to the mock module the
+// harness puts on window.obsidian (iife externals would emit a require() the browser lacks).
+const obsidianMock = {
+  name: 'obsidian-mock',
+  setup(build) {
+    build.onResolve({ filter: /^obsidian$/ }, () => ({ path: 'obsidian', namespace: 'obsidian-mock' }));
+    build.onLoad({ filter: /.*/, namespace: 'obsidian-mock' }, () => ({ contents: 'module.exports = window.obsidian', loader: 'js' }));
+  },
+};
+await esbuild.build({ ...common, platform: 'browser', format: 'iife', target: 'es2020', plugins: [obsidianMock], entryPoints: ['test/study-fixture.ts'], outfile: 'test/out/study-fixture.js' });
