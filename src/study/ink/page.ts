@@ -59,7 +59,9 @@ export function contentHeight(stack: HTMLElement): number {
     if (c.classList.contains('nb-study-ink-canvas') || c.classList.contains('nb-study-ink-chips')) continue;
     const cs = getComputedStyle(c);
     if (cs.position === 'absolute' || cs.position === 'fixed' || cs.display === 'none') continue;
-    bottom = Math.max(bottom, c.offsetTop + c.offsetHeight + (parseFloat(cs.marginBottom) || 0));
+    // No margin-bottom: between children the next offsetTop already covers it, and a trailing
+    // margin collapses out of an unpadded stack, so counting it overshoots the stack's own height.
+    bottom = Math.max(bottom, c.offsetTop + c.offsetHeight);
   }
   const pad = parseFloat(getComputedStyle(stack).paddingBottom) || 0;
   return Math.max(1, Math.ceil(bottom + pad));
