@@ -62,6 +62,9 @@ class ChangesModal extends Modal {
       st.id = STYLE_ID;
       st.textContent = CSS;
       document.head.appendChild(st);
+      // Removed when the plugin unloads (the modal itself may open many times).
+      const plugin = this.ctx.plugin as { register?: (fn: () => void) => void } | undefined;
+      if (plugin && typeof plugin.register === 'function') plugin.register(() => st.remove());
     }
     const { contentEl, titleEl } = this;
     this.renderCmp.load();

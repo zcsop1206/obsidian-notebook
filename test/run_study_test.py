@@ -229,6 +229,38 @@ try:
         check('map: the detail Drill button opens the first derive',
               r['calls'] == [{'fn': 'openDrill', 'args': ['b-sets', 'dr-1']}], r['calls'])
 
+        # Feeds lists only basics and topics: a hidden kata that needs a basic never shows (review, major 2)
+        r = ev("""async () => {
+          const c = ctx.content();
+          const hk = S.doc('k-add', 'kata', { title: 'Ripple-carry adder', needs: ['b-logic'] });
+          hk.kata = c.katas.get('k-add');
+          const vk = S.doc('k-open', 'kata', { title: 'Open kata doc', needs: ['b-logic'] });
+          vk.kata = { ...c.katas.get('k-add'), id: 'k-open', title: 'Open kata doc', level: 'simple' };
+          c.docs.set('k-add', hk); c.docs.set('k-open', vk);
+          c.usedBy.set('b-logic', [...(c.usedBy.get('b-logic') || []), 'k-add', 'k-open']);
+          ctx.fire('content');
+          await sleep(40);
+          const el = view.contentEl;
+          [...el.querySelectorAll('.nb-map-node')].find(n => n.dataset.node === 'b-logic').click();
+          await sleep(30);
+          const d = el.querySelector('.nb-map-detail');
+          const dts = [...d.querySelectorAll('dt')];
+          const feedDd = dts.find(x => x.textContent === 'Feeds').nextElementSibling;
+          const out = { feeds: [...feedDd.querySelectorAll('button')].map(b => b.textContent), text: el.textContent };
+          c.docs.delete('k-add'); c.docs.delete('k-open');
+          c.usedBy.set('b-logic', c.usedBy.get('b-logic').filter(x => x !== 'k-add' && x !== 'k-open'));
+          ctx.fire('content');
+          await sleep(30);
+          return out;
+        }""")
+        check('map: Feeds lists only basics and topics, never a hidden kata',
+              r['feeds'] == ['Sets and maps'] and 'Ripple' not in r['text'] and 'Open kata doc' not in r['text'], r['feeds'])
+
+        # the stage legend swatches carry the node colours (review, minor)
+        r = ev("""() => [...view.contentEl.querySelectorAll('.nb-map-sw')].map(e => getComputedStyle(e).backgroundColor)""")
+        check('map: the stage legend swatches are coloured like the dots',
+              len(r) == 6 and r[0] == 'rgb(158, 158, 158)' and r[5] == 'rgb(0, 105, 92)' and len(set(r)) == 6, r)
+
         # 390 px pass
         r = ev("""async () => {
           const leaf = document.getElementById('leaf');
@@ -342,7 +374,9 @@ try:
           btn.click();
           await sleep(60);
           const req = eng.pending.find(p => p.doc === 'topic-dp');
-          return { label: btn.textContent, armed,
+          const logged = ctx.logged.filter(e => e.type === 'rewrite-request').pop();
+          return { label: btn.textContent, armed, rev: logged && logged.rev,
+            hash: ctx.content().anchors.get('topic-dp').get('p-def').hash,
             reqs: ctx.logged.filter(e => e.type === 'rewrite-request').length,
             banner: sc.querySelector('.nb-st-sc-banner').textContent,
             bannerOn: !sc.querySelector('.nb-st-sc-banner').hidden,
@@ -352,6 +386,8 @@ try:
         check('marks: eligible shows "Request rewrite (2 of 3 left)"', r['label'].startswith('Request rewrite'), r['label'])
         check('marks: the rewrite request needs two taps and then logs once',
               r['armed']['n'] == 0 and r['armed']['armed'] and r['reqs'] == 1, (r['armed'], r['reqs']))
+        check('marks: the rewrite request carries rev = the passage hash',
+              r['rev'] and r['rev'] == r['hash'], (r['rev'], r['hash']))
         check('marks: a pending request reads as "requested"',
               r['bannerOn'] and 'Rewrite requested' in r['banner'] and 'requested' in r['dot'], r['banner'])
 
@@ -378,9 +414,21 @@ try:
         check('marks: a gap in a basic explains the rebuild before the two-tap',
               'gap is in a basic' in r['head'] and r['label'].startswith('Request rebuild'), (r['head'], r['label']))
         check('marks: the confirmed rebuild logs one rebuild-request per basic',
-              r['armedN'] == 0 and len(r['reqs']) == 1 and r['reqs'][0]['doc'] == 'b-sets' and r['reqs'][0]['a'] == 'i-one', r['reqs'])
+              r['armedN'] == 0 and len(r['reqs']) == 1 and r['reqs'][0]['doc'] == 'b-sets' and r['reqs'][0]['a'] == 'topic-dp#i-one', r['reqs'])
         check('marks: the banner and toast say "Rebuild requested"',
               'Rebuild requested' in r['banner'] and 'Rebuild requested' in r['toast'], (r['banner'], r['toast']))
+
+        # once the engine answers 'requested', the banner finds the cross-doc rebuild by <doc>#<anchor>
+        r = ev("""async () => {
+          eng.triageOverride = (d, a) => a === 'i-one' ? { action: 'requested', at: new Date().toISOString() } : { action: 'eligible', left: 2 };
+          ctx.fire('events');
+          await sleep(30);
+          const sc = document.querySelector('.nb-st-scaffold[data-a="i-one"]');
+          eng.triageOverride = { action: 'rebuild-basic', basics: ['b-sets'] };
+          return sc.querySelector('.nb-st-sc-banner').textContent;
+        }""")
+        check('marks: a requested rebuild on a linked basic reads "Rebuild requested"',
+              r.startswith('Rebuild requested'), r)
 
         # rebuild landing: the request leaves pending when a newer build lands
         r = ev("""async () => {
@@ -411,27 +459,79 @@ try:
 
         # ================= S5: Changes =================
         r = ev("""async () => {
+          const c0 = plugin._cleanups.length;
           await S.openChanges(ctx, 'topic-dp');
           const m = modals[modals.length - 1];
+          const added = plugin._cleanups.slice(c0);
+          const hadStyle = !!document.getElementById('nb-st-changes-css');
+          for (const fn of added) fn();
+          const styleCleanup = { added: added.length, hadStyle, gone: !document.getElementById('nb-st-changes-css') };
           const t = m.contentEl.textContent;
           const heads = [...m.contentEl.querySelectorAll('h4')].map(h => h.textContent);
           const marks = [...m.contentEl.querySelectorAll('.nb-st-mark')].map(e => e.textContent);
           const n0 = ctx.uiCalls.length;
           const row = m.contentEl.querySelector('.nb-st-mark');
           if (row) row.click();
-          return { title: m.titleEl.textContent, heads, marks, openCalls: ctx.uiCalls.slice(n0),
+          return { styleCleanup, title: m.titleEl.textContent, heads, marks, openCalls: ctx.uiCalls.slice(n0),
             closed: !document.body.contains(m.modalEl), t };
         }""")
         check('changes: the panel shows build, budget, requests, marks and the ## Changes section',
               r['title'] == 'Changes · Dynamic programming' and
               r['heads'] == ['Pending requests', 'Marks', 'Changes section'] and
               '4 · cs-core' in r['t'] and '1 of 3 used' in r['t'] and 'rewrote the memoisation' in r['t'], (r['title'], r['heads']))
+        check('changes: the injected style is removed by a cleanup registered on the plugin',
+              r['styleCleanup'] == {'added': 1, 'hadStyle': True, 'gone': True}, r['styleCleanup'])
         check('changes: mark rows list the open marks and open their anchor',
               len(r['marks']) == 1 and 'lost' in r['marks'][0] and '#p-def' in r['marks'][0] and
               r['openCalls'] == [{'fn': 'openDoc', 'args': ['topic-dp', 'p-def']}] and r['closed'], (r['marks'], r['openCalls']))
 
         r = ev("() => { marks.destroy(); const left = document.querySelectorAll('.nb-st-dot').length; document.getElementById('study-host').remove(); return left; }")
         check('marks: destroy removes the dots', r == 0, r)
+
+        # The attempt box takes the Pencil through S4's real ink (review, major 1): the scaffold root
+        # is not .no-ink, only its rows are, so a pen stroke in the box is kept and logs an attempt.
+        r = ev("""async () => {
+          eng.triageOverride = null;
+          eng.budgetVal = { left: 3, used: 0 };
+          eng.pending.length = 0;
+          eng.marksByDoc.clear();
+          const ctx2 = S.makeCtx({ engine: eng, content: ctx.content(), plugin, settings: { device: 'ipad' } });
+          const box = document.createElement('div');
+          box.id = 'study-host2';
+          document.body.appendChild(box);
+          const h2 = S.makeHost(ctx2, docs.topic, box, { ink: S.createInkApi(ctx2) });
+          const m2 = S.attachMarks(h2.host);
+          await sleep(20);
+          h2.host.margin.querySelector('.nb-st-dot[data-a="p-def"]').click();
+          await sleep(20);
+          [...h2.host.margin.querySelectorAll('.nb-st-menu button')].find(b => b.textContent === 'lost').click();
+          await sleep(60);
+          const sc = box.querySelector('.nb-st-scaffold[data-a="p-def"]');
+          const surf = sc.querySelector('.nb-study-ink-surface');
+          const rows = ['.nb-st-sc-h', '.nb-st-sc-banner', '.nb-st-sc-basics', '.nb-st-sc-foot'].map(q => sc.querySelector(q).classList.contains('no-ink'));
+          surf.scrollIntoView();
+          await sleep(20);
+          const rr = surf.getBoundingClientRect();
+          const pen = (pts) => {
+            const init = (q, extra = {}) => ({ pointerId: 7, pointerType: 'pen', pressure: 0.5, clientX: q[0], clientY: q[1], bubbles: true, cancelable: true, button: 0, buttons: 1, ...extra });
+            surf.dispatchEvent(new PointerEvent('pointerdown', init(pts[0])));
+            for (const q of pts.slice(1)) surf.dispatchEvent(new PointerEvent('pointermove', init(q)));
+            surf.dispatchEvent(new PointerEvent('pointerup', init(pts[pts.length - 1], { buttons: 0, pressure: 0 })));
+          };
+          const pts = [];
+          for (let i = 0; i < 12; i++) pts.push([rr.left + 30 + i * 12, rr.top + 40 + (i % 2) * 10]);
+          pen(pts);
+          await sleep(2300);
+          const att = ctx2.logged.filter(e => e.type === 'attempt' && e.a === 'p-def').map(e => e.strokes);
+          const count = sc.querySelector('.nb-st-sc-count').textContent;
+          m2.destroy();
+          box.remove();
+          return { rootNoInk: sc.classList.contains('no-ink'), rows, att, count };
+        }""")
+        check('marks: the scaffold root is not .no-ink; its header, banner, basics and foot rows are',
+              not r['rootNoInk'] and r['rows'] == [True, True, True, True], r)
+        check('marks: a Pencil stroke in the attempt box (real createInkApi) is kept and logs an attempt',
+              r['att'] == [1] and r['count'] == '1 stroke', r)
 
         page.locator('#leaf').screenshot(path=os.path.join(OUT, 'study_map.png'))
         check('no page errors', not errors, errors[:3])

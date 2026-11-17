@@ -293,7 +293,8 @@ interface EventBase {
 export type StudyEvent = EventBase & (
   | { type: 'mark'; doc: string; a: string; verb: MarkVerb; build: number }
   | { type: 'attempt'; doc: string; a: string; strokes: number }
-  | { type: 'rewrite-request'; doc: string; a: string; build: number }
+  /** `rev`: the passage's hash when requested, so an answer needs the text to change (Decision 5). */
+  | { type: 'rewrite-request'; doc: string; a: string; build: number; rev?: string }
   | { type: 'rebuild-request'; doc: string; build: number; a: string }
   | { type: 'fog'; doc: string; proof: string; build: number; reveals: number; steps: number; done: boolean; clean: boolean }
   | { type: 'drill'; doc: string; item: string; grade: DrillGrade; ms: number; src: 'drill' | 'probe' | 'recall' }

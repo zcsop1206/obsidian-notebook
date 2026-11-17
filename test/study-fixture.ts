@@ -14,6 +14,7 @@ import type {
 } from '../src/study/types';
 import type { InkApi, InkStroke, InkSurface, MarksHost, PageInk } from '../src/study/view/host';
 import { attachMarks } from '../src/study/view/marks';
+import { createInkApi } from '../src/study/ink';
 import { changesSection, openChanges } from '../src/study/view/changes';
 import { register as registerPanels } from '../src/study/panels/register';
 import { TodayView, VIEW_TYPE_STUDY_TODAY } from '../src/study/panels/today';
@@ -292,7 +293,7 @@ export interface MockHost {
  * A DOM stand-in for the study view's rendered doc: the passages stacked in a column, the margin
  * column at the right where the dots live. `attachMarks` is driven against this.
  */
-export function makeHost(ctx: StudyContext, d: StudyDoc, parent: HTMLElement): MockHost {
+export function makeHost(ctx: StudyContext, d: StudyDoc, parent: HTMLElement, opts: { ink?: InkApi } = {}): MockHost {
   const wrap = parent.createDiv({ cls: 'nb-study-doc' });
   wrap.style.cssText = 'position:relative;width:560px;padding-right:130px;';
   const els = new Map<string, HTMLElement>();
@@ -305,9 +306,10 @@ export function makeHost(ctx: StudyContext, d: StudyDoc, parent: HTMLElement): M
     undo: () => null,
     destroy() { /* nothing to free */ },
   };
-  const ink: InkApi = {
+  // `opts.ink` (the real createInkApi from src/study/ink) replaces the mock surfaces.
+  const ink: InkApi = opts.ink ?? {
     page: () => pageInk,
-    surface: (dd, box, key, opts) => mockSurface(box, key, opts),
+    surface: (dd, box, key, so) => mockSurface(box, key, so),
   };
   const render = () => {
     els.clear();
@@ -371,5 +373,5 @@ export function makeHost(ctx: StudyContext, d: StudyDoc, parent: HTMLElement): M
 (window as unknown as { study: unknown }).study = {
   attachMarks, openChanges, changesSection, registerPanels,
   TodayView, MapView, VIEW_TYPE_STUDY_TODAY, VIEW_TYPE_STUDY_MAP,
-  MockEngine, makeCtx, makeHost, inkSurfaces, doc, index, passage,
+  MockEngine, makeCtx, makeHost, inkSurfaces, doc, index, passage, createInkApi,
 };

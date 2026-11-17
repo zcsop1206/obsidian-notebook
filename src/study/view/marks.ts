@@ -221,6 +221,11 @@ export function attachMarks(host: MarksHost): Marks {
     const e = engine();
     return e ? call(() => e.budget(doc().id), { left: REWRITE_MAX, used: 0 }) : { left: REWRITE_MAX, used: 0 };
   }
+  /** Whether a rebuild request names this doc's `anchor`: bare on this doc, `<doc>#<anchor>` on a linked basic. */
+  function rebuildAnchorMatches(r: PendingReq, anchor: string): boolean {
+    const d = doc().id;
+    return r.doc === d ? r.a === anchor : r.a === `${d}#${anchor}`;
+  }
   function attemptCount(anchor: string): number {
     const sc = ui.get(anchor)?.scaffold;
     return sc?.surface ? sc.surface.count() : 0;
@@ -437,17 +442,19 @@ export function attachMarks(host: MarksHost): Marks {
     const el = host.passageEl(u.anchor);
     if (!el) return;
     const sc = document.createElement('div');
-    sc.className = 'nb-st-scaffold no-ink';
+    // The scaffold root is NOT .no-ink: the attempt box inside it must take the Pencil (S4's
+    // surfaces drop strokes whose target is inside .no-ink). Only the rows around it are .no-ink.
+    sc.className = 'nb-st-scaffold';
     sc.dataset.a = u.anchor;
     sc.innerHTML =
-      '<div class="nb-st-sc-h"></div><div class="nb-st-sc-banner" hidden></div>' +
-      '<div class="nb-st-sc-basics" hidden></div>' +
-      '<div class="nb-st-sc-att" hidden><div class="nb-st-sc-lab">Your attempt: what the passage claims and why, in your own words.</div>' +
+      '<div class="nb-st-sc-h no-ink"></div><div class="nb-st-sc-banner no-ink" hidden></div>' +
+      '<div class="nb-st-sc-basics no-ink" hidden></div>' +
+      '<div class="nb-st-sc-att" hidden><div class="nb-st-sc-lab no-ink">Your attempt: what the passage claims and why, in your own words.</div>' +
       '<div class="nb-st-sc-ink"></div>' +
-      '<div class="nb-st-row nb-st-sc-tools"><button type="button" data-sc="undo">Undo</button>' +
+      '<div class="nb-st-row nb-st-sc-tools no-ink"><button type="button" data-sc="undo">Undo</button>' +
       '<button type="button" data-sc="more">More paper</button><span class="nb-st-sp"></span>' +
       '<span class="nb-st-hint nb-st-sc-count"></span></div></div>' +
-      '<div class="nb-st-row nb-st-sc-foot"></div><div class="nb-st-hint nb-st-sc-status"></div>';
+      '<div class="nb-st-row nb-st-sc-foot no-ink"></div><div class="nb-st-hint nb-st-sc-status no-ink"></div>';
     const { parent, before } = scaffoldParent(el);
     parent.insertBefore(sc, before);
     const handle: Scaffold = {
@@ -537,7 +544,7 @@ export function attachMarks(host: MarksHost): Marks {
     } else if (res?.action === 'requested') {
       banner.hidden = false;
       // The request may live on a linked basic (rebuild), not the marked doc.
-      const kind = [...pending().values()].some(r => r.a === u.anchor && r.kind === 'rebuild') ? 'Rebuild' : 'Rewrite';
+      const kind = [...pending().values()].some(r => r.kind === 'rebuild' && rebuildAnchorMatches(r, u.anchor)) ? 'Rebuild' : 'Rewrite';
       banner.textContent = `${kind} requested ${fmtTime(res.at)}; /teach on the laptop will answer it.`;
     } else {
       banner.hidden = true;
@@ -648,7 +655,9 @@ export function attachMarks(host: MarksHost): Marks {
     u.confirmed = true;
     for (const b of targets) {
       const build = host.ctx.content().docs.get(b)?.build ?? d.build;
-      void host.ctx.log({ type: 'rebuild-request', doc: b, build, a: u.anchor }).catch(err => console.error('[study marks] log(rebuild-request)', err));
+      // On another doc (a linked basic), `a` names the marked passage as `<doc>#<anchor>`.
+      const a = b === d.id ? u.anchor : `${d.id}#${u.anchor}`;
+      void host.ctx.log({ type: 'rebuild-request', doc: b, build, a }).catch(err => console.error('[study marks] log(rebuild-request)', err));
     }
     host.toast(`Rebuild requested: ${targets.map(t => titleOf(host, t)).join(', ')}. /teach on the laptop will answer it.`, 5200);
     renderScaffold(u);
@@ -658,7 +667,9 @@ export function attachMarks(host: MarksHost): Marks {
   /** Two-tap confirm done: log the rewrite-request; the budget drops (the engine counts). */
   function requestRewrite(u: MarkUi): void {
     const d = doc();
-    void host.ctx.log({ type: 'rewrite-request', doc: d.id, a: u.anchor, build: d.build }).catch(err => console.error('[study marks] log(rewrite-request)', err));
+    // rev: the passage's hash now, so the request is answered only when its text changes (Decision 5).
+    const rev = host.ctx.content().anchors.get(d.id)?.get(u.anchor)?.hash;
+    void host.ctx.log({ type: 'rewrite-request', doc: d.id, a: u.anchor, build: d.build, ...(rev ? { rev } : {}) }).catch(err => console.error('[study marks] log(rewrite-request)', err));
     // The 'events' change re-checks this mark; a real engine then answers 'requested'.
     resync();
   }
