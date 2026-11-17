@@ -3,7 +3,7 @@
  * `notebook-study-problem` behind `ctx.ui.openProblem` (Today and Map open a problem there, invented
  * or bank, without showing the doc it lives in), and the blocks' CSS. The blocks inside a doc are
  * mounted by the study view through blocks/index.ts. Owned by S6 (fog and drill), S7 (problem) and
- * S9 (kata) on docs/study/BOARD.md.
+ * S9 (kata) on docs/study/BOARD.md. S9's registerUi fills `ctx.ui.openKata`.
  */
 import { Component, ItemView, MarkdownRenderer, type WorkspaceLeaf } from 'obsidian';
 import type { StudyContext } from '../context';
@@ -12,6 +12,7 @@ import type { BlockEnv } from '../view/host';
 import { createInkApi } from '../ink';
 import { ensureStyles, removeStyles } from './drill';
 import { PROBLEM_VIEW, mountSession, openProblem, problemItem, type SessionHandle } from './problem';
+import { registerUi as registerKataUi } from './kata';
 
 /** The doc a standalone problem's ink is filed under: `ink/problems.<device>.json`, keys `call:<id>`, `work:<id>`. */
 export const PROBLEMS_DOC = 'problems';
@@ -162,4 +163,5 @@ export function register(ctx: StudyContext): void {
   ctx.plugin.registerView(PROBLEM_VIEW, leaf => new ProblemView(leaf, ctx));
   ctx.ui.openProblem = (id, opts) => openProblem(ctx, id, opts);
   ctx.plugin.register(() => removeStyles());
+  registerKataUi(ctx);
 }
