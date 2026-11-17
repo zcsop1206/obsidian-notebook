@@ -655,18 +655,20 @@ function splitRow(line: string): string[] {
   return cells;
 }
 
+/** Rows of every table whose header has all the `need` columns (a file may split one list over sections). */
 function tableRows(markdown: string, need: string[]): Record<string, string>[] {
+  const out: Record<string, string>[] = [];
   for (const t of parseTables(markdown)) {
     if (t.length === 0) continue;
     const head = t[0].map(h => h.toLowerCase());
     if (!need.every(k => head.includes(k))) continue;
-    return t.slice(1).map(row => {
+    for (const row of t.slice(1)) {
       const r: Record<string, string> = {};
       head.forEach((h, k) => { r[h] = row[k] ?? ''; });
-      return r;
-    });
+      out.push(r);
+    }
   }
-  return [];
+  return out;
 }
 
 function firstHref(cell: string): string | null {

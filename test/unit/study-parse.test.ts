@@ -173,7 +173,8 @@ test('the index: docs, bank with tags, bank refs, tracks, methods, warnings', ()
   assert.equal(idx.anchors.get('fx-units')!.get('cue-exponent')!.kind, 'list');
   const w = idx.warnings.join('\n');
   assert.match(w, /no-such-anchor/);
-  assert.match(w, /putnam-2020-b9" is not in any bank file/);
+  assert.ok(!/putnam-2020-b9" is not in any bank file/.test(w));
+  assert.equal(idx.problems.get('putnam-2020-b9')!.d, 5);
   assert.match(w, /method "ghost" links a missing anchor \^nope/);
 });
 
