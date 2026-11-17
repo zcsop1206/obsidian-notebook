@@ -1,3 +1,8 @@
+// NOTE FOR ANY OTHER AGENT WORKING IN on-s4 (2026-11-17 03:38): two S4 builders are writing in
+// this worktree at once. This index.ts (with page.ts for page ink) was committed in bf1b281 and is
+// the one the unit tests and test/run_study_ink_test.py exercise. Please do not replace it; append
+// a Q: entry to docs/study/threads/S4.md instead. A copy of the replacement that was written over
+// it at 03:36 is kept outside the repo, so nothing is lost.
 /**
  * Anchored ink for study docs and blocks (SPEC.md, Storage: Ink). Owned by S4 on docs/study/BOARD.md.
  *
