@@ -98,8 +98,9 @@ export function buildIndex(files: SourceFile[]): ContentIndex {
       if (l.external || !l.toDoc) continue;
       const target = anchors.get(l.toDoc);
       if (!target) {
-        // Links to non-study files (images, project pages) are fine; only flag study-looking ids.
-        if (/^[a-z][a-z0-9-]*$/.test(l.toDoc)) warnings.push(`${d.path}: link "${l.href}" points to a doc that is not in the study folder`);
+        // Links to other vault notes (project pages, images) are fine; only a link into a study
+        // folder (basics, topics, katas, bank, cards) that finds no doc is a problem.
+        if (l.toPath && /(^|\/)(basics|topics|katas|bank|cards)\/[^/]+\.md$/.test(l.toPath)) warnings.push(`${d.path}: link "${l.href}" points to a study doc that does not exist`);
         continue;
       }
       if (l.toAnchor && !target.has(l.toAnchor)) warnings.push(`${d.path}: link "${l.href}" points to a missing anchor ^${l.toAnchor}`);

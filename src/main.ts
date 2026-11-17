@@ -42,7 +42,8 @@ export default class NotebookPlugin extends Plugin {
 
   async onload() {
     this.settings = parseSettings(await this.loadData());
-    this.study = registerStudy(this);
+    // Study mode is additive: if it fails to start, the ink editor must still load.
+    try { this.study = registerStudy(this); } catch (e) { console.error('[study] failed to start', e); }
 
     this.registerView(VIEW_TYPE_INK, leaf => new InkView(leaf, this));
     this.register(installTakeover(this.app));

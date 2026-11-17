@@ -94,8 +94,10 @@ export interface DocLink {
   from: string;
   text: string;
   href: string;
-  /** Resolved target doc id, or null for an external link. */
+  /** Resolved target doc id (the file name), or null for an external link. */
   toDoc: string | null;
+  /** The target's vault path, resolved against the linking doc's folder; null for an external link. */
+  toPath: string | null;
   /** The anchor in the target, or null for the doc's top. */
   toAnchor: string | null;
   external: boolean;

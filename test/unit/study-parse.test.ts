@@ -104,6 +104,8 @@ test('lists: anchored items and where their links come from', () => {
   assert.equal(ext.external, true);
   const bez = doc.links.find(l => l.text === 'Bézout')!;
   assert.deepEqual([bez.from, bez.toDoc, bez.toAnchor], ['needs', 'fx-div', 'bezout']);
+  assert.equal(crt.toPath, 'study/topics/fx-topic.md');
+  assert.equal(bez.toPath, 'study/basics/fx-div.md');
 });
 
 test('a hash anchor changes with the text; an explicit one does not', () => {

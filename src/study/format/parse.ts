@@ -599,17 +599,29 @@ function collectLinks(doc: StudyDoc, p: Passage): void {
 }
 
 export function resolveLink(doc: StudyDoc, from: string, text: string, href: string): DocLink {
-  if (/^[a-z][a-z0-9+.-]*:/i.test(href)) return { from, text, href, toDoc: null, toAnchor: null, external: true };
+  if (/^[a-z][a-z0-9+.-]*:/i.test(href)) return { from, text, href, toDoc: null, toPath: null, toAnchor: null, external: true };
   let decoded = href;
   try { decoded = decodeURIComponent(href); } catch { /* keep raw */ }
   const hashAt = decoded.indexOf('#');
   const pathPart = hashAt >= 0 ? decoded.slice(0, hashAt) : decoded;
   const frag = hashAt >= 0 ? decoded.slice(hashAt + 1) : '';
   const toDoc = pathPart === '' ? doc.id : docIdFromPath(pathPart);
+  const toPath = pathPart === '' ? doc.path : joinPath(doc.path, pathPart);
   let toAnchor: string | null = null;
   if (frag.startsWith('^')) toAnchor = frag.slice(1);
   else if (frag) toAnchor = `h-${slug(frag)}`;
-  return { from, text, href, toDoc, toAnchor, external: false };
+  return { from, text, href, toDoc, toPath, toAnchor, external: false };
+}
+
+/** Resolve `rel` against the folder of `fromPath`, normalising `.` and `..`. */
+export function joinPath(fromPath: string, rel: string): string {
+  const parts = rel.startsWith('/') ? [] : fromPath.split('/').slice(0, -1);
+  for (const seg of rel.split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') parts.pop();
+    else parts.push(seg);
+  }
+  return parts.join('/');
 }
 
 /* ---------------------------------------- tables ---------------------------------------- */
