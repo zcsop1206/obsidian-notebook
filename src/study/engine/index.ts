@@ -36,17 +36,22 @@ export interface StudyEngine extends Engine {
   weak(basic: string): boolean;
   /** Some basic in the area is at push level 3. */
   inPush(area: string): boolean;
-  /** The canonical item id for a theorem hook's settle and call events. */
-  hookItem(doc: string, theoremAnchor: string): string;
+  /** The canonical item id for a theorem hook's settle and call events (attempt n, default 1). */
+  hookItem(doc: string, theoremAnchor: string, attempt?: number): string;
+  /** The item id for the next attempt at a theorem hook: each attempt is graded once, later settles on it only re-tick. */
+  nextHookItem(doc: string, theoremAnchor: string): string;
   /** Events the fold skipped (bad shape, unknown type or basic). */
   skipped(): number;
   /** The folded state, for scripts and tests. */
   state(): StudyState;
 }
 
-/** The canonical item id of a theorem posed as a problem (push level 3): `thm:<doc>#<theorem anchor>`. */
-export function hookItem(doc: string, theoremAnchor: string): string {
-  return `thm:${doc}#${theoremAnchor}`;
+/**
+ * The item id of a theorem posed as a problem (push level 3): `thm:<doc>#<theorem anchor>`, and
+ * `thm:<doc>#<theorem anchor>#<n>` for attempt n > 1. Each attempt is graded once.
+ */
+export function hookItem(doc: string, theoremAnchor: string, attempt = 1): string {
+  return attempt > 1 ? `thm:${doc}#${theoremAnchor}#${attempt}` : `thm:${doc}#${theoremAnchor}`;
 }
 
 export function createEngine(now: () => Date = () => new Date()): StudyEngine {
@@ -125,6 +130,12 @@ export function createEngine(now: () => Date = () => new Date()): StudyEngine {
     weak: (basic: string) => S().weak(basic),
     inPush: (area: string) => S().inPush(area),
     hookItem,
+    nextHookItem: (doc: string, theoremAnchor: string) => {
+      const s = S();
+      const h = s.resolveHook(hookItem(doc, theoremAnchor));
+      const n = h ? s.hooks.filter(r => { const x = s.resolveHook(r.item); return !!x && x.doc.id === h.doc.id && x.theorem === h.theorem; }).length : 0;
+      return hookItem(doc, theoremAnchor, n + 1);
+    },
     skipped: () => S().skipped,
     state: S,
   };

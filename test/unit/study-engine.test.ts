@@ -893,7 +893,9 @@ test('Decision 2: a theorem hook grades its basic and moves the area rating at K
   assert.deepEqual(r.eng.streaks('nt'), { miss: 0, clean: 0 }, 'the stretch streaks do not move');
   assert.ok(!problems(r.eng).some(p => /^thm:/.test(p.id)), 'never in Today\'s slots');
   const rr = r.eng.rating('nt');
+  assert.equal(r.eng.nextHookItem('fe-units', 'order-thm'), 'thm:fe-units#order-thm');
   r.settle(hookItem('fe-units', 'order-thm'), 'held', { hook: true });
+  assert.equal(r.eng.nextHookItem('fe-units', 'order-thm'), 'thm:fe-units#order-thm#2', 'the next attempt');
   assert.equal(r.eng.rating('nt'), rr, 'p-order-thm has no (d x): no rating');
   assert.equal(r.eng.basic('fe-units').last, 'clean');
   // a hook at push level 3 that misses fails the basic and drops one level; the proof anchor works too
@@ -902,11 +904,15 @@ test('Decision 2: a theorem hook grades its basic and moves the area rating at K
   r.settle('thm:fe-crt#p-crt', 'blind', { hook: true });
   assert.deepEqual([r.eng.basic('fe-crt').last, r.eng.basic('fe-crt').stage, r.eng.pushLevel('fe-crt')], ['failed', 0, 2]);
   close(r.eng.hooks().slice(-1)[0].rAfter!, r.eng.rating('nt'), 1e-12);
-  r.settle(hookItem('fe-units', 'order-thm'), 'held', { hook: true, help: true });
-  assert.equal(r.eng.basic('fe-units').last, 'shaky');
+  const n0 = r.eng.basic('fe-units').history.length;
+  r.settle(hookItem('fe-units', 'order-thm'), 'missed', { hook: true, called: ['m-order'], used: ['m-order'] });
+  assert.equal(r.eng.basic('fe-units').history.length, n0, 'a second settle of one attempt only re-ticks');
+  r.settle(r.eng.nextHookItem('fe-units', 'order-thm'), 'held', { hook: true, help: true });
+  assert.equal(r.eng.basic('fe-units').last, 'shaky', 'attempt 2 is graded');
   const n = r.eng.basic('fe-units').history.length;
-  r.settle(hookItem('fe-units', 'order-thm'), 'moot', { hook: true });
+  r.settle(r.eng.nextHookItem('fe-units', 'order-thm'), 'moot', { hook: true });
   assert.equal(r.eng.basic('fe-units').history.length, n, 'moot grades nothing');
+  assert.equal(r.eng.hooks().length, 5);
   const sk = r.eng.skipped();
   r.settle('thm:nope#x', 'held', { hook: true });
   assert.equal(r.eng.skipped(), sk + 1);
