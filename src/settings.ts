@@ -6,6 +6,8 @@ import { BUILT_IN_TEMPLATES, isTemplateName } from './format/template';
 import { isFavourite, parseFavourites, toggleFavourite } from './ink/favourites';
 import { DEFAULT_PRESETS, DEFAULT_TOOL_STATE, parsePresets, parseToolState, type PenPreset, type ToolState } from './ink/pen';
 import { canonicalName, isCustomName, templateRegistry } from './ink/templates';
+import { DEFAULT_STUDY_SETTINGS, type StudySettings } from './study/context';
+import { cleanDevice, cleanRoot, MINUTES_MAX, MINUTES_MIN, parseStudySettings } from './study/view/settings';
 
 export interface NotebookSettings {
   /** Paper size of new ink notes. */
@@ -25,11 +27,13 @@ export interface NotebookSettings {
   favouriteTemplates: string[];
   /** Whether new notes start with the first favourite template (else `template`) (#54). */
   favouriteDefault: boolean;
+  /** Study mode (docs/study/SPEC.md): root folder, device name, weekday minutes, developer tools. */
+  study: StudySettings;
 }
 
 export const DEFAULT_SETTINGS: NotebookSettings = {
   paper: 'letter', template: 'blank', tools: DEFAULT_TOOL_STATE, presets: [...DEFAULT_PRESETS], templatesFolder: 'templates/ink',
-  favouriteTemplates: [], favouriteDefault: true,
+  favouriteTemplates: [], favouriteDefault: true, study: { ...DEFAULT_STUDY_SETTINGS },
 };
 
 /** Settings from saved data, ignoring unknown or invalid values (with a warning for a template). */
@@ -47,6 +51,7 @@ export function parseSettings(data: unknown): NotebookSettings {
     templatesFolder,
     favouriteTemplates: parseFavourites(d.favouriteTemplates),
     favouriteDefault: typeof d.favouriteDefault === 'boolean' ? d.favouriteDefault : DEFAULT_SETTINGS.favouriteDefault,
+    study: parseStudySettings(d.study),
   };
 }
 
@@ -105,6 +110,57 @@ export class NotebookSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         }));
     this.favourites(containerEl, customs);
+    this.study(containerEl);
+  }
+
+  /* study */
+  /** Study mode's rows (docs/study/SPEC.md): where the docs are, this device's name, Today's minutes, developer tools. */
+  private study(containerEl: HTMLElement) {
+    const s = this.plugin.settings;
+    new Setting(containerEl).setName('Study mode').setHeading();
+    new Setting(containerEl)
+      .setName('Study folder')
+      .setDesc('The vault folder holding the study docs (basics, topics, katas, bank, cards) and the study logs.')
+      .setClass('nb-study-setting-root')
+      .addText(t => t
+        .setPlaceholder(DEFAULT_STUDY_SETTINGS.root)
+        .setValue(s.study.root)
+        .onChange(async value => {
+          s.study.root = cleanRoot(value) || DEFAULT_STUDY_SETTINGS.root;
+          await this.plugin.saveSettings();
+        }));
+    new Setting(containerEl)
+      .setName('Device name')
+      .setDesc("Names this device's study log and ink files, so devices never write the same file. Lowercase letters, digits and hyphens. Blank: ipad on an iPad, desktop on a computer.")
+      .setClass('nb-study-setting-device')
+      .addText(t => t
+        .setPlaceholder('ipad')
+        .setValue(s.study.device)
+        .onChange(async value => {
+          s.study.device = cleanDevice(value);
+          await this.plugin.saveSettings();
+        }));
+    new Setting(containerEl)
+      .setName('Weekday minutes')
+      .setDesc(`How long Today plans for on a weekday (${MINUTES_MIN} to ${MINUTES_MAX}); Saturday doubles it.`)
+      .setClass('nb-study-setting-minutes')
+      .addText(t => t
+        .setPlaceholder(String(DEFAULT_STUDY_SETTINGS.minutes))
+        .setValue(String(s.study.minutes))
+        .onChange(async value => {
+          const n = Number(value.trim());
+          if (!value.trim() || !Number.isFinite(n)) return;
+          s.study.minutes = parseStudySettings({ minutes: n }).minutes;
+          await this.plugin.saveSettings();
+        }));
+    new Setting(containerEl)
+      .setName('Developer tools')
+      .setDesc('Shows the simulated clock and the demo buttons in study mode. For development only.')
+      .setClass('nb-study-setting-devtools')
+      .addToggle(t => t.setValue(s.study.devTools).onChange(async on => {
+        s.study.devTools = on;
+        await this.plugin.saveSettings();
+      }));
   }
 
   /** Favourite templates (#54): a toggle per template; starred ones come first wherever templates are chosen. */
