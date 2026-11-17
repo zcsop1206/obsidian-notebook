@@ -20,6 +20,8 @@ import { setTemplateRegistry, TemplateRegistry } from './ink/templates';
 import { defaultTemplateName, settingsPrefs } from './ink/favourites';
 import { TemplateChooser } from './ink/template-chooser';
 import { DEFAULT_SETTINGS, NotebookSettingTab, parseSettings, type NotebookSettings } from './settings';
+import { registerStudy } from './study';
+import type { StudyContext } from './study/context';
 
 /**
  * Notebook: handwritten notes with the Apple Pencil, stored as SVG pages in the vault.
@@ -35,9 +37,12 @@ export default class NotebookPlugin extends Plugin {
   inkClipboard: InkClipboard | null = null;
   /** Custom templates in the templates folder (#21, #54). */
   templates!: TemplateRegistry;
+  /** Study mode (docs/study/SPEC.md): content, events, engine and views. */
+  study!: StudyContext;
 
   async onload() {
     this.settings = parseSettings(await this.loadData());
+    this.study = registerStudy(this);
 
     this.registerView(VIEW_TYPE_INK, leaf => new InkView(leaf, this));
     this.register(installTakeover(this.app));

@@ -184,7 +184,8 @@ In headless Chromium, through `test/run_spike_test.py`:
 4. **Audio:** turn the spike recorder into a feature, shaped by what the iPad test shows about backgrounding: recording is foreground-only; a lock or app switch splits it into segments.
    - `meta.json` now records each segment's `startMs` and, when known, `audioEndMs`, so segments can be placed on one timeline.
    - Playing split segments as one recording is an open, low-priority issue: https://github.com/zcsop1206/obsidian-notebook/issues/1. Workaround: keep Obsidian in front while recording.
-5. **Later ideas:**
+5. **Study mode (0.15, branch `study-mode`, from 2026-11-17).** Linked study docs on the iPad: markdown with block-id anchors, proofs under fog, blank-page drills, problems that ask for a call first, design katas, a schedule toward deadlines, and anchored ink. The spec is `docs/study/SPEC.md`, the file format `docs/study/FORMAT.md`, the work split into tickets on `docs/study/BOARD.md` (built partly by Devin sessions, reviewed by Claude), and `docs/study/DEVIN.md` is how sessions are started. Code lives under `src/study/` (one `registerStudy(this)` line in main.ts); `lab/study-reader/` is the single-page demo it ports from (its kata reference designs and kata test are private and not in the repo). Freeze: no release 2026-12-01 to 12-05.
+6. **Later ideas:**
    - CI transcription of ink pages to searchable text and alt text.
    - Replaying stroke timestamps on the site.
    - Using git history as the notebook's dated, tamper-evident record.
