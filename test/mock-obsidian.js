@@ -12,6 +12,9 @@
   P.setText = function (t) { this.textContent = t; };
   P.hide = function () { this.style.display = 'none'; };
   P.show = function () { this.style.display = ''; };
+  // Study view (S3): Obsidian's isShown and detach.
+  P.isShown = function () { return this.style.display !== 'none'; };
+  Node.prototype.detach = function () { if (this.parentNode) this.parentNode.removeChild(this); };
   P.createEl = function (tag, o = {}) {
     const el = document.createElement(tag);
     if (typeof o === 'string') o = { cls: o };
@@ -24,6 +27,8 @@
   };
   P.createDiv = function (o = {}) { return this.createEl('div', o); };
   P.createSpan = function (o = {}) { return this.createEl('span', o); };
+  // Obsidian's appendText (the kata block and the Map's link lists use it).
+  P.appendText = function (s) { this.appendChild(document.createTextNode(String(s))); };
   window.createDiv = o => document.createElement('div').createDiv(o);
 
   // The system clipboard (#11 writes copied strokes to it, best effort): recorded, never refused.
@@ -466,6 +471,10 @@
     getActiveFile() { const v = this.activeLeaf && this.activeLeaf.view; return v && v.file ? v.file : null; }
     getActiveViewOfType(cls) { const v = this.activeLeaf && this.activeLeaf.view; return v instanceof cls ? v : null; }
     getMostRecentLeaf() { return this.activeLeaf; }
+    /** Study view (S3): counted in window.saveLayoutRequests (Obsidian debounces the save). */
+    requestSaveLayout() { window.saveLayoutRequests = (window.saveLayoutRequests || 0) + 1; return this; }
+    /** Study view (S3): opens a vault link; recorded in window.openedLinks. */
+    async openLinkText(linktext, sourcePath, newLeaf) { (window.openedLinks ??= []).push({ linktext, sourcePath, newLeaf }); }
   }
 
   const app = { vault, metadataCache, fileManager };
@@ -539,6 +548,8 @@
     addRibbonIcon(icon, title, cb) { const el = document.createElement('div'); el.setAttribute('aria-label', title); el.addEventListener('click', cb); this.ribbon.push({ icon, title, el }); return el; }
     addCommand(c) { commands[c.id] = c; return c; }
     addSettingTab(t) { this.settingTabs.push(t); }
+    /** Study view (S3): obsidian://<action>?... handlers, in window.protocolHandlers (call with the params object). */
+    registerObsidianProtocolHandler(action, handler) { (window.protocolHandlers ??= {})[action] = handler; }
     async loadData() { return window.pluginData; }
     async saveData(d) { window.pluginData = JSON.parse(JSON.stringify(d)); }
   }
@@ -557,7 +568,110 @@
     svg.innerHTML = `<rect x="1" y="1" width="22" height="22" rx="5" fill="none" stroke="currentColor"/><text x="12" y="16" font-size="10" text-anchor="middle" fill="currentColor">${name.slice(0, 2)}</text>`;
     el.prepend(svg);
   };
-  const Platform = { isMobile: false, isMobileApp: false, isIosApp: false, isDesktop: true, isDesktopApp: true };
+  const Platform = { isMobile: false, isMobileApp: false, isIosApp: false, isDesktop: true, isDesktopApp: true, isTablet: false, isPhone: false };
+
+  // ---- MarkdownRenderer (study view, S3): a tiny markdown-to-HTML converter, enough for the
+  // study fixtures: headings, paragraphs, lists (nested by indent), bold and italics, inline and
+  // display math as text in span/div.math, code spans and fences, tables, blockquotes, callouts as
+  // div.callout[data-callout] (folded ones get .is-collapsed), internal links as
+  // a.internal-link[data-href] and external ones as a.external-link. window.markdownRenders counts calls.
+  const escHtml = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const inlineMd = src => {
+    const keep = [];
+    const stash = html => `\u0000${keep.push(html) - 1}\u0000`;
+    let s = src.replace(/`([^`]+)`/g, (_, c) => stash(`<code>${escHtml(c)}</code>`));
+    s = s.replace(/\$\$([^$]+)\$\$/g, (_, m) => stash(`<span class="math math-block">${escHtml(m)}</span>`));
+    s = s.replace(/\$([^$\n]+)\$/g, (_, m) => stash(`<span class="math math-inline">${escHtml(m)}</span>`));
+    s = s.replace(/(!?)\[((?:[^\]\\]|\\.)*)\]\(\s*<?([^)\s>]+)>?(?:\s+"[^"]*")?\s*\)/g, (_, bang, text, href) => {
+      if (bang) return stash(`<img alt="${escHtml(text)}" src="${escHtml(href)}">`);
+      if (/^[a-z][a-z0-9+.-]*:/i.test(href)) return stash(`<a class="external-link" href="${escHtml(href)}" target="_blank" rel="noopener">${inlineMd(text)}</a>`);
+      let dh = href;
+      try { dh = decodeURIComponent(href); } catch (e) { /* as written */ }
+      return stash(`<a class="internal-link" data-href="${escHtml(dh)}" href="${escHtml(dh)}">${inlineMd(text)}</a>`);
+    });
+    s = escHtml(s).replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/(^|[^*\w])\*([^*\s][^*]*)\*/g, '$1<em>$2</em>');
+    return s.replace(/\u0000(\d+)\u0000/g, (_, i) => keep[+i]);
+  };
+  const LIST_LINE = /^(\s*)([-*+]|\d{1,9}[.)])\s+(.*)$/;
+  const startsBlock = l => /^(#{1,6})\s/.test(l) || /^\s*(`{3,}|~{3,})/.test(l) || /^\s*\$\$/.test(l) || /^\s{0,3}>/.test(l) || /^\s{0,3}\|/.test(l) || LIST_LINE.test(l);
+  const renderBlocks = md => {
+    const lines = String(md).replace(/\r\n?/g, '\n').split('\n');
+    const out = [];
+    let i = 0;
+    while (i < lines.length) {
+      const l = lines[i];
+      let m;
+      if (!l.trim()) { i++; continue; }
+      if ((m = /^(#{1,6})\s+(.*)$/.exec(l))) { out.push(`<h${m[1].length}>${inlineMd(m[2])}</h${m[1].length}>`); i++; continue; }
+      if ((m = /^\s*(`{3,}|~{3,})(.*)$/.exec(l))) {
+        const body = [];
+        i++;
+        while (i < lines.length && !lines[i].trim().startsWith(m[1])) body.push(lines[i++]);
+        i++;
+        out.push(`<pre><code class="language-${escHtml(m[2].trim())}">${escHtml(body.join('\n'))}</code></pre>`);
+        continue;
+      }
+      if (/^\s*\$\$/.test(l)) {
+        const body = [l];
+        const one = l.trim().length > 2 && l.trim().endsWith('$$');
+        i++;
+        if (!one) while (i < lines.length) { body.push(lines[i]); i++; if (body[body.length - 1].trim().endsWith('$$')) break; }
+        out.push(`<div class="math math-block">${escHtml(body.join('\n').trim().replace(/^\$\$|\$\$$/g, '').trim())}</div>`);
+        continue;
+      }
+      if (/^\s{0,3}>/.test(l)) {
+        const body = [];
+        while (i < lines.length && /^\s{0,3}>/.test(lines[i])) body.push(lines[i++].replace(/^\s{0,3}>\s?/, ''));
+        const head = /^\[!([A-Za-z][\w-]*)\]([+-]?)\s*(.*)$/.exec(body[0] || '');
+        if (head) {
+          const type = head[1].toLowerCase(), fold = head[2];
+          out.push(`<div class="callout${fold === '-' ? ' is-collapsible is-collapsed' : ''}" data-callout="${escHtml(type)}"${fold ? ` data-callout-fold="${fold}"` : ''}>` +
+            `<div class="callout-title"><div class="callout-title-inner">${inlineMd(head[3] || type)}</div></div>` +
+            `<div class="callout-content"${fold === '-' ? ' style="display:none"' : ''}>${renderBlocks(body.slice(1).join('\n'))}</div></div>`);
+        } else out.push(`<blockquote>${renderBlocks(body.join('\n'))}</blockquote>`);
+        continue;
+      }
+      if (/^\s{0,3}\|/.test(l)) {
+        const rows = [];
+        while (i < lines.length && /^\s{0,3}\|/.test(lines[i])) rows.push(lines[i++]);
+        const cells = r => r.trim().replace(/^\||\|$/g, '').split('|').map(c => c.trim());
+        const head = cells(rows[0]), body = rows.slice(2).map(cells);
+        out.push(`<table><thead><tr>${head.map(c => `<th>${inlineMd(c)}</th>`).join('')}</tr></thead><tbody>${body.map(r => `<tr>${r.map(c => `<td>${inlineMd(c)}</td>`).join('')}</tr>`).join('')}</tbody></table>`);
+        continue;
+      }
+      if ((m = LIST_LINE.exec(l))) {
+        const indent = m[1].length, ordered = /\d/.test(m[2]);
+        const items = [];
+        while (i < lines.length) {
+          const li = lines[i];
+          const mm = LIST_LINE.exec(li);
+          if (mm && mm[1].length === indent) { items.push([mm[3]]); i++; continue; }
+          if (!li.trim()) { if (i + 1 < lines.length && /^\s/.test(lines[i + 1]) && lines[i + 1].trim()) { i++; continue; } break; }
+          if (/^\s/.test(li) || !startsBlock(li)) { items[items.length - 1].push(li.replace(new RegExp(`^\\s{0,${indent + 4}}`), '')); i++; continue; }
+          break;
+        }
+        const tag = ordered ? 'ol' : 'ul';
+        out.push(`<${tag}>${items.map(([first, ...rest]) => `<li>${inlineMd(first)}${rest.length ? renderBlocks(rest.join('\n')) : ''}</li>`).join('')}</${tag}>`);
+        continue;
+      }
+      const para = [];
+      while (i < lines.length && lines[i].trim() && !(para.length && startsBlock(lines[i]))) para.push(lines[i++]);
+      out.push(`<p>${inlineMd(para.join('\n')).replace(/\n/g, ' ')}</p>`);
+    }
+    return out.join('');
+  };
+  window.markdownRenders = 0;
+  window.renderMarkdownForTest = renderBlocks;
+  const MarkdownRenderer = {
+    async render(app, markdown, el, sourcePath, component) {
+      if (!component) throw new Error('MarkdownRenderer.render: no component');
+      window.markdownRenders++;
+      const div = document.createElement('div');
+      div.innerHTML = renderBlocks(markdown);
+      while (div.firstChild) el.appendChild(div.firstChild);
+    },
+    async renderMarkdown(markdown, el, sourcePath, component) { return MarkdownRenderer.render(app, markdown, el, sourcePath, component); },
+  };
 
   // ---- a fake pdf.js for loadPdfJs (#14). A fake PDF is text: `%PDF-FAKE` then one line per
   // page, `<width>x<height>` in points (window.fakePdf builds one). A page renders as white with
@@ -608,7 +722,7 @@
   window.obsidian = {
     Plugin, Component, View, ItemView, FileView, MarkdownView, Notice, Events, TAbstractFile, TFile, TFolder,
     WorkspaceLeaf, Menu, Modal, FuzzySuggestModal, PluginSettingTab, Setting, Platform, normalizePath, setIcon,
-    loadPdfJs,
+    loadPdfJs, MarkdownRenderer,
   };
 
   window.loadPlugin = async () => {

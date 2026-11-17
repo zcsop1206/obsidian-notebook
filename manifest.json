@@ -1,9 +1,9 @@
 {
   "id": "notebook",
   "name": "Notebook",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "minAppVersion": "1.7.2",
-  "description": "Handwritten notes with the Apple Pencil, stored as SVG pages in the vault. Includes an ink debug view for pen and audio measurements.",
+  "description": "Handwritten notes with the Apple Pencil, stored as SVG pages in the vault, and study mode: linked study docs with ink, proof fog, drills, problems, katas and a schedule. Includes an ink debug view for pen and audio measurements.",
   "author": "Adit Bhargava",
   "isDesktopOnly": false
 }

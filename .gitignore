@@ -4,3 +4,12 @@ test/out/
 
 # Built by npm run build
 main.js
+
+# Lab demos: screenshots and test output, and the kata reference designs (private: the repo is public).
+lab/**/out/
+lab/**/*solutions*.txt
+lab/**/verify-*/
+lab/study-reader/test/kata.test.mjs
+
+# study-scan bundles the parser here on each run.
+scripts/.cache/
