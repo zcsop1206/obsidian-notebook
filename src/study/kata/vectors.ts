@@ -56,15 +56,11 @@ export interface VectorRun {
 }
 
 export function runVectors(ports: KataPort[], vectors: Vectors, src: string): VectorRun {
-  if (typeof BigInt !== 'function') {
-    return { ok: false, error: 'This browser has no BigInt, so the testbench cannot run here.', trace: [], cycles: vectors.rows.length };
-  }
   let M;
   try { M = compile(src); } catch (e) {
     const f = fail(e);
     return { ok: false, error: f.error, line: f.line, trace: [], cycles: vectors.rows.length };
   }
-  const widthOf = (name: string): number => ports.find(p => p.name === name)?.width ?? 1;
   for (const pd of ports) {
     const s = M.sigs.get(pd.name);
     if (!s || s.dir !== pd.dir || s.w !== pd.width) {

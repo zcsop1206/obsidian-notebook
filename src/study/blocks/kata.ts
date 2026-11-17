@@ -11,7 +11,9 @@
  *    small waveform around it. Compile and port errors are not counted as runs.
  * 3. Settle: the first pass (or a two-tap give-up) stops the clock; later runs are practice. Then
  *    two tick steps — the methods the call named, then the methods the kata took (pre-ticked with
- *    the methods taught by the kata's `needs`) — and the `kata` event is logged once.
+ *    the methods taught by the kata's `needs`) — and the `kata` event is logged once. A settled
+ *    kata that was never ticked shows its tick step again on the next open; "Skip ticks" logs it
+ *    with empty lists. A write that fails is retried on the next mount.
  *
  * `level: hidden` katas show no title or needs before the settle (FORMAT.md). Working state lives
  * in the vault's local storage (per device), keyed `nb-study-kata:<doc>:<kata>`; the durable record
@@ -80,6 +82,8 @@ interface KataState {
   used: string[];
   usedInit: boolean;
   usedDone: boolean;
+  /** The ticks were skipped: the event logs empty called and used lists. */
+  ticksSkipped?: boolean;
   logged: boolean;
 }
 
@@ -245,13 +249,20 @@ export const mount: BlockMount = (host, env) => {
   const el = host.createDiv({ cls: 'nb-study-kata' });
   el.style.cssText = 'font-size:14px;line-height:1.45;position:relative';
   let pad: InkSurface | null = null;
+  /* Unsubscribes the call pad's onChange; a new pad comes with every renderCall. */
+  let padOff: (() => void) | null = null;
   let timer = 0, saveT = 0;
+  /* True while a `kata` event is being written, so a second tap or a re-render does not log twice. */
+  let logging = false;
   const offs: (() => void)[] = [];
   let dead = false;
 
   const q = <T extends HTMLElement>(sel: string): T | null => el.querySelector(sel) as T | null;
   function relayout() { try { env.relayout(); } catch (e) { /* view gone */ } }
-  function destroyPad() { if (pad) { try { pad.destroy(); } catch (e) { /* noop */ } pad = null; } }
+  function destroyPad() {
+    if (padOff) { try { padOff(); } catch (e) { /* noop */ } padOff = null; }
+    if (pad) { try { pad.destroy(); } catch (e) { /* noop */ } pad = null; }
+  }
   function stopTimer() { if (timer) { window.clearInterval(timer); timer = 0; } }
   function startTimer() {
     stopTimer();
@@ -382,12 +393,16 @@ export const mount: BlockMount = (host, env) => {
       const padBox = secEl.createDiv({ cls: 'nb-study-kata-pad' });
       padBox.style.cssText = 'margin:6px 0;border:1px solid var(--background-modifier-border);border-radius:8px;overflow:hidden';
       pad = env.ink.surface(env.doc, padBox, `kata:${k.id}`, { height: PAD_H });
+      /* Ink alone is a call: a Pencil-only sketch must unlock the chips without a typed line. */
+      padOff = pad.onChange(() => refreshCall());
       const tools = secEl.createDiv();
       tools.style.cssText = 'display:flex;gap:8px;margin-bottom:8px';
       const undo = chip(tools, 'Undo');
-      undo.addEventListener('click', () => { if (pad) pad.undo(); });
+      undo.setAttribute('data-k', 'undo');
+      undo.addEventListener('click', () => { if (pad) pad.undo(); refreshCall(); });
       const clr = chip(tools, 'Clear sketch');
-      offs.push(twoTap(clr, 'Tap again to clear', () => { if (pad) pad.clear(); }));
+      clr.setAttribute('data-k', 'clear');
+      offs.push(twoTap(clr, 'Tap again to clear', () => { if (pad) pad.clear(); refreshCall(); }));
       const line = secEl.createEl('input', { cls: 'nb-study-kata-line' }) as HTMLInputElement;
       line.type = 'text';
       line.maxLength = 200;
@@ -681,15 +696,45 @@ export const mount: BlockMount = (host, env) => {
 
   /* ---------------------------------------- 3. settled: verdict, then the tick steps ---------------------------------------- */
 
-  function logKata(s: KataState) {
-    if (s.logged) return;
-    s.logged = true;
+  /* Logs the `kata` event once the ticks are done. `logged` is set only after the write resolves,
+     so a failed write is retried on the next mount instead of being lost. */
+  async function logKata(): Promise<void> {
+    const s = load();
+    if (s.logged || logging || !settled(s) || !s.usedDone) return;
+    logging = true;
+    try {
+      await ctx.log({
+        type: 'kata', kata: k.id,
+        pass: s.status === 'passed', runs: s.runsAtSettle ?? counted(s), gaveUp: s.status === 'gaveup',
+        ms: s.t0 && s.t1 ? s.t1 - s.t0 : 0, called: s.called.slice(), used: s.used.slice(), hidden: hidden(),
+      });
+    } catch (e) {
+      console.error('[study] kata log failed', e);
+      if (!dead) env.toast('Could not save the kata result; it will retry');
+      return;
+    } finally {
+      logging = false;
+    }
+    const s2 = load();
+    s2.logged = true;
+    save(s2);
+  }
+  /* Skipping the ticks settles them with empty lists and logs at once. */
+  function skipTicks() {
+    const s = load();
+    if (!settled(s) || s.usedDone) return;
+    s.called = []; s.used = [];
+    s.calledDone = s.usedInit = s.usedDone = true;
+    s.ticksSkipped = true;
     save(s);
-    void ctx.log({
-      type: 'kata', kata: k.id,
-      pass: s.status === 'passed', runs: s.runsAtSettle ?? counted(s), gaveUp: s.status === 'gaveup',
-      ms: s.t0 && s.t1 ? s.t1 - s.t0 : 0, called: s.called.slice(), used: s.used.slice(), hidden: hidden(),
-    }).catch(e => console.error('[study] kata log failed', e));
+    void logKata();
+    renderSettle(s);
+    relayout();
+  }
+  function skipButton(parent: HTMLElement) {
+    const b = chip(parent, 'Skip ticks');
+    b.setAttribute('data-k', 'skipticks');
+    offs.push(twoTap(b, 'Tap again to skip', skipTicks));
   }
   function verdictText(s: KataState): string {
     const n = s.runsAtSettle ?? counted(s);
@@ -737,8 +782,10 @@ export const mount: BlockMount = (host, env) => {
       hint(st, TEXT.calledHint);
       st.appendChild(toggles('called', s.called, false));
       const row = st.createDiv();
+      row.style.cssText = 'display:flex;gap:8px;align-items:center';
       const b = chip(row, 'These are what my call named', 'primary');
       b.setAttribute('data-k', 'calldone');
+      skipButton(row);
       b.addEventListener('click', () => {
         const s2 = load();
         if (s2.calledDone) return;
@@ -763,6 +810,7 @@ export const mount: BlockMount = (host, env) => {
       row.style.cssText = 'display:flex;gap:8px;align-items:center';
       const b = chip(row, 'Save', 'primary');
       b.setAttribute('data-k', 'useddone');
+      skipButton(row);
       const n = row.createSpan({ cls: 'nb-study-kata-usedn' });
       n.style.cssText = 'font-size:13px;color:var(--text-muted)';
       b.addEventListener('click', () => {
@@ -770,7 +818,7 @@ export const mount: BlockMount = (host, env) => {
         if (!s2.calledDone || s2.usedDone || (!s2.used.length && allMethods().length)) return;
         s2.usedDone = true;
         save(s2);
-        logKata(s2);
+        void logKata();
         renderSettle(s2);
         wireToggles();
         relayout();
@@ -810,9 +858,11 @@ export const mount: BlockMount = (host, env) => {
     const st = secEl.createDiv();
     st.style.marginTop = '10px';
     const called = s.called || [], used = s.used || [];
-    const hit = used.every(m => called.indexOf(m) >= 0);
+    const hit = !s.ticksSkipped && used.every(m => called.indexOf(m) >= 0);
     const p = st.createEl('p');
-    if (hit) {
+    if (s.ticksSkipped) {
+      p.appendText('Ticks skipped: no methods recorded for this kata.');
+    } else if (hit) {
       const b = p.createEl('b', { text: 'Method: hit.' });
       b.style.color = 'var(--text-success)';
       p.appendText(` Your call named every method it took (${used.join(', ') || 'none'}).`);
@@ -822,7 +872,7 @@ export const mount: BlockMount = (host, env) => {
       const miss = used.filter(m => called.indexOf(m) < 0);
       p.appendText(` It took ${miss.join(', ')}, which your call did not name.${called.length ? ` Your call named ${called.join(', ')}.` : ''}`);
     }
-    const extra = called.filter(m => used.indexOf(m) < 0);
+    const extra = s.ticksSkipped ? [] : called.filter(m => used.indexOf(m) < 0);
     if (extra.length) hint(st, `Also named, not needed: ${extra.join(', ')}.`);
     try {
       const acc = ctx.engine().methodAccuracy(k.area || undefined);
@@ -830,14 +880,14 @@ export const mount: BlockMount = (host, env) => {
     } catch (e) { /* engine lands with S2 */ }
     const ids = uniq(k.needs).filter(d => ctx.content().docs.has(d));
     if (ids.length) {
-      const bad = s.status !== 'passed' || !hit;
+      const bad = s.status !== 'passed' || (!hit && !s.ticksSkipped);
       kick(st, bad ? 'Back to the basics it used' : 'The basics it used');
       const links = st.createDiv();
       links.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px 16px;align-items:baseline;margin:6px 0';
       for (const d of ids) {
         const sp = links.createSpan();
         const a = sp.createEl('a', { text: ctx.content().docs.get(d)!.title || d });
-        a.addEventListener('click', ev => { ev.preventDefault(); env.open(d); });
+        holdToPeek(a, d);
         try {
           const stage = ctx.engine().basic(d).stage;
           const pill = sp.createSpan({ text: ` stage ${stage}` });
@@ -848,6 +898,30 @@ export const mount: BlockMount = (host, env) => {
     }
   }
 
+  /* A tap opens the basic; a hold of 450 ms peeks at it (SPEC.md, input rules). A hold that peeked
+     swallows the click that follows, and moving more than 10 px cancels the hold. */
+  function holdToPeek(a: HTMLElement, docId: string) {
+    let t = 0, peeked = false, x0 = 0, y0 = 0;
+    const cancel = () => { if (t) { window.clearTimeout(t); t = 0; } };
+    a.style.setProperty('-webkit-touch-callout', 'none');
+    a.addEventListener('pointerdown', ev => {
+      cancel();
+      peeked = false;
+      x0 = ev.clientX; y0 = ev.clientY;
+      t = window.setTimeout(() => { t = 0; peeked = true; env.peek(docId, null, a); }, 450);
+    });
+    a.addEventListener('pointermove', ev => { if (Math.hypot(ev.clientX - x0, ev.clientY - y0) > 10) cancel(); });
+    a.addEventListener('pointerup', cancel);
+    a.addEventListener('pointercancel', cancel);
+    a.addEventListener('contextmenu', ev => ev.preventDefault());
+    a.addEventListener('click', ev => {
+      ev.preventDefault();
+      if (peeked) { peeked = false; return; }
+      env.open(docId);
+    });
+    offs.push(cancel);
+  }
+
   /* ---------------------------------------- the whole block ---------------------------------------- */
 
   function render() {
@@ -855,6 +929,7 @@ export const mount: BlockMount = (host, env) => {
     flush();
     destroyPad();
     stopTimer();
+    el.empty();
     const s = synced();
     renderHead(s);
     renderSpec();
@@ -867,7 +942,16 @@ export const mount: BlockMount = (host, env) => {
     renderSettle(s);
     startTimer();
     relayout();
+    /* A result whose write failed last time is written now. */
+    if (s.usedDone && !s.logged) void logKata();
   }
+
+  /* A `kata` event synced from another device settles the block here too. */
+  offs.push(ctx.onChange(what => {
+    if (what !== 'events' || dead || logging) return;
+    if (load().logged) return;
+    if (ctx.events().some(e => e.type === 'kata' && e.kata === k.id)) render();
+  }));
 
   render();
   return {
