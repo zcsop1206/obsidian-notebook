@@ -8,7 +8,7 @@
 # as study doc", re-render on a content change, and the layout at 1024x768 and 390x844.
 # A second part (part_marks_panels) runs S5's marks and S8's Today and Map against the mock
 # StudyContext and mock engine in test/out/study-fixture.js (built by test/build.mjs).
-# Port: NB_STUDY_TEST_PORT, else NB_TEST_PORT_BASE + 5, else 8771. Screenshots land in test/out/.
+# Port: NB_STUDY_TEST_PORT, else NB_TEST_PORT_BASE + 6 (8771). Screenshots land in test/out/.
 # Exits non-zero on a failure.
 import json, os, subprocess, sys, time
 from playwright.sync_api import sync_playwright
@@ -18,7 +18,7 @@ ROOT = os.path.dirname(HERE)
 OUT = os.path.join(HERE, 'out')
 FIX = os.path.join(HERE, 'fixtures', 'study')
 os.makedirs(OUT, exist_ok=True)
-port = int(os.environ['NB_STUDY_TEST_PORT']) if os.environ.get('NB_STUDY_TEST_PORT') else (int(os.environ['NB_TEST_PORT_BASE']) + 5 if os.environ.get('NB_TEST_PORT_BASE') else 8771)
+port = int(os.environ.get('NB_STUDY_TEST_PORT', int(os.environ.get('NB_TEST_PORT_BASE', 8765)) + 6))
 base_url = f'http://localhost:{port}'
 
 failures = []
@@ -104,7 +104,8 @@ SETUP_JS = """(files) => {
   window.sleep = ms => new Promise(r => setTimeout(r, ms));
   window.V = () => { const l = app.workspace.getLeavesOfType('notebook-study')[0]; return l ? l.view : null; };
   window.scroller = () => document.querySelector('.nb-study-scroll');
-  window.studyEl = sel => document.querySelector('.nb-study-doc ' + sel);
+  // The doc's own elements: S5's margin dots and scaffolds also carry data-a, so they are skipped.
+  window.studyEl = sel => [...document.querySelectorAll('.nb-study-doc ' + sel)].find(e => !e.closest('.nb-study-margin, .nb-st-scaffold')) || null;
   // Synthetic pointer events (touch, pen or mouse) at an element's centre, then the click a tap makes.
   window.press = async (el, type, ms, opts = {}) => {
     const r = el.getBoundingClientRect();
@@ -514,12 +515,14 @@ def section_header(page):
     open_doc(page, 'fx-units')
     page.evaluate("""() => {
       window.uiCalls = [];
+      window.realUi = { openToday: plugin.study.ui.openToday, openMap: plugin.study.ui.openMap };
       plugin.study.ui.openToday = async () => { uiCalls.push('today'); };
       plugin.study.ui.openMap = async () => { uiCalls.push('map'); };
     }""")
     page.click('.nb-study-hdr [data-act="today"]')
     page.click('.nb-study-hdr [data-act="map"]')
     check('header: Today and Map call ctx.ui', page.evaluate("() => uiCalls.join(',')") == 'today,map')
+    page.evaluate("() => Object.assign(plugin.study.ui, realUi)")
     n0 = page.evaluate("() => notices.length")
     page.click('.nb-study-hdr [data-act="changes"]')
     page.wait_for_timeout(150)
@@ -596,7 +599,7 @@ def section_ink(page):
     ok = open_doc(page, 'fx-units')
     page.wait_for_timeout(300)
     px = page.evaluate("""() => {
-      const doc = document.querySelector('.nb-study-doc'), el = doc.querySelector('[data-a="unit-gcd"]');
+      const doc = document.querySelector('.nb-study-doc'), el = studyEl('[data-a="unit-gcd"]');
       const dr = doc.getBoundingClientRect(), r = el.getBoundingClientRect(), s = dr.width / 800;
       return inkPx((r.left - dr.left) / s + 40, (r.top - dr.top) / s + 4, (r.left - dr.left) / s + 260, (r.top - dr.top) / s + 28);
     }""")
@@ -604,7 +607,72 @@ def section_ink(page):
 
 
 def section_marks(page):
-    skip('marks', 'S5 adds this section: lost in a topic shows the scaffold, two taps request a rewrite, lost in a basic requests a rebuild, Changes lists it')
+    # Marks on the real plugin (S5 over S2's engine): a dot per markable passage, "lost" asks the
+    # engine's triage, logs the mark to this device's log, the engine folds it, the scaffold opens.
+    open_doc(page, 'fx-topic')
+    page.wait_for_timeout(200)
+    r = page.evaluate("""async () => {
+      const dots = [...document.querySelectorAll('.nb-study-margin .nb-st-dot')].map(d => d.dataset.a);
+      document.querySelector('.nb-study-margin .nb-st-dot[data-a="cue-gcd"]').click();
+      await sleep(30);
+      const menu = document.querySelector('.nb-st-menu');
+      const verbs = menu ? [...menu.querySelectorAll('button')].map(b => b.textContent) : [];
+      if (menu) [...menu.querySelectorAll('button')].find(b => b.textContent === 'lost').click();
+      await sleep(400);
+      const sc = document.querySelector('.nb-st-scaffold[data-a="cue-gcd"]');
+      const log = (fs.get('study/log/test-pad.jsonl') || '').trim().split('\\n').filter(Boolean).map(l => JSON.parse(l));
+      return { dots, verbs, sc: !!sc, basics: sc ? sc.textContent : '', log,
+               marks: plugin.study.engine().marks('fx-topic'), tri: plugin.study.engine().triage('fx-topic', 'cue-gcd', 'lost') };
+    }""")
+    check('marks: a dot on every markable passage and list item of the topic', 'cue-gcd' in r['dots'] and 'cue-broken' in r['dots'], r['dots'])
+    check('marks: the dot menu offers lost, easy, forgot', r['verbs'][:3] == ['lost', 'easy', 'forgot'], r['verbs'])
+    check('marks: lost logs one mark event to study/log/test-pad.jsonl',
+          [(e['type'], e['a'], e['verb']) for e in r['log'] if e['type'] == 'mark'] == [('mark', 'cue-gcd', 'lost')], r['log'])
+    check('marks: the engine folds the logged mark', [(m['a'], m['verb']) for m in r['marks']] == [('cue-gcd', 'lost')], r['marks'])
+    check('marks: the engine triages a first lost as a scaffold resting on fx-div, and the scaffold opens',
+          r['tri'].get('action') == 'scaffold' and r['tri'].get('basics') == ['fx-div'] and r['sc'] and 'Divisibility' in r['basics'], (r['tri'], r['basics'][:120]))
+    # One tap on a marked dot clears it: the engine drops the open mark and the scaffold goes.
+    r = page.evaluate("""async () => {
+      document.querySelector('.nb-study-margin .nb-st-dot[data-a="cue-gcd"]').click();
+      await sleep(400);
+      return { sc: !!document.querySelector('.nb-st-scaffold[data-a="cue-gcd"]'), marks: plugin.study.engine().marks('fx-topic') };
+    }""")
+    check('marks: a tap on the marked dot clears it: the scaffold goes and the engine drops the mark', not r['sc'] and not r['marks'], r)
+
+
+def section_panels(page):
+    # Today and Map on the real engine: the plan's picks come from engine.todayPlan, a pick opens
+    # the standalone problem view (ctx.ui.openProblem), and every ctx.ui hook is filled.
+    r = page.evaluate("""async () => {
+      const ui = plugin.study.ui;
+      const filled = ['openDoc', 'openDrill', 'openProblem', 'openKata', 'openToday', 'openMap'].filter(k => !/not built yet/.test(String(ui[k])));
+      await ui.openToday();
+      await sleep(200);
+      const l = app.workspace.getLeavesOfType('notebook-study-today')[0];
+      const el = l ? l.view.contentEl : null;
+      const plan = plugin.study.engine().todayPlan(plugin.study.settings().minutes);
+      const items = el ? [...el.querySelectorAll('.nb-sp-item')].map(e => e.textContent) : [];
+      return { filled, today: !!el, items, picks: plan.picks.map(p => p.id), text: el ? el.textContent : '' };
+    }""")
+    check('panels: every ctx.ui hook is filled', len(r['filled']) == 6, r['filled'])
+    check('panels: Today lists the engine plan\'s picks', r['today'] and len(r['picks']) > 0 and len(r['items']) >= len(r['picks']), (r['picks'], r['items'][:6], r['text'][:300]))
+    r = page.evaluate("""async () => {
+      const l = app.workspace.getLeavesOfType('notebook-study-today')[0];
+      const it = [...l.view.contentEl.querySelectorAll('.nb-sp-item')].find(e => /problem/.test(e.textContent));
+      if (!it) return { tapped: false };
+      (it.querySelector('button, a, .nb-sp-t') || it).click();
+      await sleep(300);
+      const pv = app.workspace.getLeavesOfType('notebook-study-problem')[0];
+      return { tapped: true, problem: !!pv, title: pv ? pv.view.getDisplayText() : '', body: pv ? pv.view.contentEl.textContent.slice(0, 200) : '' };
+    }""")
+    check('panels: a Today problem pick opens the standalone problem view', r.get('problem') and 'not in the study folder' not in r.get('body', ''), r)
+    r = page.evaluate("""async () => {
+      await plugin.study.ui.openMap();
+      await sleep(200);
+      const l = app.workspace.getLeavesOfType('notebook-study-map')[0];
+      return { map: !!l, text: l ? l.view.contentEl.textContent.slice(0, 200) : '' };
+    }""")
+    check('panels: the Map opens on the engine\'s basics', r['map'] and 'Divisibility (fixture)' in r['text'], r)
 
 
 def section_layout(page, w, h, tag):
@@ -725,7 +793,7 @@ def part_marks_panels(b):
     page.on('console', lambda m: m.type == 'error' and errors.append(m.text))
     page.goto(f'http://localhost:{port}/test/harness.html')
     page.add_script_tag(url=f'http://localhost:{port}/test/out/study-fixture.js')
-    page.evaluate(SETUP)
+    page.evaluate(MARKS_PANELS_SETUP)
     ev = page.evaluate
 
     # ================= S8: Today =================
@@ -1169,7 +1237,7 @@ def main():
             page.evaluate("async () => { window.pluginData = { study: { root: '/study/', device: 'Test Pad', minutes: 45 } }; window.plugin = await loadPlugin(); }")
             for name, fn in [('settings', section_settings), ('library', section_library), ('render', section_render), ('follow', section_follow),
                              ('back', section_back), ('peek', section_peek), ('pen', section_pen), ('tabs', section_tabs), ('header', section_header),
-                             ('open paths', section_open_paths), ('content change', section_content_change), ('ink', section_ink), ('marks', section_marks)]:
+                             ('open paths', section_open_paths), ('content change', section_content_change), ('ink', section_ink), ('marks', section_marks), ('panels', section_panels)]:
                 try:
                     fn(page)
                 except Exception as e:

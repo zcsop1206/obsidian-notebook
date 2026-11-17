@@ -27,6 +27,8 @@
   };
   P.createDiv = function (o = {}) { return this.createEl('div', o); };
   P.createSpan = function (o = {}) { return this.createEl('span', o); };
+  // Obsidian's appendText (the kata block and the Map's link lists use it).
+  P.appendText = function (s) { this.appendChild(document.createTextNode(String(s))); };
   window.createDiv = o => document.createElement('div').createDiv(o);
 
   // The system clipboard (#11 writes copied strokes to it, best effort): recorded, never refused.

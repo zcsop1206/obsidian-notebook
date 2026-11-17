@@ -11,7 +11,7 @@
 # Skip ticks logs empty lists; a `kata` event synced from another device settles an open block;
 # a basics link opens on a tap and peeks on a 450 ms hold.
 #
-# Port: NB_TEST_PORT_BASE + 10 (default 8775). The bundle lands in test/out/study-kata.js.
+# Port: NB_STUDY_KATA_PORT, else NB_TEST_PORT_BASE + 11 (default 8776). The bundle lands in test/out/study-kata.js.
 import json, os, subprocess, sys, time
 from playwright.sync_api import sync_playwright
 
@@ -19,7 +19,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 OUT = os.path.join(HERE, 'out')
 os.makedirs(OUT, exist_ok=True)
-port = int(os.environ.get('NB_TEST_PORT_BASE', 8765)) + 10
+port = int(os.environ.get('NB_STUDY_KATA_PORT', int(os.environ.get('NB_TEST_PORT_BASE', 8765)) + 11))
 base_url = f'http://localhost:{port}'
 
 failures = []
