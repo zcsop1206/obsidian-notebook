@@ -86,6 +86,11 @@ export class EventStore {
   private current: { dev: string; n: number; path: string; bytes: number } | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private loadedOnce = false;
+  /** Lines appended in this session and not yet on disk, oldest first: retried on the next append or reload. */
+  private unwritten: { dev: string; line: string; id: string }[] = [];
+  /** Reload generation: only the latest reload sets the event list. */
+  private gen = 0;
+  private latest: Promise<StudyEvent[]> | null = null;
 
   constructor(private app: App, private root: () => string, private device: () => string, private changed: () => void) {}
 
@@ -104,8 +109,40 @@ export class EventStore {
     return r ? `${r}/log` : 'log';
   }
 
-  /** Read every log/*.jsonl under the root. Calls `changed` when the event list differs. */
-  async reload(): Promise<StudyEvent[]> {
+  /** Events appended in this session that are not on disk yet (a failed write waits for a retry). */
+  pending(): number {
+    return this.unwritten.length;
+  }
+
+  /**
+   * Read every log/*.jsonl under the root. Calls `changed` when the event list differs. Reloads may
+   * overlap (sync delivers files in bursts): each takes a generation number, and one that finishes
+   * after a newer one started resolves with the newer one's result instead of writing its older read.
+   * A reload also retries any line a failed write left behind.
+   */
+  reload(): Promise<StudyEvent[]> {
+    if (this.unwritten.length) this.flush().catch(() => { /* logged in flush; retried next time */ });
+    const gen = ++this.gen;
+    const p: Promise<StudyEvent[]> = this.readAll().then(r => {
+      if (gen !== this.gen) return this.latest || this.events;
+      return this.applyRead(r.lists, r.skipped);
+    });
+    this.latest = p;
+    return p;
+  }
+
+  private applyRead(lists: StudyEvent[][], skipped: number): StudyEvent[] {
+    lists.push(this.own);
+    const merged = mergeEvents(lists);
+    this.skipped = skipped;
+    const differs = !sameIds(merged, this.events);
+    this.events = merged;
+    this.loadedOnce = true;
+    if (differs) this.changed();
+    return merged;
+  }
+
+  private async readAll(): Promise<{ lists: StudyEvent[][]; skipped: number }> {
     const a = this.app.vault.adapter;
     const dir = this.logDir();
     const lists: StudyEvent[][] = [];
@@ -127,14 +164,7 @@ export class EventStore {
     } catch (err) {
       console.error('[study] cannot list', dir, err);
     }
-    lists.push(this.own);
-    const merged = mergeEvents(lists);
-    this.skipped = skipped;
-    const differs = !sameIds(merged, this.events);
-    this.events = merged;
-    this.loadedOnce = true;
-    if (differs) this.changed();
-    return merged;
+    return { lists, skipped };
   }
 
   /** Append to this device's log; the engine sees the event at once, and the promise resolves once it is written. */
@@ -147,10 +177,25 @@ export class EventStore {
     if (!last || Date.parse(last.t) <= now.getTime()) this.events = [...this.events, full];
     else this.events = mergeEvents([this.events, [full]]);
     this.changed();
-    const line = JSON.stringify(full) + '\n';
-    const p = this.queue.then(() => this.write(dev, line));
-    this.queue = p.catch(err => console.error('[study] cannot write the event log', err));
-    return p.then(() => full);
+    this.unwritten.push({ dev, line: JSON.stringify(full) + '\n', id: full.id });
+    return this.flush().then(() => full);
+  }
+
+  /**
+   * Write the unwritten lines in order, one at a time (lines never interleave). A failed write stops
+   * the flush and keeps that line and the ones after it for the next append or reload, so the log on
+   * disk never loses an event the engine has already shown. Rejects while a line is still unwritten.
+   */
+  private flush(): Promise<void> {
+    const p = this.queue.then(async () => {
+      while (this.unwritten.length) {
+        const u = this.unwritten[0];
+        await this.write(u.dev, u.line);
+        if (this.unwritten[0] === u) this.unwritten.shift();
+      }
+    });
+    this.queue = p.catch(err => console.error('[study] cannot write the event log; will retry', err));
+    return p;
   }
 
   private async ensureDir(dir: string): Promise<void> {

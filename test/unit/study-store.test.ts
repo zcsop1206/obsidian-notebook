@@ -228,3 +228,69 @@ test('mergeEvents and the engine: events from the store fold into the engine', a
   const eng = foldState(content, store.all(), new Date());
   assert.equal(eng.basic('fx-div').stage, 1, 'opened on this device');
 });
+
+test('overlapping reloads: an older, slower read never replaces a newer one, so newly synced events are not dropped', async () => {
+  const f = fakeApp();
+  f.dirs.add('study');
+  f.dirs.add('study/log');
+  f.fs.set('study/log/ipad.jsonl', line({ id: 'ipad-1', t: '2026-11-15T10:00:00Z', type: 'open', doc: 'a' }) + '\n');
+  const adapter = f.app.vault.adapter as unknown as { read: (p: string) => Promise<string> };
+  const read = adapter.read.bind(adapter);
+  // The first reload's read is slow: it sees the file before the sync and finishes last.
+  let slow = true;
+  adapter.read = async (p: string) => {
+    const text = await read(p);
+    if (slow) { slow = false; await wait(40); }
+    return text;
+  };
+  let changed = 0;
+  const store = new EventStore(f.app, () => 'study', () => 'ipad', () => { changed++; });
+  const first = store.reload();
+  await wait(5);
+  // another device's log arrives by sync while the first read is still in flight
+  f.fs.set('study/log/desktop.jsonl', line({ id: 'desk-1', t: '2026-11-15T11:00:00Z', type: 'open', doc: 'b' }) + '\n');
+  const second = store.reload();
+  assert.deepEqual((await second).map(e => e.id), ['ipad-1', 'desk-1']);
+  assert.deepEqual((await first).map(e => e.id), ['ipad-1', 'desk-1'], 'the superseded reload answers with the newer read');
+  assert.deepEqual(store.all().map(e => e.id), ['ipad-1', 'desk-1'], 'the older read did not overwrite the list');
+  assert.equal(changed, 1);
+});
+
+test('a failed log write stays pending and is retried, in order, on the next append or reload', async () => {
+  const f = fakeApp();
+  const adapter = f.app.vault.adapter as unknown as { append: (p: string, d: string) => Promise<void>; write: (p: string, d: string) => Promise<void> };
+  const write = adapter.write.bind(adapter);
+  const append = adapter.append.bind(adapter);
+  let failing = true;
+  adapter.write = async (p, d) => { if (failing) throw new Error('disk full'); return write(p, d); };
+  adapter.append = async (p, d) => { if (failing) throw new Error('disk full'); return append(p, d); };
+  const store = new EventStore(f.app, () => 'study', () => 'ipad', () => {});
+  const errors = console.error;
+  console.error = () => {};
+  try {
+    const a = await store.append({ type: 'open', doc: 'a' }).then(() => 'written', () => 'failed');
+    assert.equal(a, 'failed');
+    assert.equal(store.pending(), 1);
+    assert.deepEqual(store.all().map(e => e.type === 'open' && e.doc), ['a'], 'the engine still sees it');
+    assert.equal(f.fs.get('study/log/ipad.jsonl'), undefined);
+    const b = await store.append({ type: 'open', doc: 'b' }).then(() => 'written', () => 'failed');
+    assert.equal(b, 'failed', 'still failing: both wait');
+    assert.equal(store.pending(), 2);
+    failing = false;
+    await store.append({ type: 'open', doc: 'c' });
+    assert.equal(store.pending(), 0);
+    assert.deepEqual(parseLog(f.fs.get('study/log/ipad.jsonl')!).events.map(e => e.type === 'open' && e.doc), ['a', 'b', 'c'], 'retried in order, each once');
+    // a reload retries too
+    failing = true;
+    await store.append({ type: 'open', doc: 'd' }).catch(() => {});
+    assert.equal(store.pending(), 1);
+    failing = false;
+    await store.reload();
+    await wait(0);
+    for (let i = 0; i < 20 && store.pending(); i++) await wait(5);
+    assert.equal(store.pending(), 0);
+    assert.deepEqual(parseLog(f.fs.get('study/log/ipad.jsonl')!).events.map(e => e.type === 'open' && e.doc), ['a', 'b', 'c', 'd']);
+  } finally {
+    console.error = errors;
+  }
+});
