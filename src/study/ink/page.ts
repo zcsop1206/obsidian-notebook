@@ -19,9 +19,12 @@ import {
 } from './model';
 import type { DocInkStore } from './store';
 
-/** Where the Pencil does not write on the page: controls, block canvases, the ink's own chips, and anything marked `no-ink`. */
+/**
+ * Where the Pencil does not write on the page: controls, block canvases, the ink's own chips, the
+ * marks scaffold (its attempt box is a block canvas with its own ink), and anything marked `no-ink`.
+ */
 export const PAGE_INK_SKIP = [
-  '.nb-study-ink', '.nb-study-ink-chip', '.nb-study-ink-orphans', 'button', 'input', 'textarea', 'select', 'label', 'summary',
+  '.nb-study-ink', '.nb-study-ink-chip', '.nb-study-ink-orphans', '.nb-st-scaffold', 'button', 'input', 'textarea', 'select', 'label', 'summary',
   '[contenteditable="true"]', '[contenteditable=""]', '[role="button"]', '.no-ink', '.nb-study-no-ink',
 ].join(', ');
 /** Where the mouse does not write either: links and chips, so a click follows them. */

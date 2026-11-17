@@ -48,10 +48,15 @@ export function registerStudy(plugin: Plugin): StudyContext {
     engine: () => engine,
     onChange: fn => { listeners.add(fn); return () => listeners.delete(fn); },
   };
-  plugin.register(loader.watch());
-  plugin.register(store.watch());
-  registerView(ctx);
-  registerBlocks(ctx);
-  registerPanels(ctx);
+  // Study mode must never take the ink editor down: each step is guarded on its own, so a module
+  // that fails to register is logged and the others (and the rest of the plugin) still load.
+  const guard = (what: string, fn: () => void) => {
+    try { fn(); } catch (e) { console.error(`[study] ${what} failed to start`, e); }
+  };
+  guard('the content loader', () => plugin.register(loader.watch()));
+  guard('the event store', () => plugin.register(store.watch()));
+  guard('the study view', () => registerView(ctx));
+  guard('the blocks', () => registerBlocks(ctx));
+  guard('Today and Map', () => registerPanels(ctx));
   return ctx;
 }

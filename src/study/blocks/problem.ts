@@ -95,7 +95,10 @@ export function methodLabel(content: ContentIndex, id: string): string {
   if (slash > 0) {
     const p = content.anchors.get(id.slice(0, slash))?.get(id.slice(slash + 1));
     const t = p && p.callout ? p.callout.title : '';
-    if (t) return `${t} (${id.slice(0, slash)})`;
+    // As the demo's mLabel: the callout's title alone. Naming the doc would show a hidden pick's
+    // topic in the tick list before the reveal.
+    if (t) return t;
+    return id.slice(slash + 1);
   }
   return id;
 }

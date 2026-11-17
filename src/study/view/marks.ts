@@ -356,8 +356,9 @@ export function attachMarks(host: MarksHost): Marks {
       ui.set(anchor, u);
     }
     if (verb === 'clear') {
-      ui.delete(anchor);
+      // The scaffold is found through ui, so it goes before the entry does.
       removeScaffold(anchor);
+      ui.delete(anchor);
     }
     try {
       await host.ctx.log({ type: 'mark', doc: d.id, a: anchor, verb, build: d.build });

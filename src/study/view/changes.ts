@@ -92,18 +92,26 @@ class ChangesModal extends Modal {
 
     // Pending requests on this doc.
     contentEl.createEl('h4', { text: 'Pending requests' });
-    const reqs = call(() => ctx.engine().pendingRequests(), []).filter(r => r.doc === doc.id);
+    // This doc's own requests, and rebuilds of a basic asked from here (`a` = `<this doc>#<anchor>`).
+    const reqs = call(() => ctx.engine().pendingRequests(), []).filter(r => r.doc === doc.id || r.a.startsWith(`${doc.id}#`));
     if (!reqs.length) {
       contentEl.createDiv({ cls: 'nb-st-empty', text: 'None. Rewrite and rebuild requests the laptop has not answered yet appear here.' });
     }
     for (const r of reqs) {
       const row = contentEl.createDiv({ cls: 'nb-st-req' });
       row.createSpan({ cls: `nb-st-kind ${r.kind}`, text: r.kind });
-      row.createSpan({ cls: 'nb-st-anchor', text: `#${r.a}` });
+      const hash = r.a.indexOf('#');
+      const from = hash > 0 ? { doc: r.a.slice(0, hash), a: r.a.slice(hash + 1) } : null;
+      const title = (id: string) => ctx.content().docs.get(id)?.title || id;
+      // A cross-doc rebuild: on the marked doc it names the basic; on the basic, where it was lost.
+      const label = !from ? `#${r.a}` : r.doc === doc.id ? `lost at ${title(from.doc)} #${from.a}` : `#${from.a} → ${title(r.doc)}`;
+      row.createSpan({ cls: 'nb-st-anchor', text: label });
       row.createSpan({ cls: 'nb-st-when', text: `${fmtTime(r.t)} · asked at build ${r.build}` });
       row.addEventListener('click', () => {
         this.close();
-        void ctx.ui.openDoc(r.doc, r.a);
+        if (!from) void ctx.ui.openDoc(r.doc, r.a);
+        else if (r.doc === doc.id) void ctx.ui.openDoc(from.doc, from.a);
+        else void ctx.ui.openDoc(doc.id, from.a);
       });
     }
 

@@ -205,9 +205,13 @@ export class TodayView extends ItemView {
       const head = card.createDiv();
       head.createSpan({ cls: `nb-sp-flag ${r.kind === 'rebuild' ? 'bad' : 'after'}`, text: r.kind });
       head.createSpan({ text: ' ' });
-      head.createSpan({ cls: 'nb-sp-t', text: `${this.title(r.doc)} #${r.a}` });
+      // A rebuild asked from another doc names the passage as `<doc>#<anchor>` (SPEC, S5 contract):
+      // the card names both and opens the basic at the top, since the anchor is not in it.
+      const hash = r.a.indexOf('#');
+      const from = hash > 0 ? { doc: r.a.slice(0, hash), a: r.a.slice(hash + 1) } : null;
+      head.createSpan({ cls: 'nb-sp-t', text: from ? `${this.title(r.doc)} (lost at ${this.title(from.doc)} #${from.a})` : `${this.title(r.doc)} #${r.a}` });
       card.createSpan({ cls: 'nb-sp-why', text: `asked ${r.t.slice(0, 10)} at build ${r.build} · /teach answers it` });
-      card.addEventListener('click', () => void this.ctx.ui.openDoc(r.doc, r.a));
+      card.addEventListener('click', () => void this.ctx.ui.openDoc(r.doc, from ? undefined : r.a));
     }
   }
 }

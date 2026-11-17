@@ -206,4 +206,7 @@ test('problem: items from the index, hooks from a basic, and the tick choices', 
   const ids = methodChoices(content, { methods: ['order', 'fx-div/cong-arith'] }).map(m => m.id);
   for (const m of ['order', 'bezout', 'ghost', 'fx-div/cong-arith']) assert.ok(ids.includes(m), m);
   assert.equal(new Set(ids).size, ids.length, 'no duplicates');
+  // A basic/anchor method is labelled without its doc id, so a hidden pick's tick list does not name its topic.
+  const labels = methodChoices(content, { methods: ['fx-div/cong-arith', 'fx-div/no-such'] }).map(m => m.label);
+  assert.ok(labels.every(l => !l.includes('fx-div')), labels.join(' | '));
 });
