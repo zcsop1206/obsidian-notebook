@@ -106,6 +106,7 @@ export function emptyIndex(): ContentIndex {
 /** FORMAT.md's area table order; areas not in it follow, alphabetically. */
 const AREA_ORDER = ['nt', 'comb', 'an', 'la', 'gen', 'dd', 'ca', 'th', 'mc', 'pd', 'sp', 'op', 'el', 'mat', 'qc', 'bio'];
 const FOLDERS = new Set(['basics', 'topics', 'katas', 'bank', 'cards']);
+const MARK_VERBS: readonly string[] = ['lost', 'easy', 'forgot', 'clear'];
 
 function uniq<T>(a: readonly (T | null | undefined)[]): T[] {
   const out: T[] = [];
@@ -131,6 +132,78 @@ export function sortEvents(events: readonly StudyEvent[]): { events: StudyEvent[
   }
   out.sort((a, b) => a.ms - b.ms || (a.e.id < b.e.id ? -1 : a.e.id > b.e.id ? 1 : 0));
   return { events: out.map(x => x.e), skipped };
+}
+
+/* ------------------------------------------------------------------------------------------ *
+ * Coercion: synced logs come from other devices and other plugin versions, so every field is
+ * checked before the fold uses it. A wrong type becomes a safe default instead of a throw.
+ * ------------------------------------------------------------------------------------------ */
+
+function str(x: unknown): string {
+  return typeof x === 'string' ? x : typeof x === 'number' && isFinite(x) ? String(x) : '';
+}
+
+function num(x: unknown): number {
+  const n = typeof x === 'number' || typeof x === 'string' ? Number(x) : NaN;
+  return isFinite(n) ? n : 0;
+}
+
+function numOrNull(x: unknown): number | null {
+  if (x == null || x === '') return null;
+  const n = typeof x === 'number' || typeof x === 'string' ? Number(x) : NaN;
+  return isFinite(n) ? n : null;
+}
+
+function bool(x: unknown): boolean {
+  return x === true || x === 1 || x === 'true';
+}
+
+/** A list of ids: an array keeps its strings (numbers as text); anything else is empty. */
+function list(x: unknown): string[] {
+  return Array.isArray(x) ? x.map(y => (typeof y === 'number' && isFinite(y) ? String(y) : y)).filter((y): y is string => typeof y === 'string' && y !== '') : [];
+}
+
+/** A copy of the event with every field the fold reads coerced to its type (strings, numbers, booleans, lists). Unknown types pass through. */
+export function coerceEvent(e: StudyEvent): StudyEvent {
+  const x = e as unknown as Record<string, unknown>;
+  const base = { v: 1, id: str(x.id), t: str(x.t), dev: str(x.dev), type: str(x.type) };
+  let out: Record<string, unknown>;
+  switch (base.type) {
+    case 'mark': out = { doc: str(x.doc), a: str(x.a), verb: str(x.verb), build: num(x.build) }; break;
+    case 'attempt': out = { doc: str(x.doc), a: str(x.a), strokes: Math.max(0, num(x.strokes)) }; break;
+    case 'rewrite-request': out = { doc: str(x.doc), a: str(x.a), build: num(x.build), ...(typeof x.rev === 'string' && x.rev ? { rev: x.rev } : {}) }; break;
+    case 'rebuild-request': out = { doc: str(x.doc), a: str(x.a), build: num(x.build) }; break;
+    case 'fog':
+      out = {
+        doc: str(x.doc), proof: str(x.proof), build: num(x.build), reveals: Math.max(0, num(x.reveals)), steps: Math.max(0, num(x.steps)),
+        done: bool(x.done), clean: typeof x.clean === 'boolean' ? x.clean : undefined,
+      };
+      break;
+    case 'drill': out = { doc: str(x.doc), item: str(x.item), grade: str(x.grade), ms: num(x.ms), src: str(x.src) || 'drill' }; break;
+    case 'call': out = { item: str(x.item), conf: numOrNull(x.conf), hidden: bool(x.hidden), reach: bool(x.reach), d: numOrNull(x.d) }; break;
+    case 'settle':
+      out = {
+        item: str(x.item), verdict: str(x.verdict), help: bool(x.help) ? 1 : 0, gaveUp: bool(x.gaveUp), ms: num(x.ms),
+        called: list(x.called), used: list(x.used), hidden: bool(x.hidden), hook: bool(x.hook),
+      };
+      break;
+    case 'kata':
+      out = {
+        kata: str(x.kata), pass: bool(x.pass), runs: num(x.runs), gaveUp: bool(x.gaveUp), ms: num(x.ms),
+        called: list(x.called), used: list(x.used), hidden: bool(x.hidden),
+      };
+      break;
+    case 'stage-set': out = { basic: str(x.basic), stage: num(x.stage) }; break;
+    case 'open': out = { doc: str(x.doc) }; break;
+    default: return e;
+  }
+  return { ...base, ...out } as unknown as StudyEvent;
+}
+
+/** The passage a request was made on: `a` is `<doc>#<anchor>` when the mark sat in another doc than the one to rebuild. */
+export function requestTarget(r: { doc: string; a: string }): { doc: string; a: string } {
+  const i = r.a.indexOf('#');
+  return i > 0 ? { doc: r.a.slice(0, i), a: r.a.slice(i + 1).replace(/^\^/, '') } : { doc: r.doc, a: r.a };
 }
 
 /* ------------------------------------------------------------------------------------------ *
@@ -160,10 +233,21 @@ export class StudyState {
   constructor(readonly content: ContentIndex, events: readonly StudyEvent[]) {
     for (const d of content.docs.values()) if (d.kind === 'basic') this.basics.set(d.id, newBasic(d.id));
     const sorted = sortEvents(events);
-    this.events = sorted.events;
     this.skipped = sorted.skipped;
-    this.t0 = this.events.length ? this.events[0].t : null;
-    for (const e of this.events) this.apply(e);
+    this.t0 = sorted.events.length ? sorted.events[0].t : null;
+    // One bad event from a synced log must never break every query on every device: each event is
+    // coerced to its field types, and one the fold still cannot apply is counted and skipped.
+    const kept: StudyEvent[] = [];
+    for (const raw of sorted.events) {
+      try {
+        const e = coerceEvent(raw);
+        this.apply(e);
+        kept.push(e);
+      } catch {
+        this.skipped++;
+      }
+    }
+    this.events = kept;
   }
 
   /* -------------------------------------------------------------------- content helpers */
@@ -245,6 +329,7 @@ export class StudyState {
     const day = eventDay(e.t);
     switch (e.type) {
       case 'mark': {
+        if (!MARK_VERBS.includes(e.verb)) { this.skipped++; return; }
         this.touch(e.doc, day);
         let action: MarkRec['action'] = null;
         if (e.verb === 'forgot') {
@@ -671,13 +756,23 @@ export class StudyState {
     for (const m of latest.values()) {
       if (m.verb === 'clear') continue;
       if (m.verb === 'lost') {
-        const done = this.requests.some(r => r.ms <= ms && r.ms >= m.ms && r.doc === m.doc && (r.kind === 'rebuild' || r.a === m.a) && this.answered(r));
+        const done = this.requests.some(r => r.ms <= ms && r.ms >= m.ms && this.requestAnswersMark(r, m) && this.answered(r));
         if (done) continue;
       }
       out.push(m);
     }
     out.sort((x, y) => y.ms - x.ms || (x.doc + x.a < y.doc + y.a ? -1 : 1));
     return out.map(m => ({ doc: m.doc, a: m.a, verb: m.verb, t: m.t, build: m.build }));
+  }
+
+  /**
+   * A request covers a lost mark when it was made on that passage (a rewrite, or a rebuild whose `a`
+   * names it, as `<doc>#<anchor>` when the mark sat in another doc), or when it rebuilds the marked doc itself.
+   */
+  requestAnswersMark(r: RequestRec, m: { doc: string; a: string }): boolean {
+    const at = requestTarget(r);
+    if (at.doc === m.doc && at.a === m.a) return true;
+    return r.kind === 'rebuild' && r.doc === m.doc;
   }
 
   /** A later request on the same doc, anchor and kind supersedes the earlier one. */
@@ -887,20 +982,23 @@ export class StudyState {
       basic: x.b.id, item: this.drillItem(x.b.id), overdue: x.overdue, track: x.dl ? x.dl.track : null,
     }));
 
-    // Problem slots: every third hidden in push areas; one reach per area after three clean holds.
+    // Problem slots, as the demo's slotSpecs: each area gets SLOTS slots, counted per area, so every
+    // third slot of an area in push mode is hidden-topic whatever the other areas do; the first
+    // visible slot of an area is its reach after three clean holds.
     const picks: Pick[] = [];
     const used: string[] = [];
-    const areas = this.problemAreas(day);
-    const reachDone = new Set<string>();
-    for (let i = 0; i < SLOTS && areas.length; i++) {
-      const area = areas[i % areas.length];
-      const hidden = isHiddenSlot(i, this.inPush(area));
-      const reach = !hidden && !reachDone.has(area) && this.streaks(area).clean >= CLEAN_RUN;
-      const p = this.pickProblemRaw(area, { hidden, reach, exclude: used }, day);
-      if (!p) continue;
-      if (reach) reachDone.add(area);
-      used.push(p.id);
-      picks.push(this.problemPick(p, area, hidden, reach));
+    for (const area of this.problemAreas(day)) {
+      const push = this.inPush(area);
+      let reachLeft = this.streaks(area).clean >= CLEAN_RUN;
+      for (let slot = 0; slot < SLOTS; slot++) {
+        const hidden = isHiddenSlot(slot, push);
+        const reach = !hidden && reachLeft;
+        if (reach) reachLeft = false;
+        const p = this.pickProblemRaw(area, { hidden, reach, exclude: used }, day);
+        if (!p) continue;
+        used.push(p.id);
+        picks.push(this.problemPick(p, area, hidden, reach));
+      }
     }
 
     // One kata slot while a track that serves katas is live; every third day it is hidden in push mode.
@@ -920,8 +1018,25 @@ export class StudyState {
       if (days == null || !t.deadline) continue;
       if (!next || days < next.days) next = { track: t.id, date: t.deadline, days };
     }
-    const settledToday = this.events.filter(e => (e.type === 'settle' || e.type === 'kata') && eventDay(e.t) === day).length;
+    const settledToday = this.settledOn(day);
     return { date: day, drills, picks, next, settledToday };
+  }
+
+  /**
+   * Distinct items first settled on a day: problems and katas by item (re-ticks are not new settles),
+   * theorem hooks by theorem (a second attempt the same day is the same theorem).
+   */
+  settledOn(day: string): number {
+    const first = new Map<string, string>();
+    const see = (key: string, d: string) => { const f = first.get(key); if (f === undefined || d < f) first.set(key, d); };
+    for (const r of this.settled.values()) see(`${r.kind}:${r.item}`, r.day);
+    for (const h of this.hooks) {
+      const x = this.resolveHook(h.item);
+      see(x ? `theorem:${x.doc.id}#${x.theorem}` : `theorem:${h.item}`, h.day);
+    }
+    let n = 0;
+    for (const d of first.values()) if (d === day) n++;
+    return n;
   }
 
   /** Weak basics blocking each live track: stage below 3, or weak (stage <= 1 or the last drill failed). */

@@ -1007,3 +1007,119 @@ test('the fold skips events it cannot use and counts them', () => {
   assert.equal(e.skipped(), 3);
   assert.equal(e.basic('fe-div').stage, 3);
 });
+
+/* ======================================================== review fixes (PR #85) */
+
+test('one malformed synced event never breaks the engine: fields are coerced, a throwing event is skipped, every query answers', () => {
+  const T = (h: number) => X.isoLocal(new Date(at(0, h)));
+  const raw = (id: string, h: number, fields: Record<string, unknown>) => ({ v: 1, id, t: T(h), dev: 'other', ...fields });
+  const bad = [
+    raw('m1', 8, { type: 'settle', item: 'inv-nt-a', verdict: 'held', called: 5, used: 'm-crt', help: 'no', hidden: 0, hook: false }),
+    raw('m2', 8, { type: 'kata', kata: 'k-crc', pass: true, runs: 'two', called: { x: 1 }, used: null }),
+    raw('m3', 8, { type: 'settle', item: 7, verdict: null, called: [1, null, 'm-order'], used: [{}], hook: 'yes' }),
+    raw('m4', 8, { type: 'mark', doc: 'fe-moves', a: 'p-crt', verb: 9, build: 'one' }),
+    raw('m5', 8, { type: 'mark', doc: 42, a: null, verb: 'lost', build: {} }),
+    raw('m6', 9, { type: 'drill', doc: 'fe-div', item: null, grade: 5, ms: 'x', src: [] }),
+    raw('m7', 9, { type: 'fog', doc: 'fe-crt', proof: {}, reveals: 'abc', steps: null, done: true, clean: 'no' }),
+    raw('m8', 9, { type: 'attempt', doc: 'fe-moves', a: 'p-crt', strokes: 'lots' }),
+    raw('m9', 9, { type: 'call', item: 'inv-nt-b', conf: 'high', hidden: 'false', reach: [], d: 'hard' }),
+    raw('m10', 9, { type: 'rewrite-request', doc: 'fe-moves', a: 'p-div', build: 'two', rev: 5 }),
+    raw('m11', 9, { type: 'rebuild-request', doc: null, a: 3, build: undefined }),
+    raw('m12', 9, { type: 'stage-set', basic: 'fe-lfsr', stage: 'high' }),
+    raw('m13', 9, { type: 'open' }),
+  ];
+  // An event whose field throws when read: the fold must catch it, not the caller.
+  const hostile = raw('m14', 10, { type: 'mark', a: 'p-crt', verb: 'lost', build: 1 });
+  Object.defineProperty(hostile, 'doc', { enumerable: true, get() { throw new Error('boom'); } });
+  const log = [...seed(), ...bad, hostile] as unknown as StudyEvent[];
+  const e = foldState(CONTENT, log, new Date(NOW));
+  // The queries the review names, and the rest of the contract: none may throw.
+  const queries: [string, () => unknown][] = [
+    ['basic', () => e.basic('fe-div')], ['basics', () => e.basics()], ['todayPlan', () => e.todayPlan(60)],
+    ['triage', () => e.triage('fe-moves', 'p-crt', 'lost')], ['budget', () => e.budget('fe-moves')], ['marks', () => e.marks()],
+    ['pendingRequests', () => e.pendingRequests()], ['blockers', () => e.blockers()], ['rating', () => e.rating('nt')],
+    ['ratingHistory', () => e.ratingHistory('nt')], ['methodAccuracy', () => e.methodAccuracy()], ['pickProblem', () => e.pickProblem('nt')],
+    ['pickKata', () => e.pickKata()], ['areas', () => e.areas()], ['hooks', () => e.hooks()], ['settled', () => e.settled('inv-nt-a')],
+  ];
+  for (const [name, q] of queries) assert.doesNotThrow(q, name);
+  assert.equal(e.skipped(), 2, 'the mark with verb 9 and the throwing event');
+  // Coerced, not dropped: the settle with called 5 rated nt and counted its methods as not called.
+  const s = e.settled('inv-nt-a')!;
+  assert.deepEqual([s.verdict, s.help, s.called, s.took, s.hit], ['held', false, [], ['m-crt'], false]);
+  close(s.rAfter!, 3 + 0.6 * (1 - Ex(2.5, 3)), 1e-12);
+  assert.deepEqual(e.settled('7')!.called, ['1', 'm-order'], 'list items: numbers as text, junk dropped');
+  assert.equal(e.settled('k-crc')!.score, 1, 'runs "two" reads as no count: first-run pass');
+  assert.equal(e.basic('fe-lfsr').stage, 0, 'stage "high" coerces to 0');
+  assert.equal(e.basic('fe-div').last, 'clean', 'a drill with grade 5 moves no stage');
+  assert.equal(e.pendingRequests().some(p => p.a === 'p-div'), false, 'build "two" reads as 0 and rev 5 is dropped: build 1 answers it');
+  assert.equal(e.budget('fe-moves').used, 1);
+  assert.ok(e.todayPlan(60).picks.length > 0, 'Today still plans');
+  // The same log through the live engine (as on a device after sync) answers too.
+  const live = createEngine(() => new Date(NOW));
+  live.update(CONTENT, log);
+  assert.doesNotThrow(() => live.todayPlan());
+});
+
+test('Today: every area gets its own slots, so a push area that is not the first still gets its hidden pick', () => {
+  // Two problem areas: nt (nearest deadline, not in push) and comb (in push, through a basic moved to comb for this test).
+  const c = contentWith({
+    'basics/fe-lfsr.md': s => s.replace(/^area: dd$/m, 'area: comb').replace(/^tracks: \[asic\]$/m, 'tracks: []'),
+    'meta/tracks.md': s => s + '| counting | 2026-12-10 | 1 | comb | |\n',
+  });
+  const r = make(seed(), c);
+  r.comfortable('comb');
+  assert.equal(r.eng.inPush('comb'), true);
+  assert.equal(r.eng.inPush('nt'), false);
+  const ps = problems(r.eng);
+  assert.deepEqual(ids(ps.slice(0, 3)), ['inv-nt-a', 'inv-nt-b', 'inv-nt-c'], 'nt: three visible slots');
+  assert.ok(ps.slice(0, 3).every(p => !p.hidden));
+  const comb = ps.slice(3);
+  assert.deepEqual(comb.map(p => p.hidden), [false, false, true], 'comb: its third slot is hidden');
+  assert.deepEqual(ids(comb.slice(0, 2)).sort(), ['inv-comb-a', 'inv-comb-b']);
+  assert.notEqual(c.problems.get(comb[2].id)!.area, 'comb', 'a hidden pick comes from another practised area');
+  // The pattern is per area: the round robin over three total slots gave comb only its slot 0, never a hidden one.
+  assert.equal(ps.filter(p => p.hidden).length, 1);
+});
+
+test('settled today counts distinct items first settled today: re-ticks and second hook attempts are not new', () => {
+  const r = make();
+  r.settle('inv-nt-a', 'held', { called: [], used: ['m-crt'] });
+  r.settle('inv-nt-a', 'held', { called: ['m-crt'], used: ['m-crt'] }); // re-tick
+  r.kata('k-crc', { pass: true });
+  r.kata('k-crc', { pass: true, called: ['d-shift'] }); // re-tick
+  r.settle(hookItem('fe-div', 'bezout'), 'held', { hook: true });
+  r.settle(hookItem('fe-div', 'bezout'), 'held', { hook: true, called: ['m-bezout'] }); // re-tick of attempt 1
+  r.settle(hookItem('fe-div', 'bezout', 2), 'missed', { hook: true }); // attempt 2, same theorem
+  assert.equal(r.eng.todayPlan().settledToday, 3, 'inv-nt-a, k-crc, the bezout hook');
+  r.advanceDays(1);
+  r.settle('inv-nt-a', 'missed'); // settled yesterday: a re-tick today is not a new settle
+  r.settle(hookItem('fe-div', 'bezout', 3), 'held', { hook: true }); // first settled yesterday
+  assert.equal(r.eng.todayPlan().settledToday, 0);
+  r.settle('inv-nt-b', 'held');
+  assert.equal(r.eng.todayPlan().settledToday, 1);
+});
+
+test('S5 contract: a rewrite request with rev is answered only by a higher build AND a changed hash; a cross-doc rebuild request (a = <doc>#<anchor>) closes the mark it came from', () => {
+  const r = make();
+  // rewrite with rev: a higher build alone is not an answer
+  const rev = CONTENT.anchors.get('fe-moves')!.get('p-mix')!.hash;
+  r.mark('fe-moves', 'p-mix', 'lost');
+  r.add('rewrite-request', { doc: 'fe-moves', a: 'p-mix', build: 1, rev });
+  r.setContent(contentWith({ 'topics/fe-moves.md': bumpBuild(3) }));
+  assert.deepEqual(r.eng.pendingRequests().map(p => [p.kind, p.a]), [['rewrite', 'p-mix']], 'build 3, same text: pending');
+  r.setContent(contentWith({ 'topics/fe-moves.md': s => bumpBuild(3)(s).replace('Mix: ', 'Mix them: ') }));
+  assert.deepEqual(r.eng.pendingRequests(), [], 'build 3, new text: answered');
+  // rebuild requested from a mark in a topic: the request names the basic; a names the marked passage
+  r.mark('fe-moves', 'p-units', 'lost');
+  r.add('rebuild-request', { doc: 'fe-units', build: 1, a: 'fe-moves#p-units' });
+  assert.deepEqual(r.eng.pendingRequests().map(p => [p.kind, p.doc, p.a]), [['rebuild', 'fe-units', 'fe-moves#p-units']]);
+  assert.deepEqual(r.eng.marks('fe-moves').map(m => m.a), ['p-units'], 'open while the rebuild waits');
+  r.setContent(contentWith({ 'topics/fe-moves.md': s => bumpBuild(3)(s).replace('Mix: ', 'Mix them: '), 'basics/fe-units.md': bumpBuild(2) }));
+  assert.deepEqual(r.eng.pendingRequests(), []);
+  assert.deepEqual(r.eng.marks('fe-moves'), [], 'the landed rebuild of fe-units closes the topic\'s lost mark');
+  // a rebuild of another basic does not close a mark it was not requested for
+  r.mark('fe-moves', 'p-plain', 'lost');
+  r.add('rebuild-request', { doc: 'fe-crt', build: 1, a: 'fe-moves#p-crt' });
+  r.setContent(contentWith({ 'topics/fe-moves.md': s => bumpBuild(3)(s).replace('Mix: ', 'Mix them: '), 'basics/fe-units.md': bumpBuild(2), 'basics/fe-crt.md': bumpBuild(2) }));
+  assert.deepEqual(r.eng.marks('fe-moves').map(m => m.a), ['p-plain']);
+});
