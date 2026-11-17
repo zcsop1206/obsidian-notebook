@@ -123,6 +123,40 @@ SETUP_JS = """(files) => {
   window.renderedAnchors = () => [...document.querySelectorAll('.nb-study-doc .sr-passage[data-a]')].map(e => e.getAttribute('data-a'));
   // Where an element sits in the view: its top relative to the scroller's top, in screen px.
   window.topInView = el => el.getBoundingClientRect().top - scroller().getBoundingClientRect().top;
+  // A pen stroke from client points (coalesced events in groups of 3, WebKit-style repeats), as
+  // in test/run_study_ink_test.py; the ink layer listens for pointerdown on the doc stack.
+  window.penStroke = (target, pts, type = 'pen', id = 7) => {
+    const init = (q, extra = {}) => ({ pointerId: id, pointerType: type, pressure: 0.5, clientX: q[0], clientY: q[1], bubbles: true, cancelable: true, button: 0, buttons: 1, ...extra });
+    target.dispatchEvent(new PointerEvent('pointerdown', init(pts[0])));
+    let prev = null;
+    for (let j = 1; j < pts.length; j += 3) {
+      const group = pts.slice(j, j + 3);
+      const list = (prev ? [prev] : []).concat(group).map(q => new PointerEvent('pointermove', init(q)));
+      prev = group[group.length - 1];
+      target.dispatchEvent(new PointerEvent('pointermove', { ...init(prev), coalescedEvents: list }));
+    }
+    target.dispatchEvent(new PointerEvent('pointerup', init(pts[pts.length - 1], { buttons: 0, pressure: 0 })));
+  };
+  // A wavy stroke across an element, `dy` CSS px under its top.
+  window.strokeOver = (el, dy, type = 'pen') => {
+    const r = el.getBoundingClientRect();
+    const pts = [];
+    for (let i = 0; i <= 24; i++) pts.push([r.left + 60 + i * 12, r.top + dy + 6 * Math.sin(i / 3)]);
+    penStroke(el, pts, type);
+  };
+  window.fileJson = p => (fs.has(p) ? JSON.parse(fs.get(p)) : null);
+  // Ink pixels (alpha > 0) in the page canvas within a paper-px rectangle of the 800 px paper.
+  window.inkPx = (x0, y0, x1, y1) => {
+    const c = document.querySelector('.nb-study-doc > canvas.nb-study-ink-canvas');
+    if (!c) return -1;
+    const k = c.width / 800, top = parseFloat(c.style.top) || 0;
+    const g = c.getContext('2d');
+    const X = Math.max(0, Math.floor(x0 * k)), Y = Math.max(0, Math.floor((y0 - top) * k));
+    const w = Math.max(1, Math.floor((x1 - x0) * k)), h = Math.max(1, Math.floor((y1 - y0) * k));
+    const d = g.getImageData(X, Y, w, h).data;
+    let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i] > 0) n++;
+    return n;
+  };
 }"""
 
 
@@ -483,7 +517,28 @@ def section_content_change(page):
 
 
 def section_ink(page):
-    skip('page ink', 'S4 adds this section: strokes written with synthetic pen events, the view reopened, strokes in place')
+    # Page ink (S4, merged as #80): a Pencil stroke over a passage writes to this device's ink
+    # file (the settings tab set device "test-pad"), then survives closing and reopening the view.
+    open_doc(page, 'fx-units')
+    page.wait_for_timeout(150)
+    page.evaluate("() => { window._inkEl = studyEl('[data-a=\"unit-gcd\"]'); strokeOver(_inkEl, 14); }")
+    check('ink: a pen stroke on the page does not navigate', page.evaluate("() => V().currentDoc() === 'fx-units'"))
+    page.wait_for_timeout(1300)
+    saved = page.evaluate("() => fileJson('study/ink/fx-units.test-pad.json')")
+    strokes = (saved or {}).get('strokes', [])
+    ok = any(s.get('at', {}).get('a') == 'unit-gcd' for s in strokes)
+    check('ink: the stroke saved to study/ink/fx-units.test-pad.json at its passage', ok, json.dumps(saved)[:200] if saved else 'no file')
+    # Close the leaf and reopen the view: the stroke is loaded back and drawn under its passage.
+    page.evaluate("() => app.workspace.getLeavesOfType('notebook-study')[0].detach()")
+    page.evaluate("() => commands['open-study'].callback()")
+    ok = open_doc(page, 'fx-units')
+    page.wait_for_timeout(300)
+    px = page.evaluate("""() => {
+      const doc = document.querySelector('.nb-study-doc'), el = doc.querySelector('[data-a="unit-gcd"]');
+      const dr = doc.getBoundingClientRect(), r = el.getBoundingClientRect(), s = dr.width / 800;
+      return inkPx((r.left - dr.left) / s + 40, (r.top - dr.top) / s + 4, (r.left - dr.left) / s + 260, (r.top - dr.top) / s + 28);
+    }""")
+    check('ink: after reopening the view the stroke is drawn under its passage', ok and px > 50, f'reopen {ok}, pixels {px}')
 
 
 def section_marks(page):
