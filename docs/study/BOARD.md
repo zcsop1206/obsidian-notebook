@@ -24,14 +24,14 @@ Where Claude (Claude Code on Adit's laptop), Devin sessions and Adit coordinate 
 | id | title | owner | depends on | owns | status |
 |---|---|---|---|---|---|
 | S1 | Foundation: format, types, parser, index, wiring | claude | | `docs/study/*`, `src/study/{types,context,index}.ts`, `src/study/format/*`, `src/study/content/loader.ts`, `src/study/view/host.ts`, `src/study/blocks/index.ts`, `test/unit/study-parse.test.ts`, `test/fixtures/study/*` | done |
-| S2 | Engine and event store | devin | S1 | `src/study/engine/*`, `src/study/store/*`, `test/unit/study-engine.test.ts`, `test/unit/study-store.test.ts` | open |
-| S3 | Study view shell | devin | S1 | `src/study/view/*` except `marks.ts`, `changes.ts`, `host.ts`; `src/study/content/loader.ts` (may extend); the study section of `src/settings.ts` and `styles.css`; `test/run_study_test.py`; additions to `test/mock-obsidian.js` | open |
-| S4 | Anchored ink | devin | S1 (codes against `view/host.ts`) | `src/study/ink/*`, `test/unit/study-ink.test.ts` | open |
-| S5 | Marks and triage UI | devin | S1; S2's engine when merged (mock until then) | `src/study/view/marks.ts`, `src/study/view/changes.ts`, the marks section of `test/run_study_test.py` | open |
-| S6 | Fog, drill and recall blocks | devin | S1 | `src/study/blocks/{fog,drill,recall}.ts`, `test/unit/study-fog.test.ts` | open |
-| S7 | Problem block | devin | S1 | `src/study/blocks/problem.ts`, `test/unit/study-problem.test.ts` | open |
-| S8 | Today and Map | devin | S1; S2's engine when merged | `src/study/panels/*` | open |
-| S9 | Kata: interpreter, vectors, block | devin | S1 | `src/study/kata/*`, `src/study/blocks/kata.ts`, `test/unit/study-kata.test.ts` | open |
+| S2 | Engine and event store | devin | S1 | `src/study/engine/*`, `src/study/store/*`, `test/unit/study-engine.test.ts`, `test/unit/study-store.test.ts` | done (#85) |
+| S3 | Study view shell | devin | S1 | `src/study/view/*` except `marks.ts`, `changes.ts`, `host.ts`; `src/study/content/loader.ts` (may extend); the study section of `src/settings.ts` and `styles.css`; `test/run_study_test.py`; additions to `test/mock-obsidian.js` | done (#81) |
+| S4 | Anchored ink | devin | S1 (codes against `view/host.ts`) | `src/study/ink/*`, `test/unit/study-ink.test.ts` | done (#80) |
+| S5 | Marks and triage UI | devin | S1; S2's engine when merged (mock until then) | `src/study/view/marks.ts`, `src/study/view/changes.ts`, the marks section of `test/run_study_test.py` | done (#84) |
+| S6 | Fog, drill and recall blocks | devin | S1 | `src/study/blocks/{fog,drill,recall}.ts`, `test/unit/study-fog.test.ts` | done (#82) |
+| S7 | Problem block | devin | S1 | `src/study/blocks/problem.ts`, `test/unit/study-problem.test.ts` | done (#82) |
+| S8 | Today and Map | devin | S1; S2's engine when merged | `src/study/panels/*` | done (#84) |
+| S9 | Kata: interpreter, vectors, block | devin | S1 | `src/study/kata/*`, `src/study/blocks/kata.ts`, `test/unit/study-kata.test.ts` | done (#83) |
 | S10 | Laptop bridge and /teach v2 | claude | S2 | `scripts/study-scan.mjs`; the teach skill in the portfolio repo | open |
 | S11 | Release 0.15.0 | claude, adit | all | `manifest.json`, `versions.json`, `CONTEXT.md` | open |
 
@@ -51,3 +51,11 @@ Answered `INTERFACE:` and `Q:` entries that change the spec are copied here with
 - 2026-11-17 claude: "held after help" is a UI button that logs verdict `held` with `help: 1`; events keep four verdicts.
 - 2026-11-17 claude: kata and problem results are logged when the tick step is saved; a settled session with no ticks shows its tick step again on the next open and has "Skip ticks" (logs empty lists).
 - 2026-11-17 claude: the engine may grow `nextHookItem()` and `areas()` and be exported as `StudyEngine`; `StudyContext.engine()` returns it. types.ts may add the optional `rev` on rewrite requests and an `open` event.
+- 2026-11-17 claude: S2 (#85), S3 (#81), S5+S8 (#84), S6+S7 (#82) and S9 (#83) merged into `study-mode` in that order, each after a review, a fix pass and an independent check that found no unresolved major problem. S10 and S11 stay open.
+- 2026-11-17 claude: `test/run_study_test.py` holds both parts: S3's view sections on the real plugin (now with live marks and panels sections over S2's engine), then S5's marks and S8's panels on the mock StudyContext (`part_marks_panels`). Ports off `NB_TEST_PORT_BASE`: study view + 6, blocks + 10, kata + 11, content check + 12, study ink + 9.
+- 2026-11-17 claude: `test/run_study_content_check.py` opens every doc of a real study folder (`STUDY_CONTENT_DIR`, read into the mock vault in memory, never copied into the repo); it SKIPs without the variable, so `npm test` can list it.
+- 2026-11-17 claude: each module's `register` runs under its own guard in `src/study/index.ts` (on top of main.ts's guard), so a module that throws is logged and the ink editor and the other modules still load.
+- 2026-11-17 claude: `PAGE_INK_SKIP` includes `.nb-st-scaffold`: page ink never starts on the scaffold's padding or border; its attempt box keeps its own surface (review note on #84).
+- 2026-11-17 claude: a cross-doc rebuild request (`a` = `<doc>#<anchor>`) shows in Today as "<basic> (lost at <doc> #<anchor>)" and opens the basic at its top; the Changes panel lists it on both docs (review note on #84).
+- 2026-11-17 claude: a basic/anchor method in a tick list is labelled by its callout title only (the demo's `mLabel`), so a hidden pick's list never names its doc (review note on #82).
+- 2026-11-17 claude: accepted as built: Today has three problem slots per live area (the demo's slotSpecs), so the pick count varies; a problem opened from Today files its ink under `ink/problems.<device>.json` while its session (phase, verdict, ticks) is shared with the in-doc block, so the call ink of a session started in its doc does not show in the standalone view (open: to be revisited after Adit's iPad check); a hidden pick's topic shows once the called ticks are confirmed; "Skip ticks" appears only when a settled card is opened again.

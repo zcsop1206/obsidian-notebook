@@ -78,7 +78,7 @@ Port `lab/study-reader/src/engine.js` and its 81 tests (`lab/study-reader/test/e
 - Rations per Decision 6; requests and answers per Decision 5. `budget(doc)` counts `rewrite-request` events since the doc's last rebuild landed.
 - Stages start at 1 for every basic Adit has opened, 0 for one never opened, and move only by drills, fog results, hooks and held problems (at most once a day per basic, as in the demo).
 - Deadlines come from `tracks.md` (`ContentIndex.tracks`); a basic's deadline is the nearest deadline of a track whose `docs` pattern matches it (`nt-*` style globs) or whose `areas` include its area. Weight 0 tracks are ignored.
-- Today: drills ranked by deadline then overdue days, two to four by the minutes setting; problem slots as the demo (stretch, every third slot hidden in push areas, one reach after three clean holds); one kata slot when the `asic` track is live.
+- Today: drills ranked by deadline then overdue days, two to four by the minutes setting; problem slots as the demo (three per live area, so the count varies; stretch, every third slot hidden in push areas, one reach after three clean holds); one kata slot when the `asic` track is live.
 - No simulated clock except an injected `now` for tests and `devTools`.
 
 ## The study view (S3 to S5)
@@ -95,7 +95,7 @@ Input rules (as the demo, and the reason the Pencil feels right):
 
 Peek: a popover with the target passage rendered (never a fogged proof, a problem's solution or a hidden pick's topic).
 
-Marks and triage (S5): on `lost`, call `engine.triage` and act on the result exactly as the demo's reader does for `rebuild-basic`, `scaffold`, `eligible`, `budget-exhausted`, plus `requested` (show "Rewrite requested <time>; /teach on the laptop will answer it"). Log the `mark` event (and `rewrite-request` / `rebuild-request` on the two taps).
+Marks and triage (S5): on `lost`, call `engine.triage` and act on the result exactly as the demo's reader does for `rebuild-basic`, `scaffold`, `eligible`, `budget-exhausted`, plus `requested` (show "Rewrite requested <time>; /teach on the laptop will answer it"). Log the `mark` event (and `rewrite-request` / `rebuild-request` on the two taps). A `rewrite-request` carries `rev`, the passage hash when asked. A rebuild of a linked basic asked from another doc logs `a` as `<doc>#<anchor>` (the passage where Adit was lost); it is answered when that basic's rebuild lands. One tap on a marked dot clears it.
 
 Changes panel: the doc's build, the rewrite budget, pending requests, the doc's marks, and the doc's `## Changes` section if it has one.
 
@@ -106,8 +106,8 @@ As the demo's block-fog.js, block-drill.js, block-problem.js and block-kata.js, 
 - **Fog** (proof callouts): push 0 one step per reveal, each reveal after 3 new strokes in the block; push 1 chunks; push 2 cold (blank-page drill of the theorem); push 3 a hook (problem-first, Decision 2). Ink after a reveal draws in the after-reveal colour. A clean proof collapses the text and shows "yours". Logs `fog`.
 - **Drill** (derive prompts, and cold proofs): blank-page canvas, Done after 3 strokes, then the steps or solution, then clean / shaky / failed. Replay with stall markers. Logs `drill`.
 - **Recall** (numbers cards): the prompt, a canvas, Show after 3 strokes, then clean / shaky / failed. Logs `drill` with `src: 'recall'`.
-- **Problem**: the statement (or the bank reference with its links), a call band where ink comes first and the confidence chips (50 to 90, and "-") unlock after ink, a timer, then held / missed / blind / moot (two taps), then two tick lists (methods called, methods used, from `methods.md` and the solution) and the solution. Hidden picks show "?" for the topic until settled. Logs `call` then `settle`.
-- **Kata**: design call (sketch + confidence) before the editor; the editor; Run executes the vectors (FORMAT.md semantics) in the interpreter and shows the first mismatch; settle; ticks. Logs `kata`.
+- **Problem**: the statement (or the bank reference with its links), a call band where ink comes first and the confidence chips (50 to 90, and "-") unlock after ink, a timer, then held / missed / blind / moot (two taps), then two tick lists (methods called, methods used, from `methods.md` and the solution) and the solution. Hidden picks show "?" for the topic until the called ticks are confirmed, and tick lists label methods by title, never by doc. Logs `call` then `settle`; a settled session with no ticks shows its tick step again on the next open, with "Skip ticks" (logs empty lists). Today and Map open a problem in a standalone view (`notebook-study-problem`, `ctx.ui.openProblem`) that never shows its doc; its ink is filed under `ink/problems.<device>.json`, keys `call:<id>` and `work:<id>`.
+- **Kata**: design call (sketch + confidence) before the editor; the editor; Run executes the vectors (FORMAT.md semantics) in the interpreter and shows the first mismatch; settle; ticks (or "Skip ticks"). Logs `kata` when the ticks are saved, retrying on the next open if the write failed.
 
 ## Today and Map (S8)
 
@@ -123,7 +123,8 @@ As the demo's block-fog.js, block-drill.js, block-problem.js and block-kata.js, 
 ## Testing
 
 - Unit tests (`test/unit/study-*.test.ts`, node:test, run by `npm run test:unit`): parser (done), engine (ported from the demo's 81), event store against a fake adapter, interpreter and vectors, triage flows.
-- View tests (`test/run_study_test.py`, Playwright on the mock harness, like run_view_test.py): open a fixture doc, follow and peek links with finger events, write with pen events over a link, mark a passage, the scaffold and the two-tap rewrite request, a fog reveal gated by strokes, a problem from call to settle, a kata run to the first mismatch, Today and Map render. Extend `test/mock-obsidian.js` with `MarkdownRenderer.render` (render markdown with a tiny converter is enough) and `vault.adapter.append`.
+- View tests (Playwright on the mock harness, like run_view_test.py, all in `npm test`): `test/run_study_test.py` (the view on the real plugin: library, links, back, peek, Pencil over links, tabs, page ink, marks over the engine, Today and Map; then S5 and S8 on a mock context), `test/run_study_ink_test.py` (anchored ink), `test/run_study_blocks_test.py` (fog, drill, recall, problem and the standalone problem view), `test/run_study_kata_test.py` (the kata block on an invented kata).
+- Real content: `test/run_study_content_check.py` with `STUDY_CONTENT_DIR` set opens every doc of a real study folder, Today and Map, and fails on a console error or a doc with missing passages. The folder is read into the mock vault in memory; it is never copied into the repo.
 - Every PR: `npm run build` and `npm run test:unit` pass; the PR says which iPad checks it needs.
 
 ## iPad checks for 0.15.0 (Adit)
