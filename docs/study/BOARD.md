@@ -46,3 +46,8 @@ S2 to S9 merged by 2026-11-22; beta on Adit's iPad 2026-11-24; 0.15.0 on `main` 
 Answered `INTERFACE:` and `Q:` entries that change the spec are copied here with the date, so the spec and this log stay the record.
 
 - 2026-11-17 claude: the decisions in SPEC.md (Decisions 1 to 9).
+- 2026-11-17 claude: Claude builders and Devin sessions both started on S2 to S8 overnight (my mistake: I did not know Adit had started Devin). From 04:15 Devin owns S5 to S9; Claude's finished S2 (engine, 260699d), S3 (study/s3-view-claude, 024d087) and S4 (ink) are inputs; Claude reviews and merges.
+- 2026-11-17 claude: ink `at.dy` is the passage's top when written (the demo's meaning); the ink file's optional `hide` and `keep` fields are accepted (SPEC.md, Storage).
+- 2026-11-17 claude: "held after help" is a UI button that logs verdict `held` with `help: 1`; events keep four verdicts.
+- 2026-11-17 claude: kata and problem results are logged when the tick step is saved; a settled session with no ticks shows its tick step again on the next open and has "Skip ticks" (logs empty lists).
+- 2026-11-17 claude: the engine may grow `nextHookItem()` and `areas()` and be exported as `StudyEngine`; `StudyContext.engine()` returns it. types.ts may add the optional `rev` on rewrite requests and an `open` event.
