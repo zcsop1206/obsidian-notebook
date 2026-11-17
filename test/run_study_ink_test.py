@@ -307,6 +307,49 @@ try:
         check('a synced stroke from the ipad appears', page.evaluate("() => pageInk.placements().some(p => p.key === 'ipad:s-ipad2')"))
         page.evaluate("() => pageInk.destroy()")
 
+        # --- 10. a surface's colour per stroke (provenance) and a theme repaint
+        red = page.evaluate("""() => {
+          window.ctx = mkctx('desktop'); renderDoc(D2); window.ink = studyInk.createInkApi(ctx);
+          const host = byA('h-order');
+          window.surf2 = ink.surface(D2, host, 'fog:p-order-thm', { height: 120, meta: () => ({ e: 1 }), color: s => (s.e ? '#ff0000' : '--text-normal') });
+          strokeOver(surf2.el, 30);
+          const c = surf2.el.querySelector('canvas'), g = c.getContext('2d'), d = g.getImageData(0, 0, c.width, c.height).data;
+          let r = 0; for (let i = 0; i < d.length; i += 4) if (d[i + 3] > 200 && d[i] > 200 && d[i + 1] < 60) r++;
+          return r;
+        }""")
+        check('a surface draws each stroke in its own colour (fog reveals in a second colour)', red > 50, red)
+        repainted = page.evaluate("""() => {
+          const s = ink.surface(D2, byA('h-units'), 'call:x', { height: 80 });
+          strokeOver(s.el, 20);
+          document.body.style.setProperty('--text-normal', '#00ff00');
+          app.workspace.trigger('css-change');
+          const c = s.el.querySelector('canvas'), d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+          let gr = 0; for (let i = 0; i < d.length; i += 4) if (d[i + 3] > 200 && d[i + 1] > 200 && d[i] < 60) gr++;
+          s.destroy(); surf2.destroy(); document.body.style.removeProperty('--text-normal');
+          return gr;
+        }""")
+        check('the default ink is the theme text colour, repainted on css-change', repainted > 50, repainted)
+
+        # --- 11. a tall doc: the page canvas covers a band around the view, within 16 M pixels
+        band = page.evaluate("""async () => {
+          window.ctx = mkctx('desktop'); renderDoc(D2, 24000); window.ink = studyInk.createInkApi(ctx);
+          window.pageInk = ink.page(D2, stack, passageTop);
+          await new Promise(r => setTimeout(r, 100));
+          const c = stack.querySelector(':scope > canvas.nb-study-ink-canvas');
+          const first = [parseFloat(c.style.top), c.width * c.height];
+          const leaf = document.getElementById('leaf');
+          byA('phi-prime').scrollIntoView();
+          await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+          strokeOver(byA('phi-prime'), 8);
+          const t = passageTop('phi-prime');
+          const second = [parseFloat(c.style.top), c.width * c.height, inkPixels(60, t, 400, t + 30), c.width / 920];
+          pageInk.destroy();
+          return { first, second };
+        }""")
+        f, s2 = band['first'], band['second']
+        check('a tall page draws a band, at full resolution and under 16 M pixels', f[1] <= 16_000_000 and s2[1] <= 16_000_000 and abs(s2[3] - 1.7) < 0.01, band)
+        check('scrolling far down moves the band and the ink is drawn there', s2[0] > 10000 and s2[2] > 50, band)
+
         check('no page errors', not errors, errors[:3])
         b.close()
 finally:

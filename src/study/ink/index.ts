@@ -32,6 +32,8 @@ const SURFACE_SKIP = 'button, input, textarea, select, label, [contenteditable="
 interface Shared {
   stores: Map<string, DocInkStore>;
   surfaces: Set<{ el: HTMLElement; canvas: InkCanvas }>;
+  /** Every live canvas (pages and surfaces), repainted when the theme changes. */
+  canvases: Set<InkCanvas>;
   wired: boolean;
 }
 
@@ -39,7 +41,7 @@ const shared = new WeakMap<StudyContext, Shared>();
 
 function sharedOf(ctx: StudyContext): Shared {
   let s = shared.get(ctx);
-  if (!s) { s = { stores: new Map(), surfaces: new Set(), wired: false }; shared.set(ctx, s); }
+  if (!s) { s = { stores: new Map(), surfaces: new Set(), canvases: new Set(), wired: false }; shared.set(ctx, s); }
   return s;
 }
 
@@ -61,6 +63,14 @@ function wire(ctx: StudyContext, sh: Shared): void {
   try {
     plugin?.register?.(() => { window.removeEventListener('pagehide', flush); document.removeEventListener('visibilitychange', onVis); flush(); });
   } catch { /* a test context without a plugin */ }
+  // Ink colours are theme tokens read at draw time, so a theme change only needs a repaint.
+  const ws = ctx.app?.workspace as unknown as { on?: (name: string, cb: () => void) => unknown } | undefined;
+  if (ws && typeof ws.on === 'function') {
+    try {
+      const ref = ws.on('css-change', () => { for (const c of sh.canvases) { try { c.redraw(); } catch (e) { console.error('[study] ink repaint', e); } } });
+      plugin?.registerEvent?.(ref);
+    } catch { /* an API without the event */ }
+  }
   // Another device's ink file changed on disk (a sync): re-read it in every store it belongs to.
   const vault = ctx.app?.vault as unknown as { on?: (name: string, cb: (f: { path?: string }) => void) => unknown } | undefined;
   if (vault && typeof vault.on === 'function') {
@@ -100,6 +110,8 @@ export function createInkApi(ctx: StudyContext): InkApi {
     return st;
   };
 
+  const track = (c: InkCanvas) => { sh.canvases.add(c); return () => { sh.canvases.delete(c); }; };
+
   const layoutSurfaces = (stack: HTMLElement) => {
     for (const s of sh.surfaces) if (stack.contains(s.el)) { try { s.canvas.layout(); } catch (e) { console.error('[study] ink surface layout', e); } }
   };
@@ -107,7 +119,7 @@ export function createInkApi(ctx: StudyContext): InkApi {
   return {
     page(doc: StudyDoc, stack: HTMLElement, passageTop: (anchor: string) => number | null): PageInk {
       const store = storeFor(doc.id);
-      return new PageInkImpl(doc, stack, passageTop, { ctx, store, layoutSurfaces, release: () => { void store.flush(); } });
+      return new PageInkImpl(doc, stack, passageTop, { ctx, store, layoutSurfaces, track, release: () => { void store.flush(); } });
     },
 
     surface(doc: StudyDoc, container: HTMLElement, key: string, opts?: InkSurfaceOptions): InkSurface {
@@ -134,6 +146,7 @@ export function createInkApi(ctx: StudyContext): InkApi {
       canvas.el.dataset.inkKey = key;
       const entry = { el: canvas.el, canvas };
       sh.surfaces.add(entry);
+      const untrack = track(canvas);
       const signature = (l: InkStroke[]) => l.map(s => `${strokeKey(s)}:${s.p.length}`).join(',');
       let sig = signature(mine());
       const off = store.onChange(() => {
@@ -159,6 +172,7 @@ export function createInkApi(ctx: StudyContext): InkApi {
           destroyed = true;
           off();
           sh.surfaces.delete(entry);
+          untrack();
           canvas.destroy();
           void store.flush();
         },

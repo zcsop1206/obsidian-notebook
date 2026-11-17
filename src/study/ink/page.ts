@@ -42,6 +42,8 @@ export interface PageDeps {
   store: DocInkStore;
   /** Re-lay out block surfaces inside this stack (their own ResizeObserver misses an ancestor's scale). */
   layoutSurfaces(stack: HTMLElement): void;
+  /** Tracks the canvas for theme repaints; returns the untrack. */
+  track(c: InkCanvas): () => void;
   release(): void;
 }
 
@@ -56,6 +58,7 @@ export class PageInkImpl implements PageInk {
   private chips: HTMLElement;
   private chipSig = '';
   private off: () => void;
+  private untrack: () => void;
   private destroyed = false;
 
   constructor(doc: StudyDoc, private stack: HTMLElement, private passageTop: (anchor: string) => number | null, private d: PageDeps) {
@@ -78,6 +81,7 @@ export class PageInkImpl implements PageInk {
       swallowClick: true,
       commit: s => this.commit(s),
     });
+    this.untrack = this.d.track(this.canvas);
     this.off = this.d.store.onChange(why => { if (!this.destroyed) { if (why === 'add') this.canvas.redraw(); else this.relayout(); } });
     this.relayout();
   }
@@ -252,6 +256,7 @@ export class PageInkImpl implements PageInk {
     if (this.destroyed) return;
     this.destroyed = true;
     this.off();
+    this.untrack();
     this.canvas.destroy();
     this.chips.remove();
     if (this.strip) this.strip.remove();
