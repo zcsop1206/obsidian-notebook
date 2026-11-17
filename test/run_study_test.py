@@ -352,13 +352,17 @@ def section_back(page):
       return scroller().scrollTop;
     }""")
     check('back: the long doc scrolls (setup)', top > 1000, str(top))
+    saves0 = page.evaluate("() => window.saveLayoutRequests || 0")
     page.evaluate("() => press(studyEl('a[data-study-to=\"fx-units#order-thm\"]'), 'touch', 50)")
     ok = wait_js(page, "() => V().currentDoc() === 'fx-units' && !!studyEl('.sr-passage[data-a=\"order-thm\"].sr-flash')", 4000)
     check('back: followed into fx-units', ok)
+    saves1 = page.evaluate("() => window.saveLayoutRequests || 0")
     page.click('.nb-study-hdr [data-act="back"]')
     ok = wait_js(page, "() => V().currentDoc() === 'fx-long' && V().renderDone()", 4000)
     now = page.evaluate("() => scroller().scrollTop")
     check('back: returns to the doc at the same scroll position', ok and abs(now - top) <= 2, f'{now} vs {top}')
+    saves2 = page.evaluate("() => window.saveLayoutRequests || 0")
+    check('back: following a link and Back each ask Obsidian to save the layout', saves1 > saves0 and saves2 > saves1, f'{saves0} {saves1} {saves2}')
     # Back across a dropped render (the doc is rendered again from scratch).
     page.evaluate("() => press(studyEl('a[data-study-to=\"fx-units#order-thm\"]'), 'touch', 50)")
     wait_doc(page, 'fx-units')
@@ -425,6 +429,47 @@ def section_pen(page):
       return { pen: pen.defaultPrevented, finger: finger.defaultPrevented };
     }""")
     check('pen: a stylus touch on the page is held from scrolling; a finger is not', r['pen'] and not r['finger'], json.dumps(r))
+    # A Pencil tap still reaches the page ink's controls: role=button and no-ink elements are not held.
+    r = page.evaluate("""() => {
+      const body = studyEl('.nb-study-passages'), box = document.createElement('div');
+      box.className = 'test-pen-controls';
+      box.innerHTML = '<span role="button">b</span><div class="no-ink">n</div><div class="nb-study-no-ink">s</div>';
+      body.appendChild(box);
+      const out = [...box.children].map(el => {
+        const t = new Touch({ identifier: 2, target: el, clientX: 10, clientY: 10 });
+        Object.defineProperty(t, 'touchType', { value: 'stylus' });
+        const ev = new TouchEvent('touchstart', { bubbles: true, cancelable: true, touches: [t], changedTouches: [t] });
+        el.dispatchEvent(ev);
+        return ev.defaultPrevented;
+      });
+      box.remove();
+      return out;
+    }""")
+    check('pen: a stylus touch on role=button, .no-ink or .nb-study-no-ink is not held', r == [False, False, False], json.dumps(r))
+    # Inside a block (proof steps, problem statements, derive prompts) the Pencil writes over a link
+    # as on the rest of the page; only on the ink's controls (.no-ink) does it tap like a finger.
+    page.evaluate("""() => {
+      const blk = studyEl('.sr-block');
+      const a = document.createElement('a');
+      a.className = 'internal-link sr-ref test-block-link';
+      a.setAttribute('href', '#'); a.setAttribute('data-study-to', 'fx-div#bezout'); a.textContent = 'Bezout in a block';
+      blk.appendChild(a);
+      const c = document.createElement('div');
+      c.className = 'no-ink test-block-control';
+      c.innerHTML = '<a class="internal-link sr-ref" href="#" data-study-to="fx-div#bezout">Bezout on a control</a>';
+      blk.appendChild(c);
+    }""")
+    before = page.evaluate("() => ({ depth: V().backDepth(), pen: V().gestureStats().penIgnored, block: studyEl('.sr-block').getAttribute('data-block') })")
+    page.evaluate("() => press(studyEl('.test-block-link'), 'pen', 60)")
+    page.wait_for_timeout(200)
+    after = page.evaluate("() => ({ doc: V().currentDoc(), depth: V().backDepth(), pen: V().gestureStats().penIgnored })")
+    check('pen over a link inside a block: writes, never follows', after['doc'] == 'fx-units' and after['depth'] == before['depth'] and after['pen'] == before['pen'] + 1, json.dumps([before, after]))
+    page.evaluate("() => press(studyEl('.test-block-control a'), 'pen', 60)")
+    ok = wait_js(page, "() => V().currentDoc() === 'fx-div'", 3000)
+    check('pen on a link in a no-ink control: taps like a finger and follows', ok)
+    page.evaluate("() => V().back()")
+    wait_doc(page, 'fx-units')
+    page.evaluate("() => document.querySelectorAll('.test-block-link, .test-block-control').forEach(e => e.remove())")
 
 
 def section_tabs(page):
@@ -443,9 +488,24 @@ def section_tabs(page):
     page.click('.nb-study-tab[data-tab="g-017"] .nb-study-tab-open')
     ok2 = wait_js(page, "() => V().currentDoc() === 'g-017'", 3000)
     check('tabs: switching shows each doc, keeping its scroll', ok and ok2 and page.evaluate("() => scroller().scrollTop") == page.evaluate("() => Math.min(40, scroller().scrollHeight - scroller().clientHeight)"))
+    saves = page.evaluate("() => window.saveLayoutRequests || 0")
     page.click('.nb-study-tab[data-tab="g-017"] .nb-study-tab-close')
     ok = wait_js(page, "() => V().currentDoc() === 'g-016' && V().openTabs().length === 5", 3000)
     check('tabs: closing the active tab shows its neighbour', ok)
+    check('tabs: switching and closing tabs ask Obsidian to save the layout', page.evaluate("() => window.saveLayoutRequests || 0") > saves)
+    saves = page.evaluate("() => window.saveLayoutRequests || 0")
+    page.click('.nb-study-tab[data-tab="g-013"] .nb-study-tab-close')
+    ok = wait_js(page, "() => V().openTabs().length === 4 && V().currentDoc() === 'g-016'", 3000)
+    check('tabs: closing a background tab saves the layout', ok and page.evaluate("() => window.saveLayoutRequests || 0") == saves + 1)
+    # The cache holds only the open tabs, also when a new doc opens from the oldest tab (the one
+    # the strip drops): its rendered DOM, blocks and page ink go with the tab.
+    for d in ['g-030', 'g-031']:
+        open_doc(page, d)
+    page.click('.nb-study-tab[data-tab="g-012"] .nb-study-tab-open')
+    ok = wait_js(page, "() => V().currentDoc() === 'g-012' && V().openTabs().length === 6 && V().openTabs()[0] === 'g-012'", 3000)
+    open_doc(page, 'g-032')
+    r = page.evaluate("() => ({ tabs: V().openTabs(), cache: V().cachedDocs(), docs: document.querySelectorAll('.nb-study-doc').length })")
+    check('tabs: a 7th doc opened from the oldest tab leaves the cache equal to the tabs', ok and sorted(r['cache']) == sorted(r['tabs']) and len(r['tabs']) == 6 and 'g-012' not in r['cache'], json.dumps(r))
 
 
 def section_header(page):

@@ -17,6 +17,7 @@ import type { ContentIndex, Passage, StudyDoc } from '../types';
 import { MODEL_LABEL } from '../format/parse';
 import { mountFor } from '../blocks/index';
 import { createInkApi } from '../ink/index';
+import { PAGE_INK_SKIP } from '../ink/page';
 import type { BlockEnv, BlockHandle, InkApi, Marks, MarksHost, PageInk } from './host';
 import { attachMarks } from './marks';
 import { openChanges } from './changes';
@@ -120,6 +121,8 @@ export class StudyView extends ItemView {
   backDepth(): number { return this.backStack.length; }
   /** The doc on screen has every passage rendered (tests). */
   renderDone(): boolean { return !!this.current && this.current.done; }
+  /** The docs whose rendered DOM is cached (tests): always the open tabs. */
+  cachedDocs(): string[] { return [...this.cache.keys()]; }
   /** The gesture counters (tests). */
   gestureStats(): LinkGestures['stats'] | null { return this.gestures ? this.gestures.stats : null; }
 
@@ -154,7 +157,9 @@ export class StudyView extends ItemView {
     this.registerDomEvent(c.ownerDocument, 'keydown', e => this.onKey(e));
     this.gestures = new LinkGestures(c, {
       linkAt: t => this.linkAt(t),
-      penWrites: a => !!this.current && this.current.body.contains(a) && !a.closest('.sr-block, .no-ink'),
+      // The Pencil writes over a link wherever the page ink writes (block text included: proof
+      // steps, problem statements, derive prompts) and taps it only on the ink's controls.
+      penWrites: a => !!this.current && this.current.body.contains(a) && !a.closest(PAGE_INK_SKIP),
       follow: a => this.followLink(a),
       peek: a => this.peekLink(a),
       down: e => { if (!this.peekEl.isShown() || !(e.target instanceof Node) || !this.peekEl.contains(e.target)) this.closePeek(); },
@@ -295,6 +300,7 @@ export class StudyView extends ItemView {
     }
     this.closePeek();
     const r = this.show(docId, doc);
+    this.saveLayout();
     if (!anchor) {
       this.scroller.scrollTop = 0;
       this.stats.lastOpenMs = performance.now() - t0;
@@ -332,6 +338,7 @@ export class StudyView extends ItemView {
     if (!doc) { this.ctx.ui.toast('That doc is no longer in the study folder.'); return; }
     this.closePeek();
     const r = this.show(b.doc, doc);
+    this.saveLayout();
     await r.until(Infinity);
     if (r !== this.current) return;
     this.updateSize();
@@ -365,6 +372,7 @@ export class StudyView extends ItemView {
     else r.doc = doc;
     this.ensureTab(docId);
     if (this.current !== r) this.attach(r);
+    this.pruneCache();
     this.libEl.hide();
     this.renderTabs();
     return r;
@@ -392,6 +400,21 @@ export class StudyView extends ItemView {
       const [gone] = this.tabs.splice(k, 1);
       if (gone !== this.current?.doc.id) this.drop(gone);
     }
+  }
+
+  /**
+   * Keep the cache to the open tabs. ensureTab cannot drop a tab that is the doc on screen (the
+   * oldest tab, when a new doc opens from it); once the new doc is attached, it goes here.
+   */
+  private pruneCache(): void {
+    for (const id of [...this.cache.keys()]) {
+      if (!this.tabs.includes(id) && this.cache.get(id) !== this.current) this.drop(id);
+    }
+  }
+
+  /** The tabs and the doc on screen are the view's state (getState): ask Obsidian to save the layout. */
+  private saveLayout(): void {
+    void this.app.workspace.requestSaveLayout();
   }
 
   private drop(id: string): void {
@@ -675,7 +698,7 @@ export class StudyView extends ItemView {
       const wasCurrent = this.current?.doc.id === id;
       this.drop(id);
       if (wasCurrent) void this.switchTab(this.tabs[Math.max(0, i - 1)]);
-      else this.renderTabs();
+      else { this.renderTabs(); this.saveLayout(); }
       return;
     }
     const open = t?.closest?.('[data-open-tab]');
@@ -690,6 +713,7 @@ export class StudyView extends ItemView {
     if (!doc) { this.tabs = this.tabs.filter(t => t !== id); this.renderTabs(); return; }
     this.closePeek();
     const r = this.show(id, doc);
+    this.saveLayout();
     const top = r.scroll;
     if (top > 0) await r.until(Infinity);
     if (r !== this.current) return;

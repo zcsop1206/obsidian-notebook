@@ -469,6 +469,8 @@
     getActiveFile() { const v = this.activeLeaf && this.activeLeaf.view; return v && v.file ? v.file : null; }
     getActiveViewOfType(cls) { const v = this.activeLeaf && this.activeLeaf.view; return v instanceof cls ? v : null; }
     getMostRecentLeaf() { return this.activeLeaf; }
+    /** Study view (S3): counted in window.saveLayoutRequests (Obsidian debounces the save). */
+    requestSaveLayout() { window.saveLayoutRequests = (window.saveLayoutRequests || 0) + 1; return this; }
     /** Study view (S3): opens a vault link; recorded in window.openedLinks. */
     async openLinkText(linktext, sourcePath, newLeaf) { (window.openedLinks ??= []).push({ linktext, sourcePath, newLeaf }); }
   }

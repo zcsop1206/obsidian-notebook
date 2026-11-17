@@ -20,8 +20,8 @@ export function hasStylus(e: TouchEvent): boolean {
   return Array.from(e.changedTouches).some(t => (t as Touch & { touchType?: string }).touchType === 'stylus');
 }
 
-/** Elements a Pencil tap must still reach on the page. */
-export const PEN_CONTROLS = 'button, select, input, textarea, label, summary, [contenteditable="true"], [contenteditable=""], .nb-study-control';
+/** Elements a Pencil tap must still reach on the page (the page ink's PAGE_INK_SKIP controls, plus the view's own). */
+export const PEN_CONTROLS = 'button, select, input, textarea, label, summary, [contenteditable="true"], [contenteditable=""], [role="button"], .no-ink, .nb-study-no-ink, .nb-study-control';
 
 export interface GestureHost {
   /** The link under an event target that this view handles, or null. */
