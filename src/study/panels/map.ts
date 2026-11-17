@@ -294,7 +294,12 @@ export class MapView extends ItemView {
     kv.createEl('dt', { text: 'Rests on' });
     const restDd = kv.createEl('dd');
     this.linkRow(restDd, d.needs);
-    const feeds = [...(content.usedBy.get(id) || [])];
+    // Only basics and topics: usedBy also holds kata docs, and a hidden kata's title must never show.
+    const feeds = (content.usedBy.get(id) || []).filter(f => {
+      const fd = content.docs.get(f);
+      if (!fd || (fd.kind !== 'basic' && fd.kind !== 'topic')) return false;
+      return fd.kata?.level !== 'hidden' && content.katas.get(f)?.level !== 'hidden';
+    });
     kv.createEl('dt', { text: 'Feeds' });
     const feedDd = kv.createEl('dd');
     this.linkRow(feedDd, feeds);
@@ -496,6 +501,7 @@ export const MAP_CSS = `
 .nb-map-need { display: inline-flex; gap: 5px; align-items: center; border: 1px solid var(--background-modifier-border, #ccc);
   border-radius: 10px; padding: 2px 8px; font-size: 12px; cursor: pointer; background: var(--background-primary, #fff); color: var(--text-normal, #222); }
 .nb-map-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; }
-.nb-map-dot.s0 { background: #9e9e9e; } .nb-map-dot.s1 { background: #c25e00; } .nb-map-dot.s2 { background: #b8860b; }
-.nb-map-dot.s3 { background: #6b8e23; } .nb-map-dot.s4 { background: #2e7d32; } .nb-map-dot.s5 { background: #00695c; }
+.nb-map-dot.s0, .nb-map-sw.s0 { background: #9e9e9e; } .nb-map-dot.s1, .nb-map-sw.s1 { background: #c25e00; }
+.nb-map-dot.s2, .nb-map-sw.s2 { background: #b8860b; } .nb-map-dot.s3, .nb-map-sw.s3 { background: #6b8e23; }
+.nb-map-dot.s4, .nb-map-sw.s4 { background: #2e7d32; } .nb-map-dot.s5, .nb-map-sw.s5 { background: #00695c; }
 `;
