@@ -32,14 +32,14 @@ Where Claude (Claude Code on Adit's laptop), Devin sessions and Adit coordinate 
 | S7 | Problem block | devin | S1 | `src/study/blocks/problem.ts`, `test/unit/study-problem.test.ts` | done (#82) |
 | S8 | Today and Map | devin | S1; S2's engine when merged | `src/study/panels/*` | done (#84) |
 | S9 | Kata: interpreter, vectors, block | devin | S1 | `src/study/kata/*`, `src/study/blocks/kata.ts`, `test/unit/study-kata.test.ts` | done (#83) |
-| S10 | Laptop bridge and /teach v2 | claude | S2 | `scripts/study-scan.mjs`; the teach skill in the portfolio repo | open |
-| S11 | Release 0.15.0 | claude, adit | all | `manifest.json`, `versions.json`, `CONTEXT.md` | open |
+| S10 | Laptop bridge and /teach v2 | claude | S2 | `scripts/study-scan.mjs`; the teach skill in the portfolio repo | done (in 0.15.0) |
+| S11 | Release 0.15.0 | claude, adit | all | `manifest.json`, `versions.json`, `CONTEXT.md` | done: 0.15.0 released 2026-11-17 (#86) |
 
 S2 to S9 can all start now: each codes against the interfaces in `types.ts`, `context.ts` and `view/host.ts`, with stubs already in place so the plugin builds and behaves as before at every step. A view test section that needs another ticket's work is marked skip until that ticket merges.
 
 ## Dates
 
-S2 to S9 merged by 2026-11-22; beta on Adit's iPad 2026-11-24; 0.15.0 on `main` 2026-11-28; no release 2026-12-01 to 12-05.
+S2 to S9 merged and 0.15.0 released on 2026-11-17, ahead of the plan. Adit's iPad checks (the end of SPEC.md) by 2026-11-20; fixes they need ship as 0.15.1 by 2026-11-27; then no release until Putnam is over (2026-12-05).
 
 ## Decisions log
 
@@ -59,3 +59,4 @@ Answered `INTERFACE:` and `Q:` entries that change the spec are copied here with
 - 2026-11-17 claude: a cross-doc rebuild request (`a` = `<doc>#<anchor>`) shows in Today as "<basic> (lost at <doc> #<anchor>)" and opens the basic at its top; the Changes panel lists it on both docs (review note on #84).
 - 2026-11-17 claude: a basic/anchor method in a tick list is labelled by its callout title only (the demo's `mLabel`), so a hidden pick's list never names its doc (review note on #82).
 - 2026-11-17 claude: accepted as built: Today has three problem slots per live area (the demo's slotSpecs), so the pick count varies; a problem opened from Today files its ink under `ink/problems.<device>.json` while its session (phase, verdict, ticks) is shared with the in-doc block, so the call ink of a session started in its doc does not show in the standalone view (open: to be revisited after Adit's iPad check); a hidden pick's topic shows once the called ticks are confirmed; "Skip ticks" appears only when a settled card is opened again.
+- 2026-11-17 claude: S10 done (`scripts/study-scan.mjs` here; `/teach` v2 in the portfolio repo, its PR #29). S11 done: on Adit's go-ahead, #86 merged `study-mode` into `main` (922da0c) and `release.yml` (workflow_dispatch) published 0.15.0 as the latest release. Fixes from Adit's iPad checks come in as tickets into `study-mode` and ship as 0.15.1.
