@@ -47,6 +47,24 @@ export interface PageDeps {
   release(): void;
 }
 
+
+/**
+ * The stack's content height in paper px, measured from its in-flow children so the ink's own
+ * absolutely positioned layers (the canvas, the chips) never hold the height up: when content
+ * shrinks (a proof collapses, the orphan strip goes), the canvas shrinks with it.
+ */
+export function contentHeight(stack: HTMLElement): number {
+  let bottom = 0;
+  for (const c of Array.from(stack.children) as HTMLElement[]) {
+    if (c.classList.contains('nb-study-ink-canvas') || c.classList.contains('nb-study-ink-chips')) continue;
+    const cs = getComputedStyle(c);
+    if (cs.position === 'absolute' || cs.position === 'fixed' || cs.display === 'none') continue;
+    bottom = Math.max(bottom, c.offsetTop + c.offsetHeight + (parseFloat(cs.marginBottom) || 0));
+  }
+  const pad = parseFloat(getComputedStyle(stack).paddingBottom) || 0;
+  return Math.max(1, Math.ceil(bottom + pad));
+}
+
 export class PageInkImpl implements PageInk {
   private doc: StudyDoc;
   private revs: Map<string, string>;
@@ -70,7 +88,7 @@ export class PageInkImpl implements PageInk {
     const W = stack.offsetWidth > 0 ? stack.offsetWidth : PAPER_WIDTH;
     this.canvas = new InkCanvas({
       width: W,
-      height: () => Math.max(stack.offsetHeight, stack.scrollHeight, 1),
+      height: () => contentHeight(stack),
       overlay: true,
       host: stack,
       strokes: () => this.d.store.strokesOf(null),

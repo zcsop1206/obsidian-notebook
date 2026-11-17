@@ -114,6 +114,8 @@ export class InkCanvas {
   private bandH = 1;
   private live: Live | null = null;
   private raf = 0;
+  /** The live stroke's own frame, so a layout asked for mid-stroke is never dropped. */
+  private liveRaf = 0;
   private scrollRaf = 0;
   private destroyed = false;
   private ro: ResizeObserver | null = null;
@@ -388,7 +390,7 @@ export class InkCanvas {
     const L = this.live;
     if (!L) return;
     L.last = addSamples(L.stroke.p as InkPoint[], L.last, samples, { ...L.map, t0: L.ts0, mouse: L.type === 'mouse' });
-    if (!this.raf) this.raf = requestAnimationFrame(() => { this.raf = 0; if (this.live) this.drawLive(); });
+    if (!this.liveRaf) this.liveRaf = requestAnimationFrame(() => { this.liveRaf = 0; if (this.live) this.drawLive(); });
   }
 
   private finish(): void {
@@ -410,6 +412,7 @@ export class InkCanvas {
     this.cleanups = [];
     if (this.ro) this.ro.disconnect();
     if (this.raf) cancelAnimationFrame(this.raf);
+    if (this.liveRaf) cancelAnimationFrame(this.liveRaf);
     if (this.scrollRaf) cancelAnimationFrame(this.scrollRaf);
     this.canvas.remove();
     if (!this.o.overlay) this.el.remove();
