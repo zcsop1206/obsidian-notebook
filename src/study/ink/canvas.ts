@@ -335,6 +335,8 @@ export class InkCanvas {
 
   private down(e: PointerEvent): void {
     if (this.destroyed || this.live) return;
+    // Any new press (a finger's tap, a mouse click, a pen on a control) clicks normally.
+    this.lastPenUp = -Infinity;
     if (e.pointerType === 'touch') return; // fingers scroll, tap and peek
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     if (this.isRO()) return;
