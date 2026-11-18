@@ -106,6 +106,19 @@ SETUP = r"""
     target.dispatchEvent(new PointerEvent('pointerup', init(r.left + 40 + 12 * 14, y0, { buttons: 0, pressure: 0 })));
   };
   window.surf = (key, scope = box) => scope.querySelector(`[data-ink-key="${CSS.escape(key)}"]`);
+  /* Ink pixels (alpha > 0) a surface's own canvas shows between paper rows y0 and y1 (800 px paper). */
+  window.inkRows = (el, y0, y1) => {
+    const c = el && el.querySelector('canvas');
+    if (!c || !c.width) return -1;
+    const k = c.width / 800, Y = Math.max(0, Math.floor(y0 * k)), h = Math.min(c.height - Y, Math.ceil((y1 - y0) * k));
+    if (h <= 0) return 0;
+    const d = c.getContext('2d').getImageData(0, Y, c.width, h).data;
+    let n = 0;
+    for (let i = 3; i < d.length; i += 4) if (d[i] > 0) n++;
+    return n;
+  };
+  /* A surface's paper height in paper px, from its size on screen. */
+  window.paperH = el => { const r = el.getBoundingClientRect(); return r.width ? r.height * 800 / r.width : 0; };
   window.btn = (act, scope = box) => scope.querySelector(`button[data-sb="${act}"]`);
   window.click = (b) => { b.click(); };
   window.evs = type => events.filter(e => e.type === type);
@@ -447,6 +460,38 @@ try:
         check('a content change while strokes are pending runs a second pass, which copies nothing', r['ran'] and r['pass2'] == {'copied': 0, 'pending': 1}, r)
         check('once the missing problem\'s doc arrives, the next pass copies its strokes', r['pass3'] == {'copied': 1, 'pending': 0} and r['late'] == ['s-pass-late'], r)
         check('with nothing pending, a content change starts no pass', r['idle'] is True, r)
+
+        # --- 11. S12 review: the work paper fits work written lower in the other place (the doc's
+        # block and the standalone view share the work ink). A work stroke at paper y 1000 in the
+        # home doc's ink file, past the 480 px the paper starts at: the block's work paper shows it
+        # once the store loads and on a remount; one a sync brings later, lower still, grows it again.
+        r = ev(page, """async () => {
+          const at = (id, t0, blk, y) => ({ id, p: [[40, y - 10, 0.5, 0], [300, y, 0.5, 300]], t0, blk });
+          fs.set('study/ink/s12-tall.desktop.json', JSON.stringify({ v: 1, doc: 's12-tall', strokes: [
+            at('s-tall-call', 21, 'call:inv-s12-tall', 60), at('s-tall-work', 22, 'work:inv-s12-tall', 1000)] }));
+          window.inkCtx = Object.assign({}, ctx); window.ink = studyBlocks.createInkApi(inkCtx);
+          mountBlock('problem', 's12-tall', 'inv-s12-tall');
+          for (let i = 0; i < 100 && btn('conf').disabled; i++) await new Promise(r => setTimeout(r, 20));
+          box.querySelector('button[data-conf="60"]').click();
+          const w = surf('work:inv-s12-tall');
+          // The paper shows once the call is committed; it lays out at its new height a frame later.
+          for (let i = 0; i < 100 && !(paperH(w) > 1000); i++) await new Promise(r => setTimeout(r, 20));
+          const loaded ={ phase: box.querySelector('.nb-sb-pb').dataset.phase, paper: paperH(w), ink: inkRows(w, 985, 1005) };
+          handle.destroy();
+          mountBlock('problem', 's12-tall', 'inv-s12-tall');
+          const w2 = surf('work:inv-s12-tall');
+          return { loaded, remount: { paper: paperH(w2), ink: inkRows(w2, 985, 1005) } };
+        }""")
+        check('work low in the home doc\'s file makes the block\'s work paper tall enough to show it', r['loaded']['phase'] == 'attempt' and r['loaded']['paper'] > 1000 and r['loaded']['ink'] > 0, r)
+        check('remounted with the ink already loaded, the work paper starts tall enough', r['remount']['paper'] > 1000 and r['remount']['ink'] > 0, r)
+        r = ev(page, """async () => {
+          externalWrite('study/ink/s12-tall.laptop.json', JSON.stringify({ v: 1, doc: 's12-tall', strokes: [
+            { id: 's-tall-sync', p: [[40, 1890, 0.5, 0], [300, 1900, 0.5, 300]], t0: 23, blk: 'work:inv-s12-tall' }] }));
+          const w = surf('work:inv-s12-tall');
+          for (let i = 0; i < 100 && paperH(w) < 1900; i++) await new Promise(r => setTimeout(r, 20));
+          return { paper: paperH(w), ink: inkRows(w, 1885, 1905) };
+        }""")
+        check('work a sync brings later, lower still, grows the work paper again', r['paper'] > 1900 and r['ink'] > 0, r)
 
         page.screenshot(path=os.path.join(OUT, 'study-blocks.png'))
         check('no page errors', not errors, errors[:3])
