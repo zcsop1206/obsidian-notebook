@@ -40,11 +40,12 @@ Where Claude (Claude Code on Adit's laptop), Devin sessions and Adit coordinate 
 | S12 | Problems from Today, as in their doc | devin | | `src/study/blocks/register.ts`; the image rules in `styles.css`; image resolution in `test/mock-obsidian.js`; a section of `test/run_study_blocks_test.py`; additions to `test/unit/study-problem.test.ts`; new `test/fixtures/study-blocks/s12-*` | done (#89) |
 | S13 | Ink on figures in problems and drills | devin | S12 for its cross-view check only | `src/study/blocks/figure-ink.ts` (new); the figure hooks in `src/study/blocks/problem.ts` and `drill.ts`, and their CSS in `drill.ts`'s `BLOCK_CSS`; `test/unit/study-figure-ink.test.ts`; `test/run_study_figure_ink_test.py`; `test/fixtures/study-figure-ink/*`; its lines in `package.json` | done (#88) |
 | S14 | Tracks: `;` sections and `hidden: never` | devin | | `trackMatches` and `hiddenOK` in `src/study/engine/state.ts`; `parseTracks` in `src/study/format/parse.ts`; additions to `test/unit/study-engine.test.ts` and `test/unit/study-parse.test.ts` | done (#87) |
-| S15 | Figure and solution lint, content check, FORMAT; examples' solutions in the view | claude | | `scripts/study-scan.mjs`, `scripts/study-scan.test.mjs`, `test/run_study_content_check.py`, `docs/study/FORMAT.md`; `isUnrendered` in `src/study/view/model.ts` and its view test section | open: 0.15.1 |
+| S15 | Figure and solution lint, content check, FORMAT; examples' solutions in the view | claude | | `scripts/study-scan.mjs`, `scripts/study-scan.test.mjs`, `test/run_study_content_check.py`, `docs/study/FORMAT.md`; `isUnrendered` in `src/study/view/model.ts` and its view test section | done (#90) |
 | S16 | Release 0.15.1 | claude, adit | S12 to S15; fixes from the 11-20 iPad checks | `manifest.json`, `versions.json`, `CONTEXT.md`, board statuses | by 2026-11-25 |
 | S17 | Circuit lab page | claude | | `lab/circuit-lab/*`, `test/reference/*` | open: no release |
+| S18 | Page ink over passage figures in dark mode | claude | | `src/study/ink/page.ts` and its CSS | open: 0.15.1 if small |
 
-Wave 1 (0.15.1): S12, S13 and S14 (Devin) merged on 2026-11-18, in that order, after review and a fix pass. S15 and S17 (Claude) are open. A view test section that needs another ticket's work is marked skip until that ticket merges.
+Wave 1 (0.15.1): S12, S13 and S14 (Devin) merged on 2026-11-18, in that order, after review and a fix pass. S15 merged on 2026-11-18. S17 and S18 (Claude) are open. A view test section that needs another ticket's work is marked skip until that ticket merges.
 
 ## Dates
 
@@ -98,3 +99,4 @@ Answered `INTERFACE:` and `Q:` entries that change the spec are copied here with
   - Require width and height on SVG roots.
   - Since the resolving mock, "every embedded figure exists" cannot fail; a missing figure shows as `unresolved: <alt>` in the per-doc load check.
   - Page ink over figures in ordinary passages has the same dark-mode contrast problem that figure ink had.
+- 2026-11-18 claude: S15 merged (#90). It also touched `src/study/view/view.ts`, `src/study/view/marks.ts` (S5's: dots drifted from their passages far down a doc; the scale now comes from the margin's width), `src/study/ink/page.ts` (no page ink on a solution callout: an example's solution is folded on every load, so ink on it would land on the passages below), `src/study/engine/state.ts` (`trackDocsMatch`, a pure matcher the lint shares) and `test/mock-obsidian.js` (a click on a foldable callout's title folds it). New lint warning `tags-area`: a tags row whose area cell holds more than one area gets one area no track reaches, so Today never picks that problem. FORMAT now says one area per tags row. Known limits of the lint, left as they are: names are matched case-sensitively, an embed whose alt text holds brackets or wraps a line is not seen, and a solution run on into its item is not seen (FORMAT says so).
