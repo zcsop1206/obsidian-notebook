@@ -153,9 +153,27 @@ export function isKataOwnCode(doc: StudyDoc, p: Passage): boolean {
   return doc.kind === 'kata' && p.kind === 'code' && (p.lang === 'skeleton' || p.lang === 'vectors');
 }
 
-/** Passages that get no element on the page: solutions (their block shows them) and kata-owned code. */
+/** A solution callout, whatever it belongs to. Peeks and search never show one. */
+export function isSolution(p: Passage): boolean {
+  return p.block?.type === 'solution' || (p.kind === 'callout' && p.callout?.type === 'solution');
+}
+
+/** Blocks that show their own solution: a problem after its settle, a derive's drill and a recall card after grading. */
+const SHOWS_OWN_SOLUTION = new Set<string>(['problem', 'drill', 'recall']);
+
+/**
+ * Passages that get no element on the page: a solution whose item (its block id, the passage right
+ * above it) is a block that shows it, and kata-owned code. An example is not a block, so its
+ * solution renders as the folded callout it is, closed until tapped; so does a solution that
+ * belongs to nothing.
+ */
 export function isUnrendered(doc: StudyDoc, p: Passage): boolean {
-  return p.block?.type === 'solution' || (p.kind === 'callout' && p.callout?.type === 'solution') || isKataOwnCode(doc, p);
+  if (p.block?.type === 'solution') {
+    const id = p.block.id;
+    const item = doc.passages.find(q => q.anchor === id);
+    return !!item?.block && SHOWS_OWN_SOLUTION.has(item.block.type);
+  }
+  return isKataOwnCode(doc, p);
 }
 
 const PLACEHOLDER: Record<string, string> = {
@@ -190,8 +208,9 @@ export function peekParts(doc: StudyDoc, anchor: string | null): PeekPart[] {
   }
   const out: PeekPart[] = [];
   for (const p of list) {
-    if (p.kind === 'label' || p.kind === 'rule' || isUnrendered(doc, p)) continue;
-    if (p.callout?.type === 'proof' || p.callout?.type === 'solution') { out.push({ placeholder: PLACEHOLDER.fog, anchor: p.anchor }); continue; }
+    // Every solution is left out, an example's too (the page shows that one folded): a peek never gives an answer away.
+    if (p.kind === 'label' || p.kind === 'rule' || isSolution(p) || isUnrendered(doc, p)) continue;
+    if (p.callout?.type === 'proof') { out.push({ placeholder: PLACEHOLDER.fog, anchor: p.anchor }); continue; }
     if (p.block) { out.push({ placeholder: PLACEHOLDER[p.block.type] ?? 'Open the doc to see this.', anchor: p.anchor }); continue; }
     out.push({ markdown: p.markdown, anchor: p.anchor });
   }

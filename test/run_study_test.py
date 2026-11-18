@@ -5,7 +5,8 @@
 # proofs or solutions), every passage rendered with its data-a, block mounts, finger taps that
 # follow and flash, Back with scroll restore, a 450 ms hold that peeks (never a proof), Pencil
 # events over a link that do not navigate, tabs, the header buttons, the protocol handler, "Open
-# as study doc", re-render on a content change, and the layout at 1024x768 and 390x844.
+# as study doc", re-render on a content change, page ink, a worked example's folded solution
+# (opens on a finger tap, ink and marks follow), and the layout at 1024x768 and 390x844.
 # A second part (part_marks_panels) runs S5's marks and S8's Today and Map against the mock
 # StudyContext and mock engine in test/out/study-fixture.js (built by test/build.mjs).
 # Port: NB_STUDY_TEST_PORT, else NB_TEST_PORT_BASE + 6 (8771). Screenshots land in test/out/.
@@ -118,10 +119,13 @@ SETUP_JS = """(files) => {
     el.dispatchEvent(new PointerEvent('pointerup', { ...base, buttons: 0, clientX: x + (opts.move || 0), clientY: y + (opts.move || 0) }));
     if (!opts.noClick) el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, composed: true, clientX: x, clientY: y, detail: 1 }));
   };
-  // The passages the view must render for a doc: all but solutions and kata-owned code.
+  // The passages the view must render for a doc: all but the solutions whose item (the passage
+  // their block names) is a block, which shows them itself, and kata-owned code. An example is no
+  // block, so its solution is on the page.
   window.expectedAnchors = id => {
     const d = plugin.study.content().docs.get(id);
-    return d.passages.filter(p => !(p.block && p.block.type === 'solution') && !(p.callout && p.callout.type === 'solution')
+    const itemIsBlock = a => d.passages.some(q => q.anchor === a && !!q.block);
+    return d.passages.filter(p => !(p.block && p.block.type === 'solution' && itemIsBlock(p.block.id))
       && !(d.kind === 'kata' && p.kind === 'code' && (p.lang === 'skeleton' || p.lang === 'vectors'))).map(p => p.anchor);
   };
   window.renderedAnchors = () => [...document.querySelectorAll('.nb-study-doc .sr-passage[data-a]')].map(e => e.getAttribute('data-a'));
@@ -283,7 +287,7 @@ def section_render(page):
     check('render: a library row opens the doc', ok)
     want = page.evaluate("() => expectedAnchors('fx-units')")
     got = page.evaluate("() => renderedAnchors()")
-    check('render: every passage in order with its data-a (solutions left out)', got == want, f'got {got} want {want}')
+    check('render: every passage in order with its data-a (the solutions blocks show left out)', got == want, f'got {got} want {want}')
     info = page.evaluate("""() => ({
       item: !!studyEl('li.sr-item[data-a="cue-exponent"]'),
       itemInList: !!studyEl('.sr-passage li[data-a="cue-exponent"]'),
@@ -623,6 +627,139 @@ def section_ink(page):
       return inkPx((r.left - dr.left) / s + 40, (r.top - dr.top) / s + 4, (r.left - dr.left) / s + 260, (r.top - dr.top) / s + 28);
     }""")
     check('ink: after reopening the view the stroke is drawn under its passage', ok and px > 50, f'reopen {ok}, pixels {px}')
+
+
+def section_example_solution(page):
+    # S15: a worked example's solution (fx-units #ex-order) is on the page as the folded callout
+    # FORMAT puts after it, closed until a finger tap on its title opens it. It takes a margin dot
+    # and page ink like any passage. Opening and closing it lay the page out again: a stroke below
+    # it stays at its own passage and every margin dot by its passage. A problem's solution stays
+    # off the page (its block shows it after a settle); peeks and search never show an answer.
+    # (Values reach the polled waits through window: this Playwright drops array args on a poll.)
+    open_doc(page, 'fx-units')
+    page.wait_for_timeout(150)
+    ids = page.evaluate("""() => {
+      const d = plugin.study.content().docs.get('fx-units');
+      const at = of => d.passages.findIndex(p => p.block && p.block.type === 'solution' && p.block.id === of);
+      const i = at('ex-order'), k = at('inv-fx-last-digit');
+      return { sol: i >= 0 ? d.passages[i].anchor : null, below: i >= 0 && d.passages[i + 1] ? d.passages[i + 1].anchor : null,
+               pb: k >= 0 ? d.passages[k].anchor : null };
+    }""")
+    check('example solution (setup): the parser ties a solution to ex-order and one to inv-fx-last-digit', bool(ids['sol'] and ids['below'] and ids['pb']), json.dumps(ids))
+    page.evaluate("""ids => {
+      window.exIds = ids;
+      window.exSol = () => studyEl(`.sr-passage[data-a="${ids.sol}"]`);
+      window.exTitle = () => { const el = exSol(); return el ? el.querySelector('.callout-title') : null; };
+      window.exBelow = () => studyEl(`.sr-passage[data-a="${ids.below}"]`);
+      // Ink pixels from 4 to 28 paper px under `top` (el's top now by default), across where strokeOver(el, ...) writes.
+      window.inkBand = (el, top) => {
+        if (!el) return -1;
+        const dr = document.querySelector('.nb-study-doc').getBoundingClientRect(), r = el.getBoundingClientRect(), s = dr.width / 800;
+        const x = (r.left - dr.left) / s, y = top === undefined ? (r.top - dr.top) / s : top;
+        return inkPx(x + 40, y + 4, x + 260, y + 28);
+      };
+      // Ink pixels over the solution's title (-1 when it is not on the page).
+      window.titleInk = () => { const t = exTitle(); return t ? inkBand(t, paperTop(t) - 4) : -1; };
+      // A finger tap on the solution's title (none when the solution is not on the page).
+      window.tapTitle = () => { const t = exTitle(); if (t) press(t, 'touch', 60); return !!t; };
+      window.dotAnchors = () => [...document.querySelectorAll('.nb-study-doc .nb-study-margin .nb-st-dot')].map(d => d.dataset.a);
+      window.solState = () => {
+        const el = exSol(), c = el && el.querySelector('.callout[data-callout="solution"]');
+        const content = c && c.querySelector(':scope > .callout-content');
+        return { folded: !!c && c.classList.contains('is-collapsed'),
+                 hidden: !!content && getComputedStyle(content).display === 'none' && content.getClientRects().length === 0,
+                 seen: el ? el.innerText : '' };
+      };
+    }""", ids)
+
+    # On load: on the page right after its example, folded, its answer in the DOM but not shown.
+    r = page.evaluate("""() => {
+      const el = exSol();
+      if (!el) return { on: false };
+      const order = renderedAnchors(), c = el.querySelector('.callout[data-callout="solution"]');
+      return { on: true, next: order.indexOf(el.dataset.a) === order.indexOf('ex-order') + 1, block: el.classList.contains('sr-block'),
+               title: exTitle() ? exTitle().textContent.trim() : null, titleShown: !!exTitle() && exTitle().getClientRects().length > 0,
+               holds: !!c && c.textContent.includes('the order is'), ...solState() };
+    }""")
+    check('example solution: on the page, right after its example, as a callout (not a block)', r['on'] and r.get('next') and not r.get('block'), json.dumps(r))
+    check('example solution: folded on load, its title shown and its answer hidden',
+          r['on'] and r['folded'] and r['hidden'] and r['holds'] and r['title'] == 'Solution' and r['titleShown'] and 'the order is' not in r['seen'], json.dumps(r))
+
+    # Marks and page ink take it as any passage: a margin dot by it that opens the marks menu, and
+    # a pen stroke over its title is filed under it. A second stroke goes under the passage below.
+    r = page.evaluate("""async () => {
+      const dot = document.querySelector(`.nb-study-margin .nb-st-dot[data-a="${exIds.sol}"]`);
+      if (!dot) return { dot: false };
+      dot.click(); await sleep(30);
+      const menu = document.querySelector('.nb-st-menu');
+      const verbs = menu ? [...menu.querySelectorAll('button')].map(b => b.textContent) : [];
+      dot.click(); await sleep(30);
+      return { dot: true, verbs, closed: !document.querySelector('.nb-st-menu'), astray: dotsAstray() };
+    }""")
+    check('example solution: a margin dot sits by it and opens the marks menu',
+          r['dot'] and r.get('verbs', [])[:3] == ['lost', 'easy', 'forgot'] and r.get('closed') and not r.get('astray'), json.dumps(r))
+    page.evaluate("() => { const t = exTitle(); if (t) strokeOver(t, t.getBoundingClientRect().height / 2); strokeOver(exBelow(), 14); }")
+    page.wait_for_timeout(1300)
+    saved = page.evaluate("() => fileJson('study/ink/fx-units.test-pad.json')")
+    last = [(s.get('at') or {}).get('a') for s in (saved or {}).get('strokes', [])[-2:]]
+    check('example solution: page ink over its title is filed under it, ink below under the passage below',
+          len(last) == 2 and last[0] == ids['sol'] and last[1] in (ids['below'], 'cue-exponent'), json.dumps(last))
+    s0 = page.evaluate("""() => {
+      window.exBelow0 = paperTop(exBelow());
+      return { below: exBelow0, ink: inkBand(exBelow()), title: titleInk(), dots: dotAnchors() };
+    }""")
+    check('example solution (setup): both strokes are drawn where written', s0['ink'] > 50 and s0['title'] > 50, json.dumps({k: s0[k] for k in ('ink', 'title')}))
+
+    # A finger tap on the title opens it; the page lays out again (the view's ResizeObserver).
+    page.evaluate("() => tapTitle()")
+    moved = wait_js(page, "() => paperTop(exBelow()) - exBelow0 > 10", 3000)
+    st = page.evaluate("() => solState()")
+    check('example solution: a finger tap on its title opens it', moved and not st['folded'] and not st['hidden'] and 'the order is' in st['seen'], json.dumps(st))
+    settled = wait_js(page, "() => dotsAstray().length === 0", 3000)
+    s1 = page.evaluate("() => ({ below: paperTop(exBelow()), ink: inkBand(exBelow()), old: inkBand(exBelow(), exBelow0), title: titleInk(), dots: dotAnchors(), astray: dotsAstray() })")
+    shift = s1['below'] - s0['below']
+    print(f"  example solution: opening it moved the passage below by {shift:.1f} paper px")
+    check('example solution: once open, the stroke below it is drawn at its own passage, not where the passage was',
+          shift > 28 and s1['ink'] > 50 and s1['old'] == 0, json.dumps({'shift': shift, 'ink': s1['ink'], 'old': s1['old']}))
+    check('example solution: once open, the stroke over its title stays there', s1['title'] > 50, s1['title'])
+    check('example solution: once open, every margin dot is still there and sits by its passage',
+          settled and not s1['astray'] and sorted(s1['dots']) == sorted(s0['dots']) and ids['sol'] in s1['dots'], json.dumps({'astray': s1['astray'][:6], 'dots': len(s1['dots'])}))
+
+    # Another tap closes it, and the page goes back.
+    page.evaluate("() => tapTitle()")
+    back = wait_js(page, "() => Math.abs(paperTop(exBelow()) - exBelow0) <= 1", 3000)
+    settled = wait_js(page, "() => dotsAstray().length === 0", 3000)
+    s2 = page.evaluate("() => ({ ink: inkBand(exBelow()), dots: dotAnchors(), astray: dotsAstray(), ...solState() })")
+    check('example solution: a second tap folds it again; the ink and the dots go back with the page',
+          back and settled and s2['folded'] and s2['hidden'] and s2['ink'] > 50 and not s2['astray'] and sorted(s2['dots']) == sorted(s0['dots']),
+          json.dumps({'back': back, 'folded': s2['folded'], 'ink': s2['ink'], 'astray': s2['astray'][:6]}))
+
+    # A problem's solution stays off the page: the problem block shows it after a settle.
+    r = page.evaluate("""() => ({
+      sol: !!studyEl(`.sr-passage[data-a="${exIds.pb}"]`),
+      block: !!studyEl('.sr-passage.sr-block[data-block="problem"][data-a="inv-fx-last-digit"]'),
+      text: document.querySelector('.nb-study-doc').textContent.includes('2401'),
+    })""")
+    check("example solution: a problem's solution still gets no element (its block shows it)", not r['sol'] and r['block'] and not r['text'], json.dumps(r))
+
+    # A peek of the example, or of its solution's own anchor, never shows the answer; nor does search.
+    r = page.evaluate("""async () => {
+      await V().openPeek({ doc: 'fx-units', anchor: 'ex-order' });
+      const ex = document.querySelector('.nb-study-peek').textContent;
+      await V().openPeek({ doc: 'fx-units', anchor: exIds.sol });
+      const own = document.querySelector('.nb-study-peek .nb-study-peek-body').textContent;
+      V().closePeek();
+      return { ex, own };
+    }""")
+    check('example solution: a peek of the example shows it without its solution, and a peek of the solution shows nothing',
+          'Find the order of' in r['ex'] and 'the order is' not in r['ex'] and '2, 4, 1' not in r['ex'] and r['own'].strip() == '', json.dumps(r))
+    page.click('.nb-study-hdr [data-act="library"]')
+    page.fill('.nb-study-search', '2, 4, 1')
+    page.wait_for_timeout(300)
+    n = page.evaluate("() => document.querySelectorAll('.nb-study-hit').length")
+    page.fill('.nb-study-search', '')
+    page.click('.nb-study-lib-close')
+    check('example solution: library search never finds its answer', n == 0, n)
 
 
 def section_marks(page):
@@ -1273,7 +1410,7 @@ def main():
             for name, fn in [('settings', section_settings), ('library', section_library), ('render', section_render), ('follow', section_follow),
                              ('back', section_back), ('peek', section_peek), ('pen', section_pen), ('tabs', section_tabs), ('header', section_header),
                              ('open paths', section_open_paths), ('content change', section_content_change), ('ink', section_ink),
-                             ('marks', section_marks), ('dots', section_dots), ('panels', section_panels)]:
+                             ('example solution', section_example_solution), ('marks', section_marks), ('dots', section_dots), ('panels', section_panels)]:
                 try:
                     fn(page)
                 except Exception as e:

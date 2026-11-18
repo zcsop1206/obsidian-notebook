@@ -186,7 +186,8 @@ export function attachMarks(host: MarksHost): Marks {
   function markable(): { anchor: string; item: boolean }[] {
     const out: { anchor: string; item: boolean }[] = [];
     for (const p of doc().passages) {
-      if (!UNMARKABLE.has(p.kind) && !p.block) out.push({ anchor: p.anchor, item: false });
+      // A solution is text, not a mounted block: the one on the page (an example's) gets a dot like any passage.
+      if (!UNMARKABLE.has(p.kind) && (!p.block || p.block.type === 'solution')) out.push({ anchor: p.anchor, item: false });
       if (p.items) for (const it of p.items) out.push({ anchor: it.anchor, item: true });
     }
     return out;

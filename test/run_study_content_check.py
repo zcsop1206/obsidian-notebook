@@ -3,7 +3,8 @@
 # starts the plugin on test/harness.html, opens the library, then opens every study doc in the
 # study view, and Today and the Map. It fails on any console error or page error, on a doc that
 # renders no passages, and on a doc whose rendered passages differ from the ones the parser says
-# the view must show. Without STUDY_CONTENT_DIR it prints SKIP and exits 0.
+# the view must show (an example's solution is on the page, folded; a problem's is not). Without
+# STUDY_CONTENT_DIR it prints SKIP and exits 0.
 #
 #   STUDY_CONTENT_DIR="C:/Users/.../EngineeringPortfolio/content/study" python test/run_study_content_check.py
 #
@@ -81,10 +82,13 @@ SETUP_JS = """(files) => {
   document.body.style.margin = '0';
   window.sleep = ms => new Promise(r => setTimeout(r, ms));
   window.V = () => { const l = app.workspace.getLeavesOfType('notebook-study')[0]; return l ? l.view : null; };
-  // The passages the view must render: all but solutions and a kata's own skeleton and vectors.
+  // The passages the view must render: all but the solutions whose item (the passage their block
+  // names) is a block, which shows them itself, and a kata's own skeleton and vectors. An example
+  // is no block, so its solution must be on the page.
   window.expectedAnchors = id => {
     const d = plugin.study.content().docs.get(id);
-    return d.passages.filter(p => !(p.block && p.block.type === 'solution') && !(p.callout && p.callout.type === 'solution')
+    const itemIsBlock = a => d.passages.some(q => q.anchor === a && !!q.block);
+    return d.passages.filter(p => !(p.block && p.block.type === 'solution' && itemIsBlock(p.block.id))
       && !(d.kind === 'kata' && p.kind === 'code' && (p.lang === 'skeleton' || p.lang === 'vectors'))).map(p => p.anchor);
   };
   window.renderedAnchors = () => [...document.querySelectorAll('.nb-study-doc .sr-passage[data-a]')]
@@ -172,9 +176,10 @@ def main():
                 r = page.evaluate("d => ({ got: renderedAnchors(), want: expectedAnchors(d) })", did)
                 got, want = r['got'], r['want']
                 missing = [a for a in want if a not in got]
+                extra = [a for a in got if a not in want]
                 check(f"doc {did} ({d['kind']}): renders {len(got)} passages", ok and len(got) > 0, f'rendered {ok}, {len(got)} passages')
                 if want:
-                    check(f'doc {did}: every expected passage is on the page', not missing, f'missing {missing[:8]}')
+                    check(f'doc {did}: every expected passage is on the page, and no other', not missing and not extra, f'missing {missing[:8]}, not expected {extra[:8]}')
                 try:
                     page.wait_for_function("() => [...document.querySelectorAll('.nb-study-doc img')].every(i => i.complete)", timeout=5000)
                 except Exception:
