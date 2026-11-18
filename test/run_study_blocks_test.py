@@ -300,7 +300,12 @@ try:
         check('the problem view opens with ctx.ui.openProblem', 'n^2 + n' in text, text[:200])
         check('a hidden pick shows neither the doc title nor the problem title', 'Parity drills' not in text and 'Consecutive product' not in text and 'Consecutive product' not in title, [title, text[:300]])
         check('a hidden pick shows "?" for the topic', title == 'Problem ?' and ev(page, "() => box.querySelector('.nb-sb-q').textContent") == '?', title)
+        # S12: the home doc (fx-drill) is only the render path and the ink file: neither its id nor
+        # its path is anywhere in the view's markup, attributes included, before the settle.
+        names_home = "() => ['fx-drill', 'study/basics/fx-drill.md'].filter(s => pv.containerEl.outerHTML.includes(s))"
+        check('a hidden pick\'s markup names neither its home doc\'s id nor its path', ev(page, names_home) == [], ev(page, names_home))
         ev(page, "() => { penStroke(surf('call:inv-fx-consecutive'), 40); box.querySelector('button[data-conf=\"60\"]').click(); }")
+        check('nor once the call is committed', ev(page, "() => box.querySelector('.nb-sb-pb').dataset.phase") == 'attempt' and ev(page, names_home) == [], ev(page, names_home))
         ev(page, "() => { const m = box.querySelector('button[data-verb=\"missed\"]'); m.click(); m.click(); }")
         check('settled but not ticked, the doc title stays hidden', ev(page, "() => !box.textContent.includes('Parity drills')"))
         ev(page, "() => { box.querySelector('.nb-sb-ticks[data-list=\"called\"] button[data-sb=\"none\"]').click(); btn('calldone').click(); }")
