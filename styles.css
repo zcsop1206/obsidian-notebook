@@ -943,6 +943,16 @@
 .sr-passage .callout { margin: 4px 0; }
 .sr-passage table { font-size: 14px; }
 .nb-study-doc a { cursor: pointer; -webkit-user-drag: none; }
+/* Figures (S12): fit the passage, and a long finger press must not drag or select them on the iPad. */
+.nb-study-doc .sr-passage img,
+.nb-study-problem-view img {
+  max-width: 100%;
+  height: auto;
+  -webkit-user-drag: none;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
 .sr-flash { animation: nb-study-flash 1.7s ease-out; }
 @keyframes nb-study-flash {
   0%, 35% { background: var(--text-highlight-bg, rgba(255, 208, 0, 0.35)); box-shadow: 0 0 0 6px var(--text-highlight-bg, rgba(255, 208, 0, 0.35)); }

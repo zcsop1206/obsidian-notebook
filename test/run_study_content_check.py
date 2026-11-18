@@ -63,6 +63,13 @@ def figure_files():
     return figs
 
 
+def figure_vault_paths():
+    """Every image's vault path ("study/<rel>"). The mock resolves an embed through the vault, as
+    Obsidian does (S12), so each figure needs an entry there; the route serves the bytes by name."""
+    return sorted('study/' + os.path.relpath(os.path.join(dirpath, n), SRC).replace(os.sep, '/')
+                  for dirpath, _, names in os.walk(SRC) for n in names if IMAGE.search(n))
+
+
 SETUP_JS = """(files) => {
   for (const [p, t] of Object.entries(files)) {
     fs.set(p, t);
@@ -113,6 +120,13 @@ def main():
             print(f'{len(figs)} figures under {SRC}')
             page.goto(f'http://localhost:{port}/test/harness.html')
             page.evaluate(SETUP_JS, files)
+            page.evaluate("""paths => {
+              for (const p of paths) {
+                fs.set(p, '(figure: served by file name)');
+                const parts = p.split('/');
+                for (let k = 1; k < parts.length; k++) dirs.add(parts.slice(0, k).join('/'));
+              }
+            }""", figure_vault_paths())
             page.evaluate("async () => { window.pluginData = { study: { root: 'study', device: 'check' } }; window.plugin = await loadPlugin(); }")
             try:
                 page.wait_for_function("() => plugin.study && plugin.study.content().docs.size > 0", timeout=15000)
@@ -165,7 +179,7 @@ def main():
                     page.wait_for_function("() => [...document.querySelectorAll('.nb-study-doc img')].every(i => i.complete)", timeout=5000)
                 except Exception:
                     pass
-                broken = page.evaluate("() => [...document.querySelectorAll('.nb-study-doc img')].filter(i => !(i.complete && i.naturalWidth > 0)).map(i => i.getAttribute('src'))")
+                broken = page.evaluate("() => [...document.querySelectorAll('.nb-study-doc img')].filter(i => !(i.complete && i.naturalWidth > 0)).map(i => i.getAttribute('src') || ('unresolved: ' + i.alt))")
                 nimg = page.evaluate("() => document.querySelectorAll('.nb-study-doc img').length")
                 if nimg:
                     check(f'doc {did}: all {nimg} figures load', not broken, f'broken {broken[:6]}')

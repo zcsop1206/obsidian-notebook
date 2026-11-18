@@ -17,7 +17,7 @@ import type { InkApi, InkStroke, InkSurface, InkSurfaceOptions, PageInk } from '
 import { InkCanvas } from './canvas';
 import { PAPER_WIDTH, newStrokeId, strokeKey } from './model';
 import { PageInkImpl } from './page';
-import { DocInkStore, type InkAdapter } from './store';
+import { DocInkStore, type Adopted, type InkAdapter } from './store';
 
 export { PAGE_INK_SKIP } from './page';
 
@@ -90,20 +90,36 @@ function heightOf(opts?: InkSurfaceOptions): () => number {
   };
 }
 
+/** The doc's one store for this context (cached for the session). */
+function storeOf(ctx: StudyContext, sh: Shared, docId: string): DocInkStore {
+  const { root, device } = ctx.settings();
+  const key = `${root}\u0000${device}\u0000${docId}`;
+  let st = sh.stores.get(key);
+  if (!st) {
+    st = new DocInkStore(ctx.app.vault.adapter as unknown as InkAdapter, root, device, docId);
+    sh.stores.set(key, st);
+  }
+  return st;
+}
+
+/**
+ * Adds strokes this device wrote under another doc into `docId`'s ink, ids kept, through the
+ * doc's shared store (DocInkStore.adopt): surfaces already open on the doc show them at once, and
+ * a store loaded before the copy never writes them away. Ids the doc's file already holds are
+ * skipped. Resolves after the store's flush to how many were added and whether nothing is left
+ * unwritten (`saved`). S12 uses it to move a problem's pre-0.15.1 standalone ink into its home doc.
+ */
+export function adoptInk(ctx: StudyContext, docId: string, strokes: readonly InkStroke[]): Promise<Adopted> {
+  const sh = sharedOf(ctx);
+  wire(ctx, sh);
+  return storeOf(ctx, sh, docId).adopt(strokes);
+}
+
 export function createInkApi(ctx: StudyContext): InkApi {
   const sh = sharedOf(ctx);
   wire(ctx, sh);
 
-  const storeFor = (docId: string): DocInkStore => {
-    const { root, device } = ctx.settings();
-    const key = `${root}\u0000${device}\u0000${docId}`;
-    let st = sh.stores.get(key);
-    if (!st) {
-      st = new DocInkStore(ctx.app.vault.adapter as unknown as InkAdapter, root, device, docId);
-      sh.stores.set(key, st);
-    }
-    return st;
-  };
+  const storeFor = (docId: string): DocInkStore => storeOf(ctx, sh, docId);
 
   const track = (c: InkCanvas) => { sh.canvases.add(c); return () => { sh.canvases.delete(c); }; };
 
