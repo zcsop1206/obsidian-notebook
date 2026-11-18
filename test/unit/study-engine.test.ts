@@ -1175,6 +1175,47 @@ test('tracks: the docs column splits on `;`, each section `[folder] glob, glob`,
   assert.deepEqual(pick(r.eng.deadline('fe-crt')), ['residues', '2026-11-24', 9], 's14-mie and s14-old are farther out');
 });
 
+test('tracks: a folder binds only its own section\'s globs, and a folder alone serves the whole folder', () => {
+  // Rows that tell the section rule from near misses (one split of the whole column, a dropped folder
+  // check, a folder-only section that matches nothing): a folder binds only its own section's globs, a
+  // section without a folder matches its glob in any folder, and a folder alone serves every doc in that
+  // folder and nothing else. The engine fixtures have no bank folder, so two bank docs are added inline;
+  // no fixture file is touched.
+  const bank = (id: string): SourceFile => ({
+    path: `study/bank/${id}.md`,
+    text: [
+      '---', 'study: bank', `id: ${id}`, `title: ${id} (fixture)`, '---', '',
+      '| id | source | d | statement | solutions |',
+      '|---|---|---|---|---|',
+      `| ${id}-q1 | ${id} Q1 | 2.00 | [paper](https://example.com/q.pdf) | [solutions](https://example.com/s.pdf) |`,
+      '',
+    ].join('\n'),
+  });
+  const c = buildIndex([...sources({
+    'meta/tracks.md': s => s + [
+      '| s14-each | 2026-12-08 | 1 | | basics fe-units; topics fe-c* |',
+      '| s14-anywhere | 2026-12-08 | 1 | | basics fe-units; fe-geo |',
+      '| s14-topics | 2026-12-08 | 1 | | topics |',
+      '| s14-bank | 2026-12-08 | 1 | | basics fe-units; bank |',
+      '',
+    ].join('\n'),
+  }), bank('quiz-a'), bank('quiz-b')]);
+  const st = make([], c).eng.state();
+  // Every doc in the index that the track serves: each list pins what is served and, by omission, what is not.
+  const served = (tid: string) => {
+    const t = c.tracks.find(x => x.id === tid)!;
+    return [...c.docs.values()].filter(d => st.trackMatches(t, d)).map(d => d.id).sort();
+  };
+
+  assert.deepEqual(served('s14-each'), ['fe-count', 'fe-units'],
+    'basics binds fe-units and topics binds fe-c*: fe-crc and fe-crt match fe-c* but are basics');
+  assert.deepEqual(served('s14-anywhere'), ['fe-geo', 'fe-units'],
+    'basics binds fe-units alone; fe-geo, a topic, matches because its section names no folder');
+  assert.deepEqual(served('s14-topics'), ['fe-an', 'fe-count', 'fe-framing', 'fe-gen', 'fe-geo', 'fe-moves'],
+    'every topic, and no basic, kata or bank doc');
+  assert.deepEqual(served('s14-bank'), ['fe-units', 'quiz-a', 'quiz-b'], 'every bank doc and fe-units, and no other basic');
+});
+
 test('hidden: never on the bank file keeps its problems out of hidden picks but in visible ones', () => {
   // A course bank whose source names the chapter: course-q3 (area el, methods m-invariant) is the
   // nearest hidden candidate once el is practised — until `hidden: never` rules it out.
