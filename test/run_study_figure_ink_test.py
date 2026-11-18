@@ -8,7 +8,8 @@
 # home-doc env.doc), with nothing written to ink/problems.<device>.json; in the dark theme a figure
 # stroke still draws dark (the figures are white whatever the theme); each figure's undo chip takes
 # this device's latest stroke on that figure only, shows only while there is one, and is never
-# written on; a drill's New attempt clears its prompt's figure with the page. Uses the mock obsidian
+# written on; a drill's New attempt clears its prompt's figure with the page; a problem or drill
+# destroyed before its render resolves leaves no figure surface behind. Uses the mock obsidian
 # module's in-memory vault (test/harness.html), the S4 ink module and the blocks bundled by
 # test/study-blocks-build.mjs; figure files are served by file name, as the content check does,
 # so nothing asserts on an image's src (S12 changes how the mock resolves it).
@@ -86,12 +87,28 @@ SETUP = r"""
     onChange: fn => { listeners.add(fn); return () => listeners.delete(fn); },
   };
   window.inkCtx = ctx;
-  window.ink = SB.createInkApi(ctx);
+  /* The ink API, with every fig: surface tracked until it is destroyed (figLive): a surface nobody
+     destroys keeps a store listener, a ResizeObserver and a canvas alive. */
+  const realInk = SB.createInkApi(ctx);
+  window.figLive = new Set();
+  window.ink = {
+    page: (...a) => realInk.page(...a),
+    surface: (doc, container, key, opts) => {
+      const s = realInk.surface(doc, container, key, opts);
+      if (key.startsWith('fig:')) {
+        figLive.add(s);
+        const destroy = s.destroy;
+        s.destroy = () => { figLive.delete(s); destroy(); };
+      }
+      return s;
+    },
+  };
   window.renderComp = new obsidian.Component();
   const leaf = document.getElementById('leaf');
   leaf.style.cssText = 'width:94vw;height:80vh;overflow:auto;position:relative;border:1px solid #ccc';
   /* Mounts a block (`drill`, `recall`, `problem`) on a passage of a doc into a fresh box, with the
-     mock's MarkdownRenderer so ![fig](name) becomes a real <img> the harness serves. */
+     mock's MarkdownRenderer so ![fig](name) becomes a real <img> the harness serves. A render
+     waits for window.holdRender when set; window.lastRender is the element it last rendered into. */
   window.mountBlock = (kind, docId, anchor) => {
     leaf.innerHTML = '';
     const doc = content.docs.get(docId);
@@ -106,7 +123,11 @@ SETUP = r"""
       peek: () => {},
       relayout: () => {},
       toast: m => toasts.push(m),
-      render: async (md, into) => { await obsidian.MarkdownRenderer.render(app, md, into, doc.path, renderComp); },
+      render: async (md, into) => {
+        if (window.holdRender) await window.holdRender;
+        await obsidian.MarkdownRenderer.render(app, md, into, doc.path, renderComp);
+        window.lastRender = into;
+      },
     };
     window.box = el;
     window.env = env;
@@ -525,6 +546,31 @@ try:
         blank = ev(page, f"() => [inkAt(surf('{KEY_BRIDGE}'), 0.5, 0.5, 1e6), inkAt(surf('{KEY_DRILL}'), 0.5, 0.5, 1e6)]")
         check("New attempt leaves the prompt's figure empty, as the page", blank == [0, 0], blank)
         check("and the ink file holds none of this device's strokes under the figure's key", n1 == [0, 0], [n0, n1])
+
+        # --- 12. a block destroyed before its statement or prompt finishes rendering mounts no
+        # figure surface afterwards: nothing would destroy it. The render is held until after the
+        # destroy, then the check waits for its image to load (where a surface would mount).
+        for kind, anchor in (('problem', 'inv-el-nodes'), ('drill', 'd-bridge-balance')):
+            r = ev(page, f"""async () => {{
+              let release;
+              window.holdRender = new Promise(res => {{ release = res; }});
+              window.lastRender = null;
+              const before = figLive.size;
+              mountBlock('{kind}', 'fx-fig', '{anchor}');
+              handle.destroy();
+              release();
+              window.holdRender = null;
+              const wait = () => new Promise(res => setTimeout(res, 20));
+              for (let i = 0; i < 200 && !lastRender; i++) await wait();
+              const imgs = lastRender ? [...lastRender.querySelectorAll('img')] : [];
+              for (let i = 0; i < 200 && !imgs.every(m => m.complete); i++) await wait();
+              await new Promise(res => setTimeout(res, 150));
+              return [before, figLive.size, imgs.length, imgs.length > 0 && imgs.every(m => m.naturalWidth > 0),
+                      !!(lastRender && lastRender.querySelector('.nb-study-figure'))];
+            }}""")
+            check(f'a {kind} destroyed before its render resolves leaves no figure surface',
+                  bool(r) and r[1] == r[0] and r[4] is False, r)
+            check(f'(setup: that {kind} rendered its figure later and it loaded)', bool(r) and r[2] >= 1 and r[3] is True, r)
 
         page.screenshot(path=os.path.join(OUT, 'study-figure-ink.png'))
         check('no page errors', not errors, errors[:3])

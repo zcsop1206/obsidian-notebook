@@ -570,7 +570,8 @@ export function mountSession(host: HTMLElement, env: BlockEnv, item: ProblemItem
       body.createEl('p', { cls: 'nb-sb-hint', text: 'The statement is the theorem just above: prove it, after the call.' });
     } else {
       const st = body.createDiv({ cls: 'nb-sb-stmt' });
-      void env.render(item.statement || '(No statement.)', st).then(() => { figInk?.(); figInk = mountFigureInk(st, env, item.id); env.relayout(); });
+      // Destroyed while it rendered: mount no figure ink, which nothing would destroy.
+      void env.render(item.statement || '(No statement.)', st).then(() => { if (dead) return; figInk?.(); figInk = mountFigureInk(st, env, item.id); env.relayout(); });
       if (!o.inline) body.createEl('p', { cls: 'nb-sb-by', text: MODEL_LABEL });
     }
   }

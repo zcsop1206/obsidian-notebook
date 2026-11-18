@@ -392,7 +392,8 @@ export function runDrill(host: HTMLElement, env: BlockEnv, spec: DrillSpec): Dri
   const clock = head.createSpan({ cls: 'nb-sb-timer', text: recall ? '' : '0:00' });
   if (spec.prompt) {
     const pr = root.createDiv({ cls: 'nb-sb-prompt' });
-    void env.render(spec.prompt, pr).then(() => { figInk?.(); figInk = mountFigureInk(pr, env, spec.item); env.relayout(); });
+    // Destroyed while it rendered: mount no figure ink, which nothing would destroy.
+    void env.render(spec.prompt, pr).then(() => { if (dead) return; figInk?.(); figInk = mountFigureInk(pr, env, spec.item); env.relayout(); });
   }
   const paper = root.createDiv({ cls: 'nb-sb-paper' });
   const surface: InkSurface = env.ink.surface(env.doc, paper, spec.key, {
