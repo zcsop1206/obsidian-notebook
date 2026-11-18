@@ -29,7 +29,7 @@ export interface InkAdapter {
 
 export type InkListener = (why: 'load' | 'add' | 'remove' | 'keep' | 'sync') => void;
 
-/** What DocInkStore.adopt resolves to: how many strokes it added, and whether nothing is left unwritten after its flush. */
+/** What DocInkStore.adopt resolves to: how many strokes it added, and whether a write that holds them has landed. */
 export interface Adopted {
   added: number;
   saved: boolean;
@@ -67,6 +67,10 @@ export class DocInkStore {
    * listing showed there is none. Until then a write reads the file again first (reconcile).
    */
   private ownClean = false;
+  /** Counts in-memory changes (touch). */
+  private gen = 0;
+  /** The change count the last landed write held (or that needed no write): changes up to it are on disk. */
+  private savedGen = 0;
   private writing: Promise<void> = Promise.resolve();
   private loaded = false;
   readonly ready: Promise<void>;
@@ -162,8 +166,8 @@ export class DocInkStore {
    * standalone ink moving to its home doc). Going through the store, not the file, means open
    * surfaces show them at once and the store's next write keeps them. Ids this device's file
    * already holds are skipped, so adopting twice adds nothing. Then flushes, and resolves to how
-   * many were added and whether nothing is left unwritten (`saved`): false when the write failed
-   * or this device's file could not be read (the store keeps the strokes and retries).
+   * many were added and whether a write holding them has landed (`saved`): false when the write
+   * failed or this device's file could not be read (the store keeps the strokes and retries).
    */
   async adopt(strokes: readonly InkStroke[]): Promise<Adopted> {
     await this.ready;
@@ -179,8 +183,10 @@ export class DocInkStore {
       n++;
     }
     if (n) this.touch('add');
+    // Saved means a write holding these strokes landed, even if another change came in meanwhile.
+    const mine = this.gen;
     await this.flush();
-    return { added: n, saved: !this.dirty };
+    return { added: n, saved: this.savedGen >= mine };
   }
 
   /**
@@ -241,6 +247,7 @@ export class DocInkStore {
   }
 
   private touch(why: Parameters<InkListener>[0]): void {
+    this.gen++;
     this.dirty = true;
     this.recompute(why);
     this.schedule();
@@ -263,7 +270,8 @@ export class DocInkStore {
     if (!this.dirty) return;
     if (!this.ownClean && !(await this.reconcile())) { this.retry(); return; }
     const own = this.own();
-    if (!this.ownExisted && !own.strokes.length && !(own.hide ?? []).length && !Object.keys(own.keep ?? {}).length) { this.dirty = false; return; }
+    const g = this.gen;
+    if (!this.ownExisted && !own.strokes.length && !(own.hide ?? []).length && !Object.keys(own.keep ?? {}).length) { this.dirty = false; this.savedGen = g; return; }
     this.dirty = false;
     const text = serializeInkFile(this.docId, own.strokes, own.hide, own.keep);
     try {
@@ -275,6 +283,7 @@ export class DocInkStore {
       }
       await this.adapter.write(this.path, text);
       this.ownExisted = true;
+      this.savedGen = Math.max(this.savedGen, g);
     } catch (e) {
       // Kept dirty and tried again later; the strokes stay on screen meanwhile.
       this.dirty = true;

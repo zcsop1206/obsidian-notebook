@@ -225,6 +225,10 @@ test('problem: the work paper grows to fit its lowest stroke, a step below it, i
   assert.equal(workPaperFit(480, at(1000, 120)), 1600, 'the lowest stroke counts');
   assert.equal(workPaperFit(480, at(2600)), 2800, 'capped');
   assert.equal(workPaperFit(1600, at(100)), 1600, 'never shrinks');
+  // Later changes (onlyBelow): writing on the paper never moves it; a stroke below it (a copy, a sync) does.
+  assert.equal(workPaperFit(480, at(60), true), 480, 'a stroke on the paper does not grow it');
+  assert.equal(workPaperFit(480, at(480), true), 480, 'nor one at its very bottom');
+  assert.equal(workPaperFit(480, at(481), true), 1200, 'a stroke below it grows it with a step to spare');
 });
 
 /* ------------------------- S12: the standalone view's home doc ------------------------- */
@@ -390,6 +394,40 @@ test('s12: a copy whose write does not land is shown but not recorded; a later c
   } finally {
     console.error = errors;
   }
+});
+
+test('s12: adopt is saved once a write holding its strokes lands, even when another change comes in meanwhile', async () => {
+  const v = memVault([]);
+  const store = new DocInkStore(v.adapter, 'study', 'ipad', 'fx-units');
+  await store.ready;
+  const write = v.adapter.write;
+  let during: (() => void) | null = () => {
+    // A page stroke written while the copy's write is on its way to disk.
+    store.add({ id: 's-page', p: [[1, 2, 0.5, 0], [3, 4, 0.5, 5]], t0: 7, blk: null, at: { a: 'x', dy: 0, rev: '', v: 1 } });
+  };
+  v.adapter.write = async (p, d) => { const f = during; during = null; f?.(); return write(p, d); };
+  const s = { id: 's-copy', p: [[1, 2, 0.5, 0], [3, 4, 0.5, 5]] as [number, number, number, number][], t0: 1, blk: 'work:x' };
+  assert.deepEqual(await store.adopt([s]), { added: 1, saved: true }, 'the copy landed, though the page stroke still waits');
+  assert.equal(store.pending(), true, 'the page stroke is written by the next flush');
+  await store.flush();
+  assert.deepEqual(parseInkFile(v.files.get('study/ink/fx-units.ipad.json')!, 'fx-units').strokes.map(x => x.id), ['s-copy', 's-page']);
+});
+
+test('s12: the load-time pass records a problem\'s copy only once it is saved, and leaves it pending until then', async () => {
+  const { srcText } = inkFiles();
+  const v = memVault([['study/ink/problems.ipad.json', srcText]]);
+  let saved = false;
+  const io: OldInkIO = {
+    adapter: v.adapter, root: 'study', device: 'ipad', moved: movedInk(v.app, 'ipad'), serial: serialQueue(),
+    adopt: async (_doc, strokes) => ({ added: strokes.length, saved }),
+  };
+  // inv-fx-consecutive is not in the fixtures, so its stroke stays pending either way.
+  assert.deepEqual(await migrateOldProblemInk(io, content, 'study'), { copied: 0, pending: 3 }, 'unsaved: nothing counts as copied');
+  assert.equal(v.app.loadLocalStorage('notebook-study-moved-ink:ipad'), null, 'and nothing is recorded');
+  saved = true;
+  assert.deepEqual(await migrateOldProblemInk(io, content, 'study'), { copied: 2, pending: 1 });
+  assert.deepEqual(v.app.loadLocalStorage('notebook-study-moved-ink:ipad'), ['s-call', 's-work']);
+  assert.deepEqual(await migrateOldProblemInk(io, content, 'study'), { copied: 0, pending: 1 }, 'recorded: not offered again');
 });
 
 /** An invented doc that holds `inv-fx-late`, a problem the fixtures lack, as if it reached the vault later. */
