@@ -335,6 +335,22 @@ test('s12: DocInkStore.adopt keeps ids, skips ids the file holds, and creates th
   assert.equal(store.strokesOf('call:x')[0].dev, 'ipad');
 });
 
+test('s12: two records built at once keep each other\'s ids; without storage a record lasts as long as the object', () => {
+  const v = memVault([]);
+  const a = movedInk(v.app, 'ipad');
+  const b = movedInk(v.app, 'ipad');
+  a.add(['s-1', 's-2']);
+  b.add(['s-3']);
+  assert.deepEqual(v.app.loadLocalStorage('notebook-study-moved-ink:ipad'), ['s-1', 's-2', 's-3'], 'b\'s save kept a\'s ids');
+  assert.ok(b.has('s-1'), 'and b knows them now');
+  a.add([]);
+  assert.deepEqual(v.app.loadLocalStorage('notebook-study-moved-ink:ipad'), ['s-1', 's-2', 's-3'], 'a\'s next save keeps b\'s');
+  const bare = movedInk({}, 'ipad');
+  bare.add(['s-x']);
+  assert.ok(bare.has('s-x'));
+  assert.equal(movedInk({}, 'ipad').has('s-x'), false, 'nothing stored: a new record starts empty');
+});
+
 test('s12: a copy whose write does not land is shown but not recorded; a later copy records it once written', async () => {
   const { srcText } = inkFiles();
   const v = memVault([['study/ink/problems.ipad.json', srcText]]);

@@ -60,26 +60,31 @@ export interface MovedInk {
 
 /**
  * The record kept in Obsidian's per-vault local storage on this device (window.localStorage
- * where the app has none; memory for the session where neither works). Per device, like the old
- * file it guards: stroke ids are random per device.
+ * where the app has none). Per device, like the old file it guards: stroke ids are random per
+ * device. `add` reads the stored list again and merges before it saves, so two records built at
+ * once never drop each other's ids. Without storage, the record lasts as long as this object.
  */
 export function movedInk(app: unknown, device: string): MovedInk {
   const key = `notebook-study-moved-ink:${device}`;
   const a = (app || {}) as { loadLocalStorage?: (k: string) => unknown; saveLocalStorage?: (k: string, d: unknown) => void };
-  let stored: unknown = null;
-  try {
-    stored = typeof a.loadLocalStorage === 'function' ? a.loadLocalStorage(key) : JSON.parse(window.localStorage.getItem(key) || 'null');
-  } catch { /* no storage: start empty */ }
-  const ids = new Set(Array.isArray(stored) ? stored.filter((x): x is string => typeof x === 'string') : []);
+  const stored = (): string[] => {
+    let v: unknown = null;
+    try {
+      v = typeof a.loadLocalStorage === 'function' ? a.loadLocalStorage(key) : JSON.parse(window.localStorage.getItem(key) || 'null');
+    } catch { /* no storage: nothing stored */ }
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+  };
+  const ids = new Set(stored());
   return {
     has: id => ids.has(id),
     add: more => {
+      for (const id of stored()) ids.add(id);
       for (const id of more) ids.add(id);
       const list = [...ids];
       try {
         if (typeof a.saveLocalStorage === 'function') a.saveLocalStorage(key, list);
         else window.localStorage.setItem(key, JSON.stringify(list));
-      } catch { /* storage off: the record lasts this session */ }
+      } catch { /* no storage: the ids live in this object only */ }
     },
   };
 }
