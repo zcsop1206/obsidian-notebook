@@ -3,8 +3,9 @@
 # remount, keyed `fig:`; after a viewport resize from 1024 to 600 px the stroke still lies over
 # the same image pixel; a renamed figure shows a blank surface; a finger drag over the figure
 # draws nothing and is not prevented (so the view scrolls); a hidden pick shows nothing new
-# before the settle. The doc/standalone same-strokes check stays SKIP until S12 merges (its
-# home-doc env.doc is what puts both views on the same ink file). Uses the mock obsidian
+# before the settle; a figure stroke written in the doc's problem block shows on the same figure
+# in the standalone problem view and the reverse, both filed in the home doc's ink file (S12's
+# home-doc env.doc), with nothing written to ink/problems.<device>.json. Uses the mock obsidian
 # module's in-memory vault (test/harness.html), the S4 ink module and the blocks bundled by
 # test/study-blocks-build.mjs; figure files are served by file name, as the content check does,
 # so nothing asserts on an image's src (S12 changes how the mock resolves it).
@@ -315,8 +316,54 @@ try:
             ok = False
         check('the figure surface is there on a hidden pick, with nothing new shown', ok)
 
-        # --- 8. the same strokes in the doc and in the standalone view (needs S12's home doc)
-        print('SKIP same strokes in doc and standalone view: waits on S12 (its env.doc is the home doc), merged after this branch')
+        # --- 8. the same strokes in the doc and in the standalone view (S12's home doc). A stroke
+        # on the statement figure in the doc's problem block shows on the same figure in the
+        # standalone view, and a stroke there shows in the doc: both file under the home doc's ink
+        # (fx-fig), and nothing goes to ink/problems.desktop.json.
+        circuit_ids = ("async () => { await studyBlocks.flushInk(inkCtx); const j = fileJson('study/ink/fx-fig.desktop.json'); "
+                       f"return j ? j.strokes.filter(s => s.blk === '{KEY_CIRCUIT}').map(s => s.id) : []; }}")
+        ev(page, "() => mountBlock('problem', 'fx-fig', 'inv-el-nodes')")
+        try:
+            page.wait_for_function(f"() => surf('{KEY_CIRCUIT}')", timeout=8000)
+            ok = True
+        except Exception:
+            ok = False
+        check('the doc block shows the circuit figure (setup for the cross-view check)', ok)
+        before = ev(page, circuit_ids)
+        ev(page, f"() => strokeAt(surf('{KEY_CIRCUIT}'), 0.25, 0.75)")
+        page.wait_for_timeout(80)
+        after_doc = ev(page, circuit_ids)
+        doc_new = [i for i in after_doc if i not in before]
+        check('a figure stroke written in the doc files under the home doc\'s ink', len(doc_new) == 1, [before, after_doc])
+        ev(page, """async () => {
+          handle.destroy();
+          studyBlocks.register(ctx);
+          await ctx.ui.openProblem('inv-el-nodes', { why: 'S13 cross-view check' });
+          window.sv = app.workspace.getLeavesOfType('notebook-study-problem').find(l => l.view.getState().id === 'inv-el-nodes').view;
+          window.svSurf = key => sv.contentEl.querySelector(`[data-ink-key="${CSS.escape(key)}"]`);
+        }""")
+        try:
+            page.wait_for_function(f"() => svSurf('{KEY_CIRCUIT}') && inkAt(svSurf('{KEY_CIRCUIT}'), 0.25, 0.75) > 0", timeout=8000)
+            ok = True
+        except Exception:
+            ok = False
+        check('a figure stroke written in the doc shows on the same figure in the standalone view', ok)
+        n = ev(page, f"() => svSurf('{KEY_CIRCUIT}') ? inkAt(svSurf('{KEY_CIRCUIT}'), 0.75, 0.25, 3) : -1")
+        check('and nowhere else on it (the spot the reverse stroke takes is blank)', n == 0, n)
+        ev(page, f"() => strokeAt(svSurf('{KEY_CIRCUIT}'), 0.75, 0.25)")
+        page.wait_for_timeout(80)
+        after_sv = ev(page, circuit_ids)
+        sv_new = [i for i in after_sv if i not in after_doc]
+        check('a figure stroke written in the standalone view files under the home doc\'s ink, beside the doc\'s',
+              len(sv_new) == 1 and all(i in after_sv for i in doc_new), [after_doc, after_sv])
+        ev(page, "() => mountBlock('problem', 'fx-fig', 'inv-el-nodes')")
+        try:
+            page.wait_for_function(f"() => surf('{KEY_CIRCUIT}') && inkAt(surf('{KEY_CIRCUIT}'), 0.75, 0.25) > 0 && inkAt(surf('{KEY_CIRCUIT}'), 0.25, 0.75) > 0", timeout=8000)
+            ok = True
+        except Exception:
+            ok = False
+        check('a figure stroke written in the standalone view shows on the same figure in the doc', ok)
+        check('nothing was written to ink/problems.desktop.json', ev(page, "() => !fs.has('study/ink/problems.desktop.json')") is True)
 
         page.screenshot(path=os.path.join(OUT, 'study-figure-ink.png'))
         check('no page errors', not errors, errors[:3])
