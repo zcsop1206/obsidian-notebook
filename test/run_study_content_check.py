@@ -4,9 +4,9 @@
 # study view, every invented problem whose statement embeds a figure in the standalone problem
 # view, and Today and the Map. It fails on any console error or page error, on a doc that renders
 # no passages, on a doc whose rendered passages differ from the ones the parser says the view must
-# show (an example's solution is on the page, folded; a problem's is not), and on a figure that
-# does not load in a doc or in a problem's statement. Without STUDY_CONTENT_DIR it prints SKIP and
-# exits 0.
+# show (an example's solution is on the page, folded; a problem's is not), on a figure that does
+# not load in a doc or in a problem's statement, and on an image embed whose file name is not among
+# the study folder's images. Without STUDY_CONTENT_DIR it prints SKIP and exits 0.
 #
 #   STUDY_CONTENT_DIR="C:/Users/.../EngineeringPortfolio/content/study" python test/run_study_content_check.py
 #
@@ -73,6 +73,27 @@ def figure_vault_paths():
                   for dirpath, _, names in os.walk(SRC) for n in names if IMAGE.search(n))
 
 
+EMBED = re.compile(r'!\[[^\]\n]*\]\(\s*<?([^)>\n]+?)>?(?:\s+"[^"\n]*")?\s*\)')
+WIKI_EMBED = re.compile(r'!\[\[([^\]|#\n]+)')
+FENCE = re.compile(r'^[ \t]*(`{3,}|~{3,})[^\n]*\n.*?^[ \t]*\1[ \t]*$', re.M | re.S)
+CODE_SPAN = re.compile(r'`[^`\n]*`')
+
+
+def figure_embeds(text):
+    """The bare file names of the images a doc embeds (`![alt](name)`, and `![[name]]` too), outside
+    code and leaving out web addresses. Obsidian resolves a bare name anywhere in the vault."""
+    text = CODE_SPAN.sub('', FENCE.sub('', text))
+    targets = [m.group(1).strip() for m in EMBED.finditer(text)]
+    targets = [t for t in targets if not re.match(r'[a-z][a-z0-9+.-]*:', t, re.I)]
+    targets += [m.group(1).strip() for m in WIKI_EMBED.finditer(text)]
+    names = []
+    for t in targets:
+        name = unquote(t.split('#')[0].split('?')[0]).replace('\\', '/').rsplit('/', 1)[-1]
+        if IMAGE.search(name):
+            names.append(name)
+    return names
+
+
 SETUP_JS = """(files) => {
   for (const [p, t] of Object.entries(files)) {
     fs.set(p, t);
@@ -110,7 +131,6 @@ def main():
             page.on('pageerror', lambda e: errors.append(f'pageerror: {e}'))
             page.on('console', lambda m: errors.append(f'console.error: {m.text}') if m.type == 'error' else None)
             figs = figure_files()
-            missing_figs = set()
 
             def serve_figure(route):
                 path = unquote(urlparse(route.request.url).path)
@@ -119,7 +139,6 @@ def main():
                 name = path.rsplit('/', 1)[-1]
                 if name in figs:
                     return route.fulfill(path=figs[name])
-                missing_figs.add(name)
                 return route.fulfill(status=404, body='')
 
             page.route(lambda url: bool(IMAGE.search(urlparse(url).path)), serve_figure)
@@ -233,8 +252,19 @@ def main():
                 page.wait_for_timeout(400)
                 check(f'{name}: opens without console errors', not errors, ' | '.join(errors[:4])[:900])
                 errors.clear()
-            check('figures: every embedded figure exists in the study folder', not missing_figs, f'missing {sorted(missing_figs)[:10]}')
             browser.close()
+
+        # Every image a doc embeds names a file among the study folder's images (ignoring case, as
+        # Obsidian resolves links), read from the docs' text: an embed the vault cannot resolve is
+        # never fetched, so the pages cannot tell.
+        study_paths = [d['path'] for d in docs]
+        embeds = {p: figure_embeds(files[p]) for p in study_paths if p in files}
+        named = {n for ns in embeds.values() for n in ns}
+        have = {n.lower() for n in figs}
+        missing = sorted({f'{n} (in {p[len("study/"):]})' for p, ns in embeds.items() for n in ns if n.lower() not in have})
+        print(f'figure embeds: {sum(len(ns) for ns in embeds.values())} in {sum(1 for ns in embeds.values() if ns)} of {len(embeds)} docs, '
+              f'naming {len(named)} files; {len(figs)} images in the study folder')
+        check('figures: every embedded figure exists in the study folder', not missing, f'missing {missing[:10]}')
     finally:
         srv.terminate()
     print(f'\n{len(failures)} failure(s)' if failures else '\nall study content checks passed')
