@@ -16,6 +16,8 @@ build: 1
 >
 > ![the divider](s12-divider.svg)
 >
+> ![the divider, by a path from this doc](./figs/s12-divider.svg)
+>
 > ![a figure that was never drawn](s12-nope.svg)
 ^inv-s12-divider
 

@@ -336,14 +336,19 @@ try:
           const v = app.workspace.getLeavesOfType('notebook-study-problem').find(l => l.view.getState().id === 'inv-s12-divider').view;
           for (let i = 0; i < 100 && !v.contentEl.querySelector('.nb-sb-stmt'); i++) await new Promise(r => setTimeout(r, 20));
           window.box = v.contentEl;
-          const img = box.querySelector('.nb-sb-stmt img');
-          for (let i = 0; i < 100 && !(img && img.complete); i++) await new Promise(r => setTimeout(r, 20));
+          const img = box.querySelector('.nb-sb-stmt img[alt="the divider"]');
+          const rel = box.querySelector('.nb-sb-stmt img[alt="the divider, by a path from this doc"]');
+          for (let i = 0; i < 100 && !(img && img.complete && rel && rel.complete); i++) await new Promise(r => setTimeout(r, 20));
           const early = window.early.strokes().map(s => s.id);
           window.early.destroy();
-          return [img && img.getAttribute('src'), img ? img.naturalWidth : -1, !!box.querySelector('img[data-unresolved]'), early];
+          return [img && img.getAttribute('src'), img ? img.naturalWidth : -1, !!box.querySelector('img[data-unresolved]'), early,
+            rel && rel.getAttribute('src'), rel ? rel.naturalWidth : -1];
         }""")
         check('a bare-name figure in a subfolder resolves to its vault path', r[0] == 'study/basics/figs/s12-divider.svg', r)
         check('the resolved figure actually loads (naturalWidth > 0)', r[1] > 0, r)
+        # A bare name resolves from anywhere in the vault; a path relative to the doc resolves only
+        # from the home doc's path, so this one fails if the view renders from any other path.
+        check('a figure embedded by a path relative to its doc resolves to its vault path, and loads', r[4] == 'study/basics/figs/s12-divider.svg' and r[5] > 0, r)
         check('an embed naming a missing file is flagged data-unresolved', r[2] is True, r)
         check('a home doc whose ink was loaded before the copy shows the old strokes at once', r[3] == ['s-mig-call'], r[3])
         m = ev(page, """() => {
