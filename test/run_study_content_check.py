@@ -1,10 +1,12 @@
 # Real-content check for study mode. When STUDY_CONTENT_DIR is set, loads every .md under that
 # folder into the mock vault under "study/" (in memory only; nothing is copied into the repo),
 # starts the plugin on test/harness.html, opens the library, then opens every study doc in the
-# study view, and Today and the Map. It fails on any console error or page error, on a doc that
-# renders no passages, and on a doc whose rendered passages differ from the ones the parser says
-# the view must show (an example's solution is on the page, folded; a problem's is not). Without
-# STUDY_CONTENT_DIR it prints SKIP and exits 0.
+# study view, every invented problem whose statement embeds a figure in the standalone problem
+# view, and Today and the Map. It fails on any console error or page error, on a doc that renders
+# no passages, on a doc whose rendered passages differ from the ones the parser says the view must
+# show (an example's solution is on the page, folded; a problem's is not), and on a figure that
+# does not load in a doc or in a problem's statement. Without STUDY_CONTENT_DIR it prints SKIP and
+# exits 0.
 #
 #   STUDY_CONTENT_DIR="C:/Users/.../EngineeringPortfolio/content/study" python test/run_study_content_check.py
 #
@@ -190,6 +192,40 @@ def main():
                     check(f'doc {did}: all {nimg} figures load', not broken, f'broken {broken[:6]}')
                 check(f'doc {did}: no console errors', not errors, ' | '.join(errors[:4])[:900])
                 errors.clear()
+
+            # Every invented problem whose statement embeds a figure, in the standalone problem view
+            # (ctx.ui.openProblem, as Today opens it), which mounts its card asynchronously: the
+            # statement's images must load. Each view is closed after its check.
+            probs = page.evaluate("""() => {
+              const EMBED = /!\\[[^\\]\\n]*\\]\\(\\s*<?([^)>\\n]+?)>?(?:\\s+"[^"\\n]*")?\\s*\\)/g;
+              const fig = t => !/^[a-z][a-z0-9+.-]*:/i.test(t) && /\\.(svg|png|jpe?g|gif|webp)$/i.test(t.split('#')[0].split('?')[0]);
+              return [...plugin.study.content().problems.values()].filter(p => !p.bank)
+                .map(p => ({ id: p.id, figs: [...(p.statement || '').matchAll(EMBED)].map(m => m[1].trim()).filter(fig).length }))
+                .filter(p => p.figs > 0);
+            }""")
+            shown = 0
+            for pb in probs:
+                r = page.evaluate("""async id => {
+                  await plugin.study.ui.openProblem(id, { why: 'content check' });
+                  const leaf = app.workspace.getLeavesOfType('notebook-study-problem').find(l => l.view.getState().id === id);
+                  let card = null, imgs = [];
+                  for (let i = 0; i < 250 && leaf && !(card = leaf.view.contentEl.querySelector('.nb-sb-pb')); i++) await sleep(20);
+                  for (let i = 0; i < 250 && card; i++) {
+                    imgs = [...card.querySelectorAll('.nb-sb-stmt img')];
+                    if (imgs.length && imgs.every(m => m.complete)) break;
+                    await sleep(20);
+                  }
+                  const broken = imgs.filter(m => m.hasAttribute('data-unresolved') || !(m.complete && m.naturalWidth > 0))
+                    .map(m => m.getAttribute('src') || ('unresolved: ' + m.alt));
+                  if (leaf) await leaf.detach();
+                  return { card: !!card, n: imgs.length, broken };
+                }""", pb['id'])
+                shown += r['n']
+                check(f"problem {pb['id']}: its statement figures load in the standalone view",
+                      r['card'] and r['n'] >= pb['figs'] and not r['broken'], f"card {r['card']}, {r['n']} of {pb['figs']} images, broken {r['broken'][:4]}")
+            print(f'statement figures in the standalone view: {len(probs)} invented problems, {shown} images')
+            check('problem view: no console errors', not errors, ' | '.join(errors[:4])[:900])
+            errors.clear()
 
             # Today and the Map on the real engine.
             for name, js in [('Today', "() => plugin.study.ui.openToday()"), ('Map', "() => plugin.study.ui.openMap()")]:
