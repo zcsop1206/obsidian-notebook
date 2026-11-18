@@ -6,7 +6,9 @@
 # before the settle; a figure stroke written in the doc's problem block shows on the same figure
 # in the standalone problem view and the reverse, both filed in the home doc's ink file (S12's
 # home-doc env.doc), with nothing written to ink/problems.<device>.json; in the dark theme a figure
-# stroke still draws dark (the figures are white whatever the theme). Uses the mock obsidian
+# stroke still draws dark (the figures are white whatever the theme); each figure's undo chip takes
+# this device's latest stroke on that figure only, shows only while there is one, and is never
+# written on. Uses the mock obsidian
 # module's in-memory vault (test/harness.html), the S4 ink module and the blocks bundled by
 # test/study-blocks-build.mjs; figure files are served by file name, as the content check does,
 # so nothing asserts on an image's src (S12 changes how the mock resolves it).
@@ -112,6 +114,12 @@ SETUP = r"""
     return el;
   };
   window.surf = key => box.querySelector(`[data-ink-key="${CSS.escape(key)}"]`);
+  /* A figure's undo chip, found from its surface's ink key under root. */
+  window.chipOf = (key, root = box) => {
+    const s = root.querySelector(`[data-ink-key="${CSS.escape(key)}"]`);
+    const f = s && s.closest('.nb-study-figure');
+    return f ? f.querySelector('.nb-study-figure-undo') : null;
+  };
   /* A pen stroke from client points (pointer events, as the Pencil sends). */
   window.penStroke = (target, pts, type = 'pen', id = 7) => {
     const init = (q, extra = {}) => ({ pointerId: id, pointerType: type, pressure: 0.5, clientX: q[0], clientY: q[1], bubbles: true, cancelable: true, button: 0, buttons: 1, ...extra });
@@ -331,6 +339,12 @@ try:
         except Exception:
             ok = False
         check('the figure surface is there on a hidden pick, with nothing new shown', ok)
+        r = ev(page, f"""() => {{
+          const c = chipOf('{KEY_MESH_A}', pv.contentEl);
+          return c ? [c.hidden, c.textContent, c.outerHTML] : null;
+        }}""")
+        check("on a hidden pick the figure's undo chip shows (this device's stroke) and names nothing about the topic",
+              bool(r) and r[0] is False and r[1] == 'Undo' and not any(w in r[2] for w in ('inv-el-mesh', 'fx-fig', 'Mesh loops', 'Nodal practice')), r)
 
         # --- 8. the same strokes in the doc and in the standalone view (S12's home doc). A stroke
         # on the statement figure in the doc's problem block shows on the same figure in the
@@ -398,6 +412,79 @@ try:
         rgb = ev(page, f"() => inkRGB(surf('{KEY_CIRCUIT}'), 0.62, 0.15)")
         check('in the dark theme a figure stroke draws dark on the white figure', bool(rgb) and max(rgb[:3]) < 100, rgb)
         ev(page, "() => document.body.classList.remove('theme-dark')")
+
+        # --- 10. each figure's undo chip: it takes this device's latest stroke on that figure and
+        # nothing else (not page ink, not the other figure, not another device's stroke), shows only
+        # while this device has a stroke there, sits above the canvas in the box's top-right corner,
+        # and a Pencil on it writes nothing.
+        KEY_PAIR_A = 'fig:inv-el-pair:s13-circuit.svg'
+        KEY_PAIR_B = 'fig:inv-el-pair:s13-bridge.svg'
+        ev(page, "() => mountBlock('problem', 'fx-fig', 'inv-el-pair')")
+        try:
+            page.wait_for_function(f"() => surf('{KEY_PAIR_A}') && surf('{KEY_PAIR_B}')", timeout=8000)
+            ok = True
+        except Exception:
+            ok = False
+        check('both figures of a two-figure statement get a surface (setup for the undo chip)', ok)
+        # Another device's stroke on figure B, arriving as a sync does (paper px; the bridge is 560 high).
+        ev(page, f"""() => externalWrite('study/ink/fx-fig.ipad.json', JSON.stringify({{ v: 1, doc: 'fx-fig', strokes: [
+          {{ id: 's-ipad0001', t0: Date.now() - 60000, blk: '{KEY_PAIR_B}', p: [[300, 205, 0.5, 0], [400, 205, 0.5, 40], [500, 205, 0.5, 80]] }}] }}))""")
+        try:
+            page.wait_for_function(f"() => inkAt(surf('{KEY_PAIR_B}'), 0.5, 205 / 560) > 0", timeout=5000)
+            ok = True
+        except Exception:
+            ok = False
+        check("another device's stroke shows on figure B (setup)", ok)
+        r = ev(page, f"() => [chipOf('{KEY_PAIR_A}').hidden, chipOf('{KEY_PAIR_B}').hidden, getComputedStyle(chipOf('{KEY_PAIR_B}')).display]")
+        check("a figure's undo chip is hidden while this device has no stroke on it (another device's stroke included)", r == [True, True, 'none'], r)
+        counts = (f"async () => {{ await studyBlocks.flushInk(inkCtx); const j = fileJson('study/ink/fx-fig.desktop.json'); "
+                  f"const n = k => j.strokes.filter(s => (s.blk || null) === k).length; return [n(null), n('{KEY_PAIR_A}'), n('{KEY_PAIR_B}')]; }}")
+        ev(page, "() => { window.pageInk = ink.page(env.doc, box, () => null); }")  # page ink over the block
+        c0 = ev(page, counts)
+        ev(page, "() => strokeAt(box.querySelector('.nb-sb-stmt p'), 0.5, 0.5)")  # a page stroke on the statement text
+        for key, fx, fy in ((KEY_PAIR_A, 0.3, 0.3), (KEY_PAIR_A, 0.7, 0.7), (KEY_PAIR_B, 0.5, 0.75)):
+            page.wait_for_timeout(40)  # distinct start times: "latest" is well defined
+            ev(page, f"() => strokeAt(surf('{key}'), {fx}, {fy})")
+        page.wait_for_timeout(80)
+        c1 = ev(page, counts)
+        check('setup: one page stroke, two on figure A and one on figure B', c1 == [c0[0] + 1, 2, 1], [c0, c1])
+        r = ev(page, f"""() => {{
+          const c = chipOf('{KEY_PAIR_A}'), f = c.closest('.nb-study-figure');
+          const cr = c.getBoundingClientRect(), fr = f.getBoundingClientRect();
+          const hit = document.elementFromPoint(cr.left + cr.width / 2, cr.top + cr.height / 2);
+          return [c.hidden, chipOf('{KEY_PAIR_B}').hidden, fr.right - cr.right, cr.top - fr.top, hit === c, cr.width > 0 && cr.height > 0,
+                  c.tagName, c.getAttribute('aria-label'), c.classList.contains('nb-study-no-ink')];
+        }}""")
+        check('with strokes of its own each figure shows its undo chip', bool(r) and r[0] is False and r[1] is False, r)
+        check("the chip sits in the box's top-right corner above the canvas, so a tap there lands on it",
+              bool(r) and 0 <= r[2] <= 12 and 0 <= r[3] <= 12 and r[4] is True and r[5] is True, r)
+        check('the chip is a no-ink button named for what it does',
+              bool(r) and r[6] == 'BUTTON' and r[7] == 'Undo the last stroke on this figure' and r[8] is True, r)
+        ev(page, f"""() => {{
+          const c = chipOf('{KEY_PAIR_A}'), r = c.getBoundingClientRect(), y = r.top + r.height / 2;
+          penStroke(c, [[r.left + 2, y], [r.left + r.width / 2, y + 2], [r.right - 2, y]]);
+        }}""")
+        page.wait_for_timeout(80)
+        c2 = ev(page, counts)
+        check('a Pencil stroke on the chip writes nothing: no figure stroke, no page stroke', c2 == c1, [c1, c2])
+        ev(page, f"() => chipOf('{KEY_PAIR_A}').click()")
+        page.wait_for_timeout(80)
+        c3 = ev(page, counts)
+        px = ev(page, f"() => [inkAt(surf('{KEY_PAIR_A}'), 0.3, 0.3), inkAt(surf('{KEY_PAIR_A}'), 0.7, 0.7), chipOf('{KEY_PAIR_A}').hidden]")
+        check("Undo takes the figure's latest stroke; the earlier one stays, and so does the chip",
+              c3[1] == 1 and px[0] > 0 and px[1] == 0 and px[2] is False, [c3, px])
+        check('page ink and the other figure are untouched by it', c3[0] == c1[0] and c3[2] == c1[2], [c1, c3])
+        ev(page, f"() => chipOf('{KEY_PAIR_A}').click()")
+        page.wait_for_timeout(80)
+        r = ev(page, f"() => [chipOf('{KEY_PAIR_A}').hidden, inkAt(surf('{KEY_PAIR_A}'), 0.3, 0.3)]")
+        c4 = ev(page, counts)
+        check("once this device's last stroke on the figure is undone the chip hides", r == [True, 0] and c4[1] == 0, [r, c4])
+        ev(page, f"() => chipOf('{KEY_PAIR_B}').click()")
+        page.wait_for_timeout(80)
+        r = ev(page, f"() => [chipOf('{KEY_PAIR_B}').hidden, inkAt(surf('{KEY_PAIR_B}'), 0.5, 0.75), inkAt(surf('{KEY_PAIR_B}'), 0.5, 205 / 560)]")
+        c5 = ev(page, counts)
+        check("Undo never takes another device's stroke: it stays, the chip hides", r[0] is True and r[1] == 0 and r[2] > 0 and c5 == [c1[0], 0, 0], [r, c5])
+        ev(page, "() => { pageInk.destroy(); window.pageInk = null; }")
 
         page.screenshot(path=os.path.join(OUT, 'study-figure-ink.png'))
         check('no page errors', not errors, errors[:3])

@@ -10,20 +10,32 @@
  * keyed `fig:<itemId>:<file name>`: a renamed figure is a new version (FORMAT.md), so it starts
  * blank while the old strokes stay in the file, unshown.
  *
- * Always on: no button, no read-only. The surface carries `.nb-study-ink`, which page ink's
- * PAGE_INK_SKIP already skips, so a figure has exactly one ink layer. The surface's canvas only
- * acts on pen and mouse pointerdowns; fingers never draw and nothing prevents a touch scroll.
- * Figure ink is FIGURE_INK in both themes: the figures are drawn on white, where the theme's
- * --text-normal (light grey in the dark theme) would leave the labels nearly invisible.
- * Nothing here imports 'obsidian', so the pure parts run under node:test.
+ * Always on: no read-only. The surface carries `.nb-study-ink`, which page ink's PAGE_INK_SKIP
+ * already skips, so a figure has exactly one ink layer. The surface's canvas only acts on pen and
+ * mouse pointerdowns; fingers never draw and nothing prevents a touch scroll. Figure ink is
+ * FIGURE_INK in both themes: the figures are drawn on white, where the theme's --text-normal
+ * (light grey in the dark theme) would leave the labels nearly invisible.
+ *
+ * Each figure has its own Undo chip in its top-right corner, shown only while this device has a
+ * stroke on that figure: the header's Undo ink takes page strokes only, and the call and work
+ * Undo buttons their own canvases. Nothing here imports 'obsidian', so the pure parts run under
+ * node:test.
  */
-import type { BlockEnv, InkSurface } from '../view/host';
+import type { BlockEnv, InkStroke, InkSurface } from '../view/host';
 
 /** The paper width every ink surface draws on. */
 const PAPER_W = 800;
 
 /** The colour figure strokes draw in, whatever the theme: dark on the figures' white. */
 export const FIGURE_INK = '#1f1f1f';
+
+/** The undo chip's accessible name. Generic: on a hidden pick it says nothing about the topic. */
+export const FIGURE_UNDO_LABEL = 'Undo the last stroke on this figure';
+
+/** True when `device` wrote one of `strokes`: a figure's undo chip shows only then. */
+export function hasOwnStroke(strokes: readonly InkStroke[], device: string): boolean {
+  return strokes.some(s => s.dev === device);
+}
 
 /** The paper height a figure's surface needs: the image's aspect ratio at 800 paper px wide. */
 export function figureHeight(naturalWidth: number, naturalHeight: number): number {
@@ -64,9 +76,10 @@ const mounts = new WeakMap<HTMLImageElement, FigureMount>();
 /**
  * Wraps `img` in a `.nb-study-figure` box and, once the image has loaded (`naturalWidth > 0`),
  * mounts `env.ink.surface(env.doc, box, key, {height, color})` with `height` the image's aspect
- * ratio in paper px and `color` FIGURE_INK; the image is prepended into `surface.el`, under its canvas. Returns the surface when
- * the image was already loaded, else null: the mount still happens on `load`, and on `error`
- * everything is unwrapped again — an image that never loads gains nothing.
+ * ratio in paper px and `color` FIGURE_INK; the image is prepended into `surface.el`, under its
+ * canvas, and the undo chip goes in the box after the surface. Returns the surface when the image
+ * was already loaded, else null: the mount still happens on `load`, and on `error` everything is
+ * unwrapped again — an image that never loads gains nothing.
  *
  * Calling it twice on the same image returns the first result (idempotent on re-renders).
  */
@@ -87,6 +100,8 @@ export function figureSurface(img: HTMLImageElement, env: BlockEnv, key: string)
   const rec: FigureMount = { surface: null, destroy };
   mounts.set(img, rec);
   let done = false;
+  let chip: HTMLButtonElement | null = null;
+  let offChange: (() => void) | null = null;
 
   function mount(): void {
     if (done || !(img.naturalWidth > 0)) return;
@@ -101,6 +116,22 @@ export function figureSurface(img: HTMLImageElement, env: BlockEnv, key: string)
     surface.el.style.borderRadius = '0';
     // The canvas is position:absolute over the whole surface element: the image sits under it.
     surface.el.prepend(img);
+    // The undo chip: absolute in the box's top-right corner, above the canvas (BLOCK_CSS). Outside
+    // surface.el, a button and `.nb-study-no-ink`, so a Pencil on it starts neither figure ink
+    // (SURFACE_SKIP) nor page ink (PAGE_INK_SKIP); its click undoes this figure's latest stroke.
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'nb-study-figure-undo nb-study-no-ink';
+    b.setAttribute('aria-label', FIGURE_UNDO_LABEL);
+    b.textContent = 'Undo';
+    b.addEventListener('click', onUndo);
+    box.appendChild(b);
+    chip = b;
+    const sync = () => {
+      b.hidden = !hasOwnStroke(surface.strokes(), env.ctx.settings().device);
+    };
+    offChange = surface.onChange(sync);
+    sync();
     try {
       env.relayout();
     } catch (e) {
@@ -108,10 +139,23 @@ export function figureSurface(img: HTMLImageElement, env: BlockEnv, key: string)
     }
   }
 
+  function onUndo(e: Event): void {
+    e.preventDefault();
+    e.stopPropagation();
+    rec.surface?.undo();
+  }
+
   function destroy(): void {
     done = true;
     img.removeEventListener('load', mount);
     img.removeEventListener('error', destroy);
+    offChange?.();
+    offChange = null;
+    if (chip) {
+      chip.removeEventListener('click', onUndo);
+      chip.remove();
+      chip = null;
+    }
     // Put the image back where the box stands (it may sit inside surface.el), then drop the box.
     if (box.parentNode) box.parentNode.insertBefore(img, box);
     box.remove();

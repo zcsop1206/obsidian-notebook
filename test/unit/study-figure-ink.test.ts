@@ -5,8 +5,10 @@
 // Runs under node:test on a minimal fake DOM (document.createElement is stubbed below).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { FIGURE_INK, figureHeight, figureKey, figureName, figureSurface, mountFigureInk } from '../../src/study/blocks/figure-ink';
-import type { BlockEnv, InkSurface, InkSurfaceOptions } from '../../src/study/view/host';
+import {
+  FIGURE_INK, FIGURE_UNDO_LABEL, figureHeight, figureKey, figureName, figureSurface, hasOwnStroke, mountFigureInk,
+} from '../../src/study/blocks/figure-ink';
+import type { BlockEnv, InkStroke, InkSurface, InkSurfaceOptions } from '../../src/study/view/host';
 import type { StudyDoc } from '../../src/study/types';
 
 type Listener = (e: unknown) => void;
@@ -18,6 +20,9 @@ class El {
   parentNode: El | null = null;
   style: Record<string, string> = {};
   className = '';
+  hidden = false;
+  textContent = '';
+  type = '';
   private attrs = new Map<string, string>();
   private ls = new Map<string, Listener[]>();
   constructor(tag: string) {
@@ -62,7 +67,8 @@ class El {
     if (i >= 0) a.splice(i, 1);
   }
   fire(t: string): void {
-    for (const fn of (this.ls.get(t) || []).slice()) fn({ type: t });
+    const e = { type: t, preventDefault: () => {}, stopPropagation: () => {} };
+    for (const fn of (this.ls.get(t) || []).slice()) fn(e);
   }
   setAttribute(k: string, v: string): void {
     this.attrs.set(k, v);
@@ -115,34 +121,69 @@ interface MountCall {
   opts: InkSurfaceOptions | undefined;
 }
 
-/** A fake BlockEnv whose ink.surface records the call, appends el like the real one, returns a stub. */
-function fakeEnv(): { env: BlockEnv; calls: MountCall[]; surfaces: { el: El; destroyed: number }[]; relayouts: () => number } {
+/** A stub surface: its strokes and listeners, and how often undo and destroy ran. */
+interface Stub {
+  el: El;
+  list: InkStroke[];
+  destroyed: number;
+  undos: number;
+  /** Replaces the strokes and tells the listeners, as the store does after any change. */
+  set(l: InkStroke[]): void;
+}
+
+/**
+ * A fake BlockEnv on this device (`device`) whose ink.surface records the call, appends el like the
+ * real one and returns a stub; the stub's undo drops this device's latest stroke, as the store does.
+ */
+function fakeEnv(device = 'desktop'): { env: BlockEnv; calls: MountCall[]; surfaces: Stub[]; relayouts: () => number } {
   const calls: MountCall[] = [];
-  const surfaces: { el: El; destroyed: number }[] = [];
+  const surfaces: Stub[] = [];
   let relayouts = 0;
   const env = {
     doc: DOC,
+    ctx: { settings: () => ({ root: 'study', device }) },
     ink: {
       surface: (_doc: StudyDoc, container: HTMLElement, key: string, opts?: InkSurfaceOptions): InkSurface => {
         calls.push({ container: container as unknown as El, key, opts });
-        const s = {
-          el: new El('div') as unknown as HTMLElement,
+        const fns = new Set<(l: InkStroke[]) => void>();
+        const s: Stub = {
+          el: new El('div'),
+          list: [],
           destroyed: 0,
-          strokes: () => [],
-          count: () => 0,
-          onChange: () => () => {},
+          undos: 0,
+          set: l => {
+            s.list = l;
+            for (const fn of [...fns]) fn(l.slice());
+          },
+        };
+        const surface = {
+          el: s.el,
+          strokes: () => s.list.slice(),
+          count: () => s.list.length,
+          onChange: (fn: (l: InkStroke[]) => void) => {
+            fns.add(fn);
+            return () => {
+              fns.delete(fn);
+            };
+          },
           setReadOnly: () => {},
-          undo: () => null,
+          undo: () => {
+            s.undos++;
+            const own = s.list.filter(x => x.dev === device);
+            const last = own[own.length - 1];
+            if (last) s.set(s.list.filter(x => x !== last));
+            return last || null;
+          },
           clear: () => {},
           layout: () => {},
           destroy: () => {
             s.destroyed++;
             s.el.remove();
           },
-        } as unknown as InkSurface & { destroyed: number };
-        surfaces.push(s as unknown as { el: El; destroyed: number });
-        container.appendChild(s.el);
-        return s;
+        };
+        surfaces.push(s);
+        container.appendChild(s.el as unknown as HTMLElement);
+        return surface as unknown as InkSurface;
       },
     },
     relayout: () => {
@@ -151,6 +192,9 @@ function fakeEnv(): { env: BlockEnv; calls: MountCall[]; surfaces: { el: El; des
   };
   return { env: env as unknown as BlockEnv, calls, surfaces, relayouts: () => relayouts };
 }
+
+/** A stroke on `dev`, enough for the chip's test. */
+const stroke = (id: string, dev: string): InkStroke => ({ id, dev, p: [[1, 1, 0.5, 0]], t0: 1 });
 
 const asImg = (e: El) => e as unknown as HTMLImageElement;
 
@@ -194,6 +238,37 @@ test('figure-ink: a loaded image gets a surface over it, the image under the can
   assert.equal(typeof h === 'function' ? h() : h, 600, 'height from the natural size');
   const color = calls[0].opts && calls[0].opts.color;
   assert.equal(color ? color({ id: 's-1', p: [], t0: 0 }) : '', FIGURE_INK, 'figure ink is dark in both themes, never --text-normal');
+});
+
+test('figure-ink: the undo chip shows only while this device has a stroke there, and undoes on the surface', () => {
+  assert.equal(hasOwnStroke([stroke('a', 'ipad'), stroke('b', 'desktop')], 'desktop'), true);
+  assert.equal(hasOwnStroke([stroke('a', 'ipad')], 'desktop'), false);
+  assert.equal(hasOwnStroke([], 'desktop'), false);
+  const { env, surfaces } = fakeEnv('desktop');
+  const parent = new El('div');
+  const img = new Img('figs/circuit.svg');
+  img.complete = true;
+  img.naturalWidth = 400;
+  img.naturalHeight = 300;
+  parent.appendChild(img);
+  figureSurface(asImg(img), env, 'fig:item:circuit.svg');
+  const box = parent.children[0];
+  const chip = box.children[box.children.length - 1];
+  assert.equal(chip.tag, 'button', 'the chip is a button in the box, after the surface');
+  assert.equal(box.children[0], surfaces[0].el, 'the surface comes first, so the chip is not inside it');
+  assert.equal(chip.className, 'nb-study-figure-undo nb-study-no-ink', 'a control neither figure nor page ink writes on');
+  assert.equal(chip.getAttribute('aria-label'), FIGURE_UNDO_LABEL);
+  assert.equal(chip.textContent, 'Undo');
+  assert.equal(chip.hidden, true, 'no strokes: hidden');
+  const s = surfaces[0];
+  s.set([stroke('s-1', 'ipad')]);
+  assert.equal(chip.hidden, true, "another device's stroke is not this device's to undo");
+  s.set([...s.list, stroke('s-2', 'desktop')]);
+  assert.equal(chip.hidden, false, 'shown once this device has a stroke on the figure');
+  chip.fire('click');
+  assert.equal(s.undos, 1, 'a tap undoes on the surface');
+  assert.deepEqual(s.list.map(x => x.id), ['s-1'], "only this device's stroke went");
+  assert.equal(chip.hidden, true, 'hidden again once its own stroke is gone');
 });
 
 test('figure-ink: a second call on the same image returns the same surface', () => {

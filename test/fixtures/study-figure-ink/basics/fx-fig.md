@@ -35,6 +35,18 @@ An invented circuit for the figure-ink checks. The figures are bare file names, 
 > methods: mesh
 > 1. One mesh goes round each loop, both clockwise.
 
+> [!problem] Two figures (d 1)
+> Pick a reference node in each of these two circuits.
+>
+> ![two-resistor circuit](s13-circuit.svg)
+>
+> ![resistor bridge](s13-bridge.svg)
+^inv-el-pair
+
+> [!solution]- Solution
+> methods: nodal
+> 1. The bottom rail in the first, the bottom corner of the bridge in the second.
+
 > [!derive] From this bridge circuit, derive the balance condition in terms of the four resistors.
 >
 > ![resistor bridge](s13-bridge.svg)

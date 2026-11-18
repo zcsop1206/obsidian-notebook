@@ -305,8 +305,10 @@ export const BLOCK_CSS = `
 .nb-sb .nb-sb-ticks{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}
 .nb-sb .nb-sb-gap{padding:8px 12px;border-left:3px solid var(--color-purple,#8a3ffc);background:var(--background-secondary)}
 .nb-sb .nb-sb-legend i{display:inline-block;width:16px;height:3px;border-radius:2px;vertical-align:middle;margin:0 5px 0 8px}
-.nb-study-figure{display:inline-block;max-width:100%;line-height:0}
+.nb-study-figure{display:inline-block;max-width:100%;line-height:0;position:relative;isolation:isolate}
 .nb-study-figure img{display:block;width:100%;height:auto;-webkit-user-drag:none}
+.nb-study-figure .nb-study-figure-undo{position:absolute;top:6px;right:6px;z-index:1;margin:0;height:auto;min-height:0;padding:4px 10px;font-size:12px;line-height:1.3;border-radius:999px;border:1px solid var(--background-modifier-border,#ddd);background:var(--background-primary,#fff);color:var(--text-normal);box-shadow:0 1px 4px rgba(0,0,0,.18);cursor:pointer}
+.nb-study-figure .nb-study-figure-undo[hidden]{display:none}
 `;
 
 const STYLE_ID = 'nb-study-blocks-css';
