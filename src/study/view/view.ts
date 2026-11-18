@@ -3,8 +3,9 @@
  * 800 paper px (a 120 px right margin for marks and ink) and scaled to the view width, at most
  * 1.4x. Each passage is rendered on its own with MarkdownRenderer into `div.sr-passage[data-a]`;
  * anchored list items get `data-a` on their `<li>`; block passages mount through `mountFor`;
- * solutions get no element. Passages render in order in small slices so a long doc never blocks
- * the page; navigation waits only for the passages up to its target.
+ * a solution its block shows gets no element, and an example's renders as its folded callout.
+ * Passages render in order in small slices so a long doc never blocks the page; navigation waits
+ * only for the passages up to its target.
  *
  * Also here: the header (Library, tabs, Back, Today, Map, Changes, Undo ink), the back stack with
  * scroll restore and a flash on the target, the library (by kind and area, with search), the peek,
@@ -485,11 +486,12 @@ export class StudyView extends ItemView {
       el.setText(LABEL_TEXT);
       return;
     }
-    if (p.block) {
+    // A solution has no block of its own (mountFor gives none): one that is on the page (an
+    // example's) renders below as markdown, the folded callout Obsidian opens on a tap.
+    const mount = p.block ? mountFor(p.block) : null;
+    if (p.block && mount) {
       el.addClass('sr-block');
       el.setAttribute('data-block', p.block.type);
-      const mount = mountFor(p.block);
-      if (!mount) return;
       try { r.blocks.push(mount(el, this.blockEnv(r, p))); }
       catch (e) {
         console.error('[study] block failed to mount', p.anchor, e);
