@@ -8,6 +8,9 @@ import {
   mergeSession, methodChoices, methodHit, newSession, problemItem, readyToLog, settleEvent, skipTicks, solutionOpen,
   tapVerb, ticksOpen, toggleNone, toggleTick, verbsOpen, type Session,
 } from '../../src/study/blocks/problem';
+import { copyOldProblemInk, homeDoc, problemInkKeys, problemsDoc, strokesToCopy } from '../../src/study/blocks/home';
+import { parseInkFile, type InkFile } from '../../src/study/ink/model';
+import type { InkAdapter } from '../../src/study/ink/store';
 import { buildIndex } from '../../src/study/format/index-build';
 import type { StudyEvent } from '../../src/study/types';
 
@@ -209,4 +212,74 @@ test('problem: items from the index, hooks from a basic, and the tick choices', 
   // A basic/anchor method is labelled without its doc id, so a hidden pick's tick list does not name its topic.
   const labels = methodChoices(content, { methods: ['fx-div/cong-arith', 'fx-div/no-such'] }).map(m => m.label);
   assert.ok(labels.every(l => !l.includes('fx-div')), labels.join(' | '));
+});
+
+/* ------------------------- S12: the standalone view's home doc ------------------------- */
+
+test('s12: homeDoc is the problem\'s own doc, the bank file for a bank problem, else the synthetic doc', () => {
+  assert.equal(homeDoc(content, 'inv-fx-last-digit', 'study').id, 'fx-units');
+  assert.equal(homeDoc(content, 'putnam-2019-a1', 'study').id, 'fxbank', 'a bank problem\'s home stays the bank file');
+  const fb = homeDoc(content, 'no-such-problem', 'study');
+  assert.equal(fb.id, 'problems');
+  assert.equal(fb.path, 'study/problems.md');
+  assert.deepEqual(homeDoc(content, 'no-such-problem', 'study'), problemsDoc('study'));
+  assert.deepEqual(problemInkKeys('inv-fx-last-digit'), ['call:inv-fx-last-digit', 'work:inv-fx-last-digit']);
+});
+
+/** A problems-doc ink file and a home-doc ink file, for the old-strokes copy. */
+function inkFiles() {
+  const srcText = JSON.stringify({
+    v: 1, doc: 'problems', strokes: [
+      { id: 's-call', p: [[10, 40, 0.5, 0], [90, 44, 0.5, 300]], t0: 1, blk: 'call:inv-fx-last-digit' },
+      { id: 's-work', p: [[10, 40, 0.5, 0], [90, 44, 0.5, 300]], t0: 2, blk: 'work:inv-fx-last-digit' },
+      { id: 's-other', p: [[10, 40, 0.5, 0], [90, 44, 0.5, 300]], t0: 3, blk: 'call:inv-fx-consecutive' },
+      { id: 's-page', p: [[10, 40, 0.5, 0], [90, 44, 0.5, 300]], t0: 4, blk: null, at: { a: 'x', dy: 0, rev: '', v: 1 } },
+    ],
+  });
+  const src = parseInkFile(srcText, 'problems');
+  const home: InkFile = { v: 1, doc: 'fx-units', strokes: [] };
+  return { srcText, src, home };
+}
+
+test('s12: strokesToCopy takes only this problem\'s call and work strokes, keeping ids, and is idempotent', () => {
+  const { src, home } = inkFiles();
+  const keys = problemInkKeys('inv-fx-last-digit');
+  const moves = strokesToCopy(src, home, keys);
+  assert.deepEqual(moves.map(s => s.id), ['s-call', 's-work'], 'the problem\'s two keys, no other problem\'s, no page ink');
+  // A home file that already holds one of them gets only the rest; with both, nothing.
+  const partial: InkFile = { v: 1, doc: 'fx-units', strokes: [moves[0]] };
+  assert.deepEqual(strokesToCopy(src, partial, keys).map(s => s.id), ['s-work']);
+  const full: InkFile = { v: 1, doc: 'fx-units', strokes: [...moves] };
+  assert.equal(strokesToCopy(src, full, keys).length, 0, 'a second copy changes nothing');
+});
+
+test('s12: copyOldProblemInk writes the merged home file once and never edits the old file', async () => {
+  const { srcText } = inkFiles();
+  const files = new Map<string, string>([['study/ink/problems.ipad.json', srcText]]);
+  const adapter: InkAdapter = {
+    exists: async p => files.has(p),
+    mkdir: async () => {},
+    read: async p => { const t = files.get(p); if (t === undefined) throw new Error('ENOENT ' + p); return t; },
+    write: async (p, d) => { files.set(p, d); },
+    list: async () => ({ files: [...files.keys()], folders: [] }),
+  };
+  const n1 = await copyOldProblemInk(adapter, 'study', 'ipad', 'fx-units', 'inv-fx-last-digit');
+  assert.equal(n1, 2);
+  const written = parseInkFile(files.get('study/ink/fx-units.ipad.json')!, 'fx-units');
+  assert.deepEqual(written.strokes.map(s => `${s.id}:${s.blk}`).sort(), ['s-call:call:inv-fx-last-digit', 's-work:work:inv-fx-last-digit']);
+  assert.equal(await copyOldProblemInk(adapter, 'study', 'ipad', 'fx-units', 'inv-fx-last-digit'), 0, 'the copy runs once');
+  assert.equal(files.get('study/ink/problems.ipad.json'), srcText, 'the old file is never edited');
+  // An existing home file keeps its own strokes and its hide/keep lists.
+  files.set('study/ink/fx-div.ipad.json', JSON.stringify({ v: 1, doc: 'fx-div', strokes: [{ id: 's-own', p: [[1, 2, 0.5, 0]], t0: 9, blk: 'call:inv-fx-consecutive' }], hide: ['laptop:s-x'], keep: { 'laptop:s-y': 'abc' } }));
+  const src2 = parseInkFile(JSON.stringify({ v: 1, doc: 'problems', strokes: [{ id: 's-c2', p: [[1, 2, 0.5, 0], [4, 5, 0.5, 6]], t0: 5, blk: 'call:inv-fx-consecutive' }] }), 'problems');
+  files.set('study/ink/problems.ipad.json', JSON.stringify({ v: 1, doc: 'problems', strokes: src2.strokes }));
+  assert.equal(await copyOldProblemInk(adapter, 'study', 'ipad', 'fx-div', 'inv-fx-consecutive'), 1);
+  const merged = parseInkFile(files.get('study/ink/fx-div.ipad.json')!, 'fx-div');
+  assert.deepEqual(merged.strokes.map(s => s.id), ['s-own', 's-c2'], 'own strokes are kept, the copy appended');
+  assert.deepEqual(merged.hide, ['laptop:s-x']);
+  assert.deepEqual(merged.keep, { 'laptop:s-y': 'abc' });
+  // The fallback home and a missing old file are no-ops.
+  assert.equal(await copyOldProblemInk(adapter, 'study', 'ipad', 'problems', 'inv-fx-consecutive'), 0);
+  files.delete('study/ink/problems.ipad.json');
+  assert.equal(await copyOldProblemInk(adapter, 'study', 'ipad', 'fx-units', 'inv-fx-last-digit'), 0);
 });

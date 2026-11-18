@@ -7,7 +7,8 @@
 # (test/harness.html), the S4 ink module and the blocks bundled by test/study-blocks-build.mjs.
 # Run: python test/run_study_blocks_test.py (port NB_TEST_PORT_BASE + 10, or NB_STUDY_BLOCKS_PORT).
 # Exits 1 on any failure.
-import json, os, subprocess, sys, time
+import json, mimetypes, os, subprocess, sys, time
+from urllib.parse import unquote, urlparse
 from playwright.sync_api import sync_playwright
 import serve  # test/serve.py: the static server, refusing a port another run holds
 
@@ -120,6 +121,26 @@ try:
         errors = []
         page.on('pageerror', lambda e: errors.append(str(e)))
         page.on('console', lambda m: m.type == 'error' and errors.append(m.text))
+        # S12: images render with the resolved vault path as src; the route serves those paths
+        # from the fixture trees so a resolved <img> actually loads (and a 404 would show here).
+        def vault_media(route):
+            # The <img> src is the vault path, resolved against the harness page's /test/ URL.
+            path = unquote(urlparse(route.request.url).path).lstrip('/')
+            i = path.find('study/')
+            body = None
+            if i >= 0:
+                rel = path[i + len('study/'):]
+                for base in ('test/fixtures/study-blocks', 'test/fixtures/study'):
+                    full = os.path.normpath(os.path.join(ROOT, base, rel))
+                    if full.startswith(os.path.normpath(os.path.join(ROOT, base))) and os.path.isfile(full):
+                        with open(full, 'rb') as fh:
+                            body = fh.read()
+                        break
+            if body is None:
+                route.fulfill(status=404, body=b'')
+            else:
+                route.fulfill(status=200, body=body, content_type=mimetypes.guess_type(path)[0] or 'application/octet-stream')
+        page.route('**/study/**', vault_media)
         page.goto(f'http://localhost:{port}/test/harness.html')
         page.add_script_tag(url=f'http://localhost:{port}/test/out/study-blocks.js')
         page.evaluate(SETUP, FILES)
@@ -255,6 +276,7 @@ try:
           studyBlocks.register(ctx);
           await ctx.ui.openProblem('inv-fx-consecutive', { hidden: true, why: 'A stretch pick.' });
           const v = app.workspace.getLeavesOfType('notebook-study-problem')[0].view;
+          for (let i = 0; i < 100 && !v.contentEl.querySelector('.nb-sb-pb'); i++) await new Promise(r => setTimeout(r, 20));
           window.pv = v;
           window.box = v.contentEl;
           return [v.getDisplayText(), v.contentEl.textContent];
@@ -273,10 +295,68 @@ try:
         s = ev(page, "() => evs('settle').filter(e => e.item === 'inv-fx-consecutive')")
         c = ev(page, "() => evs('call').filter(e => e.item === 'inv-fx-consecutive')")
         check('the hidden pick logs hidden in the call and the settle', len(c) == 1 and c[0]['hidden'] is True and len(s) == 1 and s[0]['hidden'] is True and s[0]['called'] == [] and s[0]['used'] == ['parity'], [c, s])
-        f = ev(page, "async () => { await studyBlocks.flushInk(ctx); const j = fs.get('study/ink/problems.desktop.json'); return j ? JSON.parse(j).strokes.map(s => s.blk) : null; }")
-        check('the standalone view files its ink under the problems doc', f == ['call:inv-fx-consecutive'], f)
-        r = ev(page, "async () => { await ctx.ui.openProblem('putnam-2019-a1'); const v = app.workspace.getLeavesOfType('notebook-study-problem').find(l => l.view.getState().id === 'putnam-2019-a1').view; return [v.getDisplayText(), v.contentEl.textContent, !!v.contentEl.querySelector('a.nb-sb-ext')]; }")
+        f = ev(page, "async () => { await studyBlocks.flushInk(ctx); const j = fs.get('study/ink/fx-drill.desktop.json'); return j ? JSON.parse(j).strokes.map(s => s.blk) : null; }")
+        check('the standalone view files its ink under the home doc', f is not None and f.count('call:inv-fx-consecutive') == 1 and ev(page, "() => !fs.has('study/ink/problems.desktop.json')"), f)
+        r = ev(page, "async () => { await ctx.ui.openProblem('putnam-2019-a1'); const v = app.workspace.getLeavesOfType('notebook-study-problem').find(l => l.view.getState().id === 'putnam-2019-a1').view; for (let i = 0; i < 100 && !v.contentEl.querySelector('.nb-sb-pb'); i++) await new Promise(r => setTimeout(r, 20)); return [v.getDisplayText(), v.contentEl.textContent, !!v.contentEl.querySelector('a.nb-sb-ext')]; }")
         check('a bank problem opens by reference with its statement link', 'Putnam 2019 A1' in r[1] and r[2] and r[0] == 'Problem · Putnam 2019 A1', r[:1])
+
+        # --- 9. S12: the standalone view is the problem as in its doc. The figure file and the
+        # old-style ink (call/work under the `problems` doc) go into the mock vault; the route
+        # registered above serves the resolved vault path so the figure really loads.
+        ev(page, """() => {
+          window.inkCtx = ctx; window.ink = studyBlocks.createInkApi(ctx);
+          dirs.add('study/ink'); dirs.add('study/basics/figs');
+          fs.set('study/basics/figs/s12-divider.svg', 'served by the vault route');
+          fs.set('study/ink/problems.desktop.json', JSON.stringify({ v: 1, doc: 'problems', strokes: [
+            { id: 's-mig-call', p: [[10, 40, 0.5, 0], [90, 44, 0.5, 300]], t0: 1, blk: 'call:inv-s12-divider' },
+            { id: 's-mig-work', p: [[10, 40, 0.5, 0], [90, 44, 0.5, 300]], t0: 2, blk: 'work:inv-s12-divider' },
+            { id: 's-keep', p: [[10, 40, 0.5, 0], [90, 44, 0.5, 300]], t0: 3, blk: 'call:inv-fx-consecutive' }] }));
+          window.PROBLEMS_TEXT = fs.get('study/ink/problems.desktop.json');
+        }""")
+        r = ev(page, """async () => {
+          await ctx.ui.openProblem('inv-s12-divider', { why: 'S12 check' });
+          const v = app.workspace.getLeavesOfType('notebook-study-problem').find(l => l.view.getState().id === 'inv-s12-divider').view;
+          for (let i = 0; i < 100 && !v.contentEl.querySelector('.nb-sb-stmt'); i++) await new Promise(r => setTimeout(r, 20));
+          window.box = v.contentEl;
+          const img = box.querySelector('.nb-sb-stmt img');
+          for (let i = 0; i < 100 && !(img && img.complete); i++) await new Promise(r => setTimeout(r, 20));
+          return [img && img.getAttribute('src'), img ? img.naturalWidth : -1, !!box.querySelector('img[data-unresolved]')];
+        }""")
+        check('a bare-name figure in a subfolder resolves to its vault path', r[0] == 'study/basics/figs/s12-divider.svg', r)
+        check('the resolved figure actually loads (naturalWidth > 0)', r[1] > 0, r)
+        check('an embed naming a missing file is flagged data-unresolved', r[2] is True, r)
+        m = ev(page, """() => {
+          const home = fs.get('study/ink/s12-figure.desktop.json');
+          return [home ? JSON.parse(home).strokes.map(s => s.id + ':' + s.blk).sort() : null, fs.get('study/ink/problems.desktop.json') === window.PROBLEMS_TEXT];
+        }""")
+        check('the old strokes were copied into the home doc\'s file, ids kept', m[0] == ['s-mig-call:call:inv-s12-divider', 's-mig-work:work:inv-s12-divider'], m)
+        check('the old ink file was never edited, and the other problem\'s strokes stayed', m[1] is True)
+        check('the migrated call ink unlocks the chips in the standalone view', ev(page, "() => [...box.querySelectorAll('button[data-sb=\"conf\"]')].map(b => b.disabled)") == [False] * 6)
+        # Ink written in the doc's block shows in the standalone view, and the reverse: both file
+        # under the home doc (`window.ink` above is the api over the same ctx the view uses).
+        ev(page, "() => { mountBlock('problem', 's12-figure', 'inv-s12-divider'); penStroke(surf('call:inv-s12-divider'), 60); }")
+        r = ev(page, """async () => {
+          await ctx.ui.openProblem('inv-s12-divider');
+          const v = app.workspace.getLeavesOfType('notebook-study-problem').find(l => l.view.getState().id === 'inv-s12-divider').view;
+          window.box = v.contentEl;
+          const probe = window.ink.surface(content.docs.get('s12-figure'), document.createElement('div'), 'call:inv-s12-divider');
+          const n = probe.strokes().length;
+          probe.destroy();
+          return n;
+        }""")
+        check('call ink written in the doc\'s block shows in the standalone view', r == 2, r)
+        ev(page, "() => penStroke(surf('call:inv-s12-divider'), 80)")
+        ev(page, "async () => await studyBlocks.flushInk(ctx)")
+        f = ev(page, "() => JSON.parse(fs.get('study/ink/s12-figure.desktop.json')).strokes.map(s => s.blk)")
+        check('doc and standalone ink share one file under the home doc', f.count('call:inv-s12-divider') == 3 and f.count('work:inv-s12-divider') == 1 and not ev(page, "() => fs.get('study/ink/problems.desktop.json') !== window.PROBLEMS_TEXT"), f)
+        ev(page, "() => mountBlock('problem', 's12-figure', 'inv-s12-divider')")
+        r = ev(page, """() => {
+          const probe = window.ink.surface(content.docs.get('s12-figure'), document.createElement('div'), 'call:inv-s12-divider');
+          const n = probe.strokes().length;
+          probe.destroy();
+          return n;
+        }""")
+        check('call ink written in the standalone view shows in the doc block', r == 3, r)
 
         page.screenshot(path=os.path.join(OUT, 'study-blocks.png'))
         check('no page errors', not errors, errors[:3])

@@ -574,27 +574,38 @@
   // study fixtures: headings, paragraphs, lists (nested by indent), bold and italics, inline and
   // display math as text in span/div.math, code spans and fences, tables, blockquotes, callouts as
   // div.callout[data-callout] (folded ones get .is-collapsed), internal links as
-  // a.internal-link[data-href] and external ones as a.external-link. window.markdownRenders counts calls.
+  // a.internal-link[data-href] and external ones as a.external-link. Image embeds `![alt](href)`
+  // resolve as Obsidian does (S12): through metadataCache.getFirstLinkpathDest(href, sourcePath),
+  // emitting the resolved vault path as src; an unresolved embed is marked data-unresolved (no src,
+  // so the browser does not fetch and no 404 lands in the console). External URLs keep their href.
+  // window.markdownRenders counts calls.
   const escHtml = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-  const inlineMd = src => {
+  const inlineMd = (src, sourcePath) => {
     const keep = [];
     const stash = html => `\u0000${keep.push(html) - 1}\u0000`;
     let s = src.replace(/`([^`]+)`/g, (_, c) => stash(`<code>${escHtml(c)}</code>`));
     s = s.replace(/\$\$([^$]+)\$\$/g, (_, m) => stash(`<span class="math math-block">${escHtml(m)}</span>`));
     s = s.replace(/\$([^$\n]+)\$/g, (_, m) => stash(`<span class="math math-inline">${escHtml(m)}</span>`));
     s = s.replace(/(!?)\[((?:[^\]\\]|\\.)*)\]\(\s*<?([^)\s>]+)>?(?:\s+"[^"]*")?\s*\)/g, (_, bang, text, href) => {
-      if (bang) return stash(`<img alt="${escHtml(text)}" src="${escHtml(href)}">`);
-      if (/^[a-z][a-z0-9+.-]*:/i.test(href)) return stash(`<a class="external-link" href="${escHtml(href)}" target="_blank" rel="noopener">${inlineMd(text)}</a>`);
+      if (bang) {
+        if (/^[a-z][a-z0-9+.-]*:/i.test(href)) return stash(`<img alt="${escHtml(text)}" src="${escHtml(href)}">`);
+        let eh = href;
+        try { eh = decodeURIComponent(href); } catch (e) { /* as written */ }
+        const dest = metadataCache.getFirstLinkpathDest(eh, sourcePath || '');
+        if (dest) return stash(`<img alt="${escHtml(text)}" src="${escHtml(dest.path)}">`);
+        return stash(`<img alt="${escHtml(text)}" data-unresolved>`);
+      }
+      if (/^[a-z][a-z0-9+.-]*:/i.test(href)) return stash(`<a class="external-link" href="${escHtml(href)}" target="_blank" rel="noopener">${inlineMd(text, sourcePath)}</a>`);
       let dh = href;
       try { dh = decodeURIComponent(href); } catch (e) { /* as written */ }
-      return stash(`<a class="internal-link" data-href="${escHtml(dh)}" href="${escHtml(dh)}">${inlineMd(text)}</a>`);
+      return stash(`<a class="internal-link" data-href="${escHtml(dh)}" href="${escHtml(dh)}">${inlineMd(text, sourcePath)}</a>`);
     });
     s = escHtml(s).replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/(^|[^*\w])\*([^*\s][^*]*)\*/g, '$1<em>$2</em>');
     return s.replace(/\u0000(\d+)\u0000/g, (_, i) => keep[+i]);
   };
   const LIST_LINE = /^(\s*)([-*+]|\d{1,9}[.)])\s+(.*)$/;
   const startsBlock = l => /^(#{1,6})\s/.test(l) || /^\s*(`{3,}|~{3,})/.test(l) || /^\s*\$\$/.test(l) || /^\s{0,3}>/.test(l) || /^\s{0,3}\|/.test(l) || LIST_LINE.test(l);
-  const renderBlocks = md => {
+  const renderBlocks = (md, sourcePath) => {
     const lines = String(md).replace(/\r\n?/g, '\n').split('\n');
     const out = [];
     let i = 0;
@@ -602,7 +613,7 @@
       const l = lines[i];
       let m;
       if (!l.trim()) { i++; continue; }
-      if ((m = /^(#{1,6})\s+(.*)$/.exec(l))) { out.push(`<h${m[1].length}>${inlineMd(m[2])}</h${m[1].length}>`); i++; continue; }
+      if ((m = /^(#{1,6})\s+(.*)$/.exec(l))) { out.push(`<h${m[1].length}>${inlineMd(m[2], sourcePath)}</h${m[1].length}>`); i++; continue; }
       if ((m = /^\s*(`{3,}|~{3,})(.*)$/.exec(l))) {
         const body = [];
         i++;
@@ -626,9 +637,9 @@
         if (head) {
           const type = head[1].toLowerCase(), fold = head[2];
           out.push(`<div class="callout${fold === '-' ? ' is-collapsible is-collapsed' : ''}" data-callout="${escHtml(type)}"${fold ? ` data-callout-fold="${fold}"` : ''}>` +
-            `<div class="callout-title"><div class="callout-title-inner">${inlineMd(head[3] || type)}</div></div>` +
-            `<div class="callout-content"${fold === '-' ? ' style="display:none"' : ''}>${renderBlocks(body.slice(1).join('\n'))}</div></div>`);
-        } else out.push(`<blockquote>${renderBlocks(body.join('\n'))}</blockquote>`);
+            `<div class="callout-title"><div class="callout-title-inner">${inlineMd(head[3] || type, sourcePath)}</div></div>` +
+            `<div class="callout-content"${fold === '-' ? ' style="display:none"' : ''}>${renderBlocks(body.slice(1).join('\n'), sourcePath)}</div></div>`);
+        } else out.push(`<blockquote>${renderBlocks(body.join('\n'), sourcePath)}</blockquote>`);
         continue;
       }
       if (/^\s{0,3}\|/.test(l)) {
@@ -636,7 +647,7 @@
         while (i < lines.length && /^\s{0,3}\|/.test(lines[i])) rows.push(lines[i++]);
         const cells = r => r.trim().replace(/^\||\|$/g, '').split('|').map(c => c.trim());
         const head = cells(rows[0]), body = rows.slice(2).map(cells);
-        out.push(`<table><thead><tr>${head.map(c => `<th>${inlineMd(c)}</th>`).join('')}</tr></thead><tbody>${body.map(r => `<tr>${r.map(c => `<td>${inlineMd(c)}</td>`).join('')}</tr>`).join('')}</tbody></table>`);
+        out.push(`<table><thead><tr>${head.map(c => `<th>${inlineMd(c, sourcePath)}</th>`).join('')}</tr></thead><tbody>${body.map(r => `<tr>${r.map(c => `<td>${inlineMd(c, sourcePath)}</td>`).join('')}</tr>`).join('')}</tbody></table>`);
         continue;
       }
       if ((m = LIST_LINE.exec(l))) {
@@ -651,12 +662,12 @@
           break;
         }
         const tag = ordered ? 'ol' : 'ul';
-        out.push(`<${tag}>${items.map(([first, ...rest]) => `<li>${inlineMd(first)}${rest.length ? renderBlocks(rest.join('\n')) : ''}</li>`).join('')}</${tag}>`);
+        out.push(`<${tag}>${items.map(([first, ...rest]) => `<li>${inlineMd(first, sourcePath)}${rest.length ? renderBlocks(rest.join('\n'), sourcePath) : ''}</li>`).join('')}</${tag}>`);
         continue;
       }
       const para = [];
       while (i < lines.length && lines[i].trim() && !(para.length && startsBlock(lines[i]))) para.push(lines[i++]);
-      out.push(`<p>${inlineMd(para.join('\n')).replace(/\n/g, ' ')}</p>`);
+      out.push(`<p>${inlineMd(para.join('\n'), sourcePath).replace(/\n/g, ' ')}</p>`);
     }
     return out.join('');
   };
@@ -667,7 +678,7 @@
       if (!component) throw new Error('MarkdownRenderer.render: no component');
       window.markdownRenders++;
       const div = document.createElement('div');
-      div.innerHTML = renderBlocks(markdown);
+      div.innerHTML = renderBlocks(markdown, sourcePath);
       while (div.firstChild) el.appendChild(div.firstChild);
     },
     async renderMarkdown(markdown, el, sourcePath, component) { return MarkdownRenderer.render(app, markdown, el, sourcePath, component); },

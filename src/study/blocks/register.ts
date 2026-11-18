@@ -9,22 +9,14 @@ import { Component, ItemView, MarkdownRenderer, type WorkspaceLeaf } from 'obsid
 import type { StudyContext } from '../context';
 import type { Passage, StudyDoc } from '../types';
 import type { BlockEnv } from '../view/host';
+import type { InkAdapter } from '../ink/store';
 import { createInkApi } from '../ink';
 import { ensureStyles, removeStyles } from './drill';
+import { copyOldProblemInk, homeDoc, problemsDoc, PROBLEMS_DOC } from './home';
 import { PROBLEM_VIEW, mountSession, openProblem, problemItem, type SessionHandle } from './problem';
 import { registerUi as registerKataUi } from './kata';
 
-/** The doc a standalone problem's ink is filed under: `ink/problems.<device>.json`, keys `call:<id>`, `work:<id>`. */
-export const PROBLEMS_DOC = 'problems';
-
-/** A minimal doc for the standalone view: it carries only the id the ink store files under. */
-export function problemsDoc(root: string): StudyDoc {
-  return {
-    id: PROBLEMS_DOC, path: `${root}/${PROBLEMS_DOC}.md`, kind: 'other', title: 'Problems', areas: [], needs: [], build: 0,
-    tracks: [], by: 'model', labelled: false, meta: {}, passages: [], links: [], theorems: [], proofs: [], derives: [],
-    problems: [], recalls: [], kata: null, bank: [], bankRefs: [], warnings: [],
-  };
-}
+export { PROBLEMS_DOC, problemsDoc };
 
 function problemPassage(id: string): Passage {
   return { anchor: id, explicit: true, kind: 'callout', start: 0, end: 0, source: '', markdown: '', hash: '', block: { type: 'problem', id } };
@@ -37,11 +29,11 @@ interface ProblemState {
   why: string;
 }
 
-/** Renders markdown with Obsidian's renderer; as plain text where there is none (the test harness's mock). */
-async function renderMarkdown(ctx: StudyContext, owner: Component, markdown: string, into: HTMLElement): Promise<void> {
+/** Renders markdown with Obsidian's renderer from the home doc's path (figures and links resolve as in the doc); as plain text where there is none (the test harness's mock). */
+async function renderMarkdown(ctx: StudyContext, owner: Component, doc: StudyDoc, markdown: string, into: HTMLElement): Promise<void> {
   const R = MarkdownRenderer as unknown as { render?: typeof MarkdownRenderer.render } | undefined;
   if (R && typeof R.render === 'function') {
-    await R.render(ctx.app, markdown, into, `${ctx.settings().root}/${PROBLEMS_DOC}.md`, owner);
+    await R.render(ctx.app, markdown, into, doc.path, owner);
     return;
   }
   into.createDiv({ cls: 'nb-sb-md', text: markdown });
@@ -51,6 +43,7 @@ export class ProblemView extends ItemView {
   private st: ProblemState = { id: '', hidden: false, reach: false, why: '' };
   private sess: SessionHandle | null = null;
   private mounted = false;
+  private mountSeq = 0;
   private offContent: (() => void) | null = null;
   private renderOwner: Component | null = null;
   private ctx: StudyContext;
@@ -117,6 +110,7 @@ export class ProblemView extends ItemView {
   private mountNow(): void {
     this.unmount();
     this.mounted = true;
+    const seq = ++this.mountSeq;
     const id = this.st.id;
     if (!id) {
       this.contentEl.createDiv({ cls: 'nb-sb nb-sb-hint', text: 'No problem chosen.' });
@@ -135,27 +129,40 @@ export class ProblemView extends ItemView {
       peek: (docId, anchor) => { void ctx.ui.openDoc(docId, anchor || undefined); },
       relayout: () => { /* the view scrolls; nothing to re-place */ },
       toast: (m, ms) => ctx.ui.toast(m, ms),
-      render: (md, into) => renderMarkdown(ctx, owner, md, into),
+      render: (md, into) => renderMarkdown(ctx, owner, env.doc, md, into),
     };
     const host = this.contentEl.createDiv({ cls: 'nb-study-problem-host' });
     host.style.maxWidth = '820px';
     host.style.margin = '0 auto';
     host.style.padding = '8px 16px 40px';
     const o = { hidden: this.st.hidden, reach: this.st.reach, why: this.st.why };
-    const tryMount = (): boolean => {
+    const tryMount = async (): Promise<boolean> => {
       // Looked up in the whole index, never through a doc, so a hidden pick shows nothing of its doc.
       const item = problemItem(ctx.content(), id);
       if (!item) return false;
+      // The home doc (S12) is only the render path and the ink file: its title, id and path never
+      // reach the DOM here, so a hidden pick still shows nothing of it before the settle. Old
+      // strokes are copied first, so the ink store's surfaces load the merged file.
+      env.doc = homeDoc(ctx.content(), id, ctx.settings().root);
+      const s = ctx.settings();
+      await copyOldProblemInk(ctx.app.vault.adapter as unknown as InkAdapter, s.root, s.device, env.doc.id, id);
+      if (seq !== this.mountSeq || !this.mounted || this.sess) return true;
       host.empty();
       this.sess = mountSession(host, env, item, o);
       return true;
     };
-    if (!tryMount()) {
+    const missing = () => {
+      if (seq !== this.mountSeq || this.sess) return;
       host.createDiv({ cls: 'nb-sb nb-sb-hint', text: `Problem ${id} is not in the study folder.` });
       this.offContent = ctx.onChange(w => {
-        if (w === 'content' && !this.sess && tryMount()) { this.offContent?.(); this.offContent = null; }
+        if (w === 'content' && !this.sess) {
+          void tryMount().then(ok => {
+            if (ok && this.offContent) { this.offContent(); this.offContent = null; }
+          });
+        }
       });
-    }
+    };
+    void tryMount().then(ok => { if (!ok) missing(); });
   }
 }
 
