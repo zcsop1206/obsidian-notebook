@@ -1,7 +1,8 @@
 # Ink on figures (S13) in a browser: an ink surface sits over each image in a problem statement
 # and a drill prompt, exactly as wide as the displayed image; a pen stroke persists after a
-# remount, keyed `fig:`; after a viewport resize from 1024 to 600 px the stroke still lies over
-# the same image pixel; a renamed figure shows a blank surface; a finger drag over the figure
+# remount, keyed `fig:`; after a viewport resize from 1024 to 600 px the surface still lies exactly
+# on the image and the stroke over the same image pixel (measured against the img, not the canvas);
+# a renamed figure shows a blank surface; a finger drag over the figure
 # draws nothing and is not prevented (so the view scrolls); a hidden pick shows nothing new
 # before the settle; a figure stroke written in the doc's problem block shows on the same figure
 # in the standalone problem view and the reverse, both filed in the home doc's ink file (S12's
@@ -179,6 +180,28 @@ SETUP = r"""
     for (let i = 0; i < d.length; i += 4) if (d[i + 3] >= 128) { r += d[i]; g += d[i + 1]; b += d[i + 2]; n++; }
     return n ? [r / n, g / n, b / n, n] : null;
   };
+  /* Where a surface's ink lies on its image, as the screen shows it: the alpha-weighted centroid of
+     the canvas's ink pixels, taken to client px through the canvas's own client rect, as fractions
+     of the img's client rect ({fx, fy}), with the img's size ({w, h}) to read a drift in image px. */
+  window.inkOnImage = surfEl => {
+    const c = surfEl.querySelector('canvas'), img = surfEl.querySelector('img');
+    if (!c || !img) return null;
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    let sx = 0, sy = 0, n = 0;
+    for (let y = 0; y < c.height; y++) for (let x = 0; x < c.width; x++) {
+      const a = d[(y * c.width + x) * 4 + 3];
+      if (a) { sx += (x + 0.5) * a; sy += (y + 0.5) * a; n += a; }
+    }
+    if (!n) return null;
+    const cr = c.getBoundingClientRect(), ir = img.getBoundingClientRect();
+    const cx = cr.left + (sx / n) * cr.width / c.width, cy = cr.top + (sy / n) * cr.height / c.height;
+    return { fx: (cx - ir.left) / ir.width, fy: (cy - ir.top) / ir.height, w: ir.width, h: ir.height };
+  };
+  /* The img's, the surface's and the canvas's client rects as [left, top, width, height]. */
+  window.figRects = surfEl => [surfEl.querySelector('img'), surfEl, surfEl.querySelector('canvas')].map(e => {
+    const r = e.getBoundingClientRect();
+    return [r.left, r.top, r.width, r.height];
+  });
   /* A finger event over el: whether the browser would act on it (not prevented). */
   window.fingerTouch = (el, type, touchType) => {
     const r = el.getBoundingClientRect();
@@ -268,22 +291,29 @@ try:
             ok = False
         check('after a remount the stroke shows on the figure again', ok)
 
-        # --- 3. viewport 1024 -> 600: the stroke still lies over the same image pixel
-        before = ev(page, f"() => surf('{KEY_CIRCUIT}').getBoundingClientRect().width")
+        # --- 3. viewport 1024 -> 600: the stroke still lies over the same image pixel. Measured on
+        # the image, not the canvas (a canvas that drifts off the image still has its ink at the same
+        # canvas fraction): the ink's centroid as a fraction of the img's client rect, before and after.
+        p0 = ev(page, f"() => inkOnImage(surf('{KEY_CIRCUIT}'))")
+        check('before the resize the stroke lies where it was drawn on the image (setup)',
+              bool(p0) and abs(p0['fx'] - 0.5) * p0['w'] <= 3 and abs(p0['fy'] - 0.4) * p0['h'] <= 3, p0)
+        before = ev(page, f"() => surf('{KEY_CIRCUIT}').querySelector('img').getBoundingClientRect().width")
         page.set_viewport_size({'width': 600, 'height': 800})
         ok = True
         try:
-            page.wait_for_function(f"() => Math.abs(surf('{KEY_CIRCUIT}').getBoundingClientRect().width - {before}) > 100", timeout=5000)
+            page.wait_for_function(f"() => Math.abs(surf('{KEY_CIRCUIT}').querySelector('img').getBoundingClientRect().width - {before}) > 100", timeout=5000)
         except Exception:
             ok = False
         check('the figure resized with the viewport (setup)', ok, before)
         page.wait_for_timeout(300)
-        after = ev(page, f"() => surf('{KEY_CIRCUIT}').getBoundingClientRect().width")
-        check('the figure really did get narrower', bool(after) and after < before - 100, [before, after])
-        n = ev(page, f"() => inkAt(surf('{KEY_CIRCUIT}'), 0.5, 0.4, 3)")
-        check('after the resize the stroke still lies over the same image pixel', isinstance(n, int) and n > 0, n)
-        n2 = ev(page, f"() => inkAt(surf('{KEY_CIRCUIT}'), 0.85, 0.4, 3)")
-        check('and not over a different pixel', n2 == 0, n2)
+        rects = ev(page, f"() => figRects(surf('{KEY_CIRCUIT}'))")
+        check('the figure really did get narrower', bool(rects) and rects[0][2] < before - 100, [before, rects])
+        check('after the resize the surface and its canvas lie exactly on the image',
+              bool(rects) and all(abs(a - b) < 1 for r in rects[1:] for a, b in zip(r, rects[0])), rects)
+        p1 = ev(page, f"() => inkOnImage(surf('{KEY_CIRCUIT}'))")
+        drift = [abs(p1['fx'] - p0['fx']) * max(p0['w'], p1['w']), abs(p1['fy'] - p0['fy']) * max(p0['h'], p1['h'])] if p0 and p1 else None
+        check('after the resize the stroke still lies over the same image pixel (same image fraction within 2 px)',
+              bool(drift) and drift[0] <= 2 and drift[1] <= 2, [p0, p1, drift])
 
         # --- 4. a renamed figure (a new version, FORMAT.md) shows a blank surface
         ev(page, "() => mountBlock('problem', 'fx-fig', 'inv-el-mesh')")
