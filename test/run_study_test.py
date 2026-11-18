@@ -231,7 +231,7 @@ def section_library(page):
       ribbon: plugin.ribbon.map(r => r.title),
     })""")
     rows = info['rows']
-    print(f'  library: {len(rows)} rows in {lib_ms:.0f} ms (open to listed, including the first index load)')
+    print(f'  library: {len(rows)} rows in {lib_ms:.0f} ms (open to listed; the content index loads when the plugin does)')
     for d in ['fx-topic', 'fx-long', 'fx-units', 'fx-div', 'k-fx', 'fxbank']:
         check(f'library: lists {d}', d in rows)
     check('library: 120 generated basics listed', sum(1 for r in rows if r.startswith('g-')) == 120)
@@ -662,11 +662,18 @@ def section_panels(page):
       const it = [...l.view.contentEl.querySelectorAll('.nb-sp-item')].find(e => /problem/.test(e.textContent));
       if (!it) return { tapped: false };
       (it.querySelector('button, a, .nb-sp-t') || it).click();
-      await sleep(300);
-      const pv = app.workspace.getLeavesOfType('notebook-study-problem')[0];
-      return { tapped: true, problem: !!pv, title: pv ? pv.view.getDisplayText() : '', body: pv ? pv.view.contentEl.textContent.slice(0, 200) : '' };
+      // The view mounts its card after the old-ink copy (S12), so it comes a little later.
+      let pv = null, card = null;
+      for (let i = 0; i < 100 && !card; i++) {
+        await sleep(30);
+        pv = app.workspace.getLeavesOfType('notebook-study-problem')[0];
+        card = pv ? pv.view.contentEl.querySelector('.nb-sb-pb') : null;
+      }
+      return { tapped: true, problem: !!pv, card: !!card, cardId: card ? card.dataset.problem : '', id: pv ? pv.view.getState().id : '',
+               title: pv ? pv.view.getDisplayText() : '', body: pv ? pv.view.contentEl.textContent.slice(0, 200) : '' };
     }""")
-    check('panels: a Today problem pick opens the standalone problem view', r.get('problem') and 'not in the study folder' not in r.get('body', ''), r)
+    check('panels: a Today problem pick opens the standalone problem view',
+          r.get('problem') and r.get('card') and r.get('cardId') == r.get('id') != '' and 'not in the study folder' not in r.get('body', ''), r)
     r = page.evaluate("""async () => {
       await plugin.study.ui.openMap();
       await sleep(200);
