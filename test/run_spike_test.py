@@ -5,13 +5,13 @@
 import json, os, re, subprocess, sys, time
 import xml.etree.ElementTree as ET
 from playwright.sync_api import sync_playwright
+import serve  # test/serve.py: the static server, refusing a port another run holds
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, 'out')
 os.makedirs(OUT, exist_ok=True)
 port = int(os.environ.get('NB_TEST_PORT_BASE', 8765))  # NB_TEST_PORT_BASE lets parallel checkouts run the tests at once
-srv = subprocess.Popen([sys.executable, '-m', 'http.server', str(port)], cwd=os.path.dirname(HERE), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-time.sleep(1)
+srv = serve.start(port, os.path.dirname(HERE))
 
 failures = []
 

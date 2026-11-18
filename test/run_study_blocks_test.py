@@ -9,6 +9,7 @@
 # Exits 1 on any failure.
 import json, os, subprocess, sys, time
 from playwright.sync_api import sync_playwright
+import serve  # test/serve.py: the static server, refusing a port another run holds
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -17,8 +18,7 @@ os.makedirs(OUT, exist_ok=True)
 port = int(os.environ.get('NB_STUDY_BLOCKS_PORT', int(os.environ.get('NB_TEST_PORT_BASE', 8765)) + 10))
 
 subprocess.run(['node', 'test/study-blocks-build.mjs'], cwd=ROOT, check=True, shell=(os.name == 'nt'))
-srv = subprocess.Popen([sys.executable, '-m', 'http.server', str(port)], cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-time.sleep(1)
+srv = serve.start(port, ROOT)
 
 failures = []
 

@@ -8,7 +8,9 @@
 #   STUDY_CONTENT_DIR="C:/Users/.../EngineeringPortfolio/content/study" python test/run_study_content_check.py
 #
 # Port: NB_STUDY_CONTENT_PORT, else NB_TEST_PORT_BASE + 12 (8777). Needs main.js (npm run build).
-import os, subprocess, sys, time
+import os, re, subprocess, sys, time
+from urllib.parse import unquote, urlparse
+import serve  # test/serve.py: the static server, refusing a port another run holds
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -47,6 +49,20 @@ def content_files():
     return files
 
 
+IMAGE = re.compile(r'\.(svg|png|jpe?g|gif|webp)$', re.I)
+
+
+def figure_files():
+    """Images under the study folder by file name. Docs embed figures by file name alone, which
+    Obsidian resolves anywhere in the vault; the harness asks for them next to harness.html."""
+    figs = {}
+    for dirpath, _, names in os.walk(SRC):
+        for n in names:
+            if IMAGE.search(n):
+                figs.setdefault(n, os.path.join(dirpath, n))
+    return figs
+
+
 SETUP_JS = """(files) => {
   for (const [p, t] of Object.entries(files)) {
     fs.set(p, t);
@@ -72,8 +88,7 @@ SETUP_JS = """(files) => {
 def main():
     files = content_files()
     print(f'{len(files)} .md files from {SRC}')
-    srv = subprocess.Popen([sys.executable, '-m', 'http.server', str(port)], cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(1)
+    srv = serve.start(port, ROOT)
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch()
@@ -81,6 +96,21 @@ def main():
             errors = []
             page.on('pageerror', lambda e: errors.append(f'pageerror: {e}'))
             page.on('console', lambda m: errors.append(f'console.error: {m.text}') if m.type == 'error' else None)
+            figs = figure_files()
+            missing_figs = set()
+
+            def serve_figure(route):
+                path = unquote(urlparse(route.request.url).path)
+                if os.path.isfile(os.path.join(ROOT, path.lstrip('/'))):
+                    return route.continue_()
+                name = path.rsplit('/', 1)[-1]
+                if name in figs:
+                    return route.fulfill(path=figs[name])
+                missing_figs.add(name)
+                return route.fulfill(status=404, body='')
+
+            page.route(lambda url: bool(IMAGE.search(urlparse(url).path)), serve_figure)
+            print(f'{len(figs)} figures under {SRC}')
             page.goto(f'http://localhost:{port}/test/harness.html')
             page.evaluate(SETUP_JS, files)
             page.evaluate("async () => { window.pluginData = { study: { root: 'study', device: 'check' } }; window.plugin = await loadPlugin(); }")
@@ -131,6 +161,14 @@ def main():
                 check(f"doc {did} ({d['kind']}): renders {len(got)} passages", ok and len(got) > 0, f'rendered {ok}, {len(got)} passages')
                 if want:
                     check(f'doc {did}: every expected passage is on the page', not missing, f'missing {missing[:8]}')
+                try:
+                    page.wait_for_function("() => [...document.querySelectorAll('.nb-study-doc img')].every(i => i.complete)", timeout=5000)
+                except Exception:
+                    pass
+                broken = page.evaluate("() => [...document.querySelectorAll('.nb-study-doc img')].filter(i => !(i.complete && i.naturalWidth > 0)).map(i => i.getAttribute('src'))")
+                nimg = page.evaluate("() => document.querySelectorAll('.nb-study-doc img').length")
+                if nimg:
+                    check(f'doc {did}: all {nimg} figures load', not broken, f'broken {broken[:6]}')
                 check(f'doc {did}: no console errors', not errors, ' | '.join(errors[:4])[:900])
                 errors.clear()
 
@@ -140,6 +178,7 @@ def main():
                 page.wait_for_timeout(400)
                 check(f'{name}: opens without console errors', not errors, ' | '.join(errors[:4])[:900])
                 errors.clear()
+            check('figures: every embedded figure exists in the study folder', not missing_figs, f'missing {sorted(missing_figs)[:10]}')
             browser.close()
     finally:
         srv.terminate()
