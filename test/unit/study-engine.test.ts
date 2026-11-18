@@ -1197,6 +1197,9 @@ test('tracks: a folder binds only its own section\'s globs, and a folder alone s
       '| s14-anywhere | 2026-12-08 | 1 | | basics fe-units; fe-geo |',
       '| s14-topics | 2026-12-08 | 1 | | topics |',
       '| s14-bank | 2026-12-08 | 1 | | basics fe-units; bank |',
+      '| s14-comma | 2026-12-08 | 1 | | basics fe-units, fe-c* |',
+      '| s14-gap | 2026-12-08 | 1 | | basics fe-units;; bank |',
+      '| s14-two | 2026-12-08 | 1 | | basics topics fe-c* |',
       '',
     ].join('\n'),
   }), bank('quiz-a'), bank('quiz-b')]);
@@ -1214,6 +1217,10 @@ test('tracks: a folder binds only its own section\'s globs, and a folder alone s
   assert.deepEqual(served('s14-topics'), ['fe-an', 'fe-count', 'fe-framing', 'fe-gen', 'fe-geo', 'fe-moves'],
     'every topic, and no basic, kata or bank doc');
   assert.deepEqual(served('s14-bank'), ['fe-units', 'quiz-a', 'quiz-b'], 'every bank doc and fe-units, and no other basic');
+  assert.deepEqual(served('s14-comma'), ['fe-crc', 'fe-crt', 'fe-units'],
+    'a comma separates globs, not sections: basics binds both, so fe-count, a topic, is not served');
+  assert.deepEqual(served('s14-gap'), ['fe-units', 'quiz-a', 'quiz-b'], 'an empty section (a doubled `;`) is skipped, not the end of the row');
+  assert.deepEqual(served('s14-two'), ['fe-count', 'fe-crc', 'fe-crt'], 'a section may name several folders: any of them');
 });
 
 test('hidden: never on the bank file keeps its problems out of hidden picks but in visible ones', () => {
