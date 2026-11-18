@@ -37,15 +37,20 @@ FIG_DIR = os.path.join(ROOT, 'test', 'fixtures', 'study-figure-ink', 'figs')
 figs = {n: os.path.join(FIG_DIR, n) for n in os.listdir(FIG_DIR)} if os.path.isdir(FIG_DIR) else {}
 
 # The S1 fixtures plus this ticket's own (an invented basic with figures in a problem statement,
-# a second problem's statement and a derive prompt).
+# a second problem's statement and a derive prompt). The figures go into the mock vault too, at
+# their place in the fixture tree: the mock resolves an embed through the vault (S12), so a figure
+# the vault lacks renders data-unresolved, with no src.
 FILES = []
+FIG_PATHS = []
 for base in ('test/fixtures/study', 'test/fixtures/study-figure-ink'):
     for dirpath, _, names in os.walk(os.path.join(ROOT, base)):
         for n in sorted(names):
-            if not n.endswith('.md'):
-                continue
             full = os.path.join(dirpath, n)
             rel = os.path.relpath(full, os.path.join(ROOT, base)).replace('\\', '/')
+            if IMAGE.search(n):
+                FIG_PATHS.append('study/' + rel)
+            if not n.endswith('.md'):
+                continue
             with open(full, encoding='utf-8') as f:
                 FILES.append({'path': 'study/' + rel, 'text': f.read().replace('\r\n', '\n')})
 
@@ -167,6 +172,14 @@ try:
         page.goto(f'http://localhost:{port}/test/harness.html')
         page.add_script_tag(url=f'http://localhost:{port}/test/out/study-blocks.js')
         page.evaluate(SETUP, FILES)
+        # The figures' vault entries (the route above serves the bytes by file name).
+        page.evaluate("""paths => {
+          for (const p of paths) {
+            fs.set(p, '(figure: served by file name)');
+            const parts = p.split('/');
+            for (let k = 1; k < parts.length; k++) dirs.add(parts.slice(0, k).join('/'));
+          }
+        }""", FIG_PATHS)
 
         KEY_CIRCUIT = 'fig:inv-el-nodes:s13-circuit.svg'
         KEY_MESH_A = 'fig:inv-el-mesh:s13-mesh-a.svg'
