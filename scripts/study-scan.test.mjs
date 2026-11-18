@@ -67,7 +67,7 @@ test('a higher build answers a request; markdown output and lint', () => {
   assert.match(md, /## Lint\n\n0 error\(s\), \d+ warning\(s\), 0 info\./);
 });
 
-/* ------------------------------------------------------------------------------------- lint */
+/* ------------------------------------------------------------------------ lint and --figures */
 
 // The lint's vault, all invented: <tmp>/outer/.obsidian is a farther vault, <tmp>/outer/vault/.obsidian
 // the nearest one, which holds attachments/ and study/ (a copy of the fixtures plus the cases below).
@@ -76,6 +76,7 @@ function svg(attrs) {
   return `<?xml version="1.0" encoding="UTF-8"?>\n<!-- an invented test figure -->\n<svg xmlns="http://www.w3.org/2000/svg" ${attrs} viewBox="0 0 120 80"><rect width="100%" height="100%" fill="#fff"/></svg>\n`;
 }
 const SIZED = svg('width="120" height="80"');
+const PNG = Buffer.from('89504e470d0a1a0a', 'hex'); // the signature is enough: the scan never decodes an image
 
 function put(file, data) {
   mkdirSync(path.dirname(file), { recursive: true });
@@ -168,12 +169,17 @@ function makeVault() {
   put(path.join(vault, '.obsidian', 'fx-dot-only.svg'), SIZED);
   put(path.join(vault, 'attachments', 'fx-shared.svg'), SIZED);
   put(path.join(vault, 'attachments', 'fx-twice.svg'), SIZED);
+  put(path.join(vault, 'attachments', 'fx-outside-unused.png'), PNG);
   cpSync(FIX, study, { recursive: true });
   put(path.join(study, 'topics', 'fx-lint.md'), LINT_DOC);
   put(path.join(study, 'topics', 'fx-comb.md'), COMB_DOC);
   for (const name of ['fx-units--wheel.svg', 'fx-units--wiki.svg', 'fx-twice.svg', 'fx spaced.svg']) put(path.join(study, 'figures', name), SIZED);
   put(path.join(study, 'figures', 'fx-units--pct.svg'), svg('width="100%" height="80"'));
   put(path.join(study, 'figures', 'fx-units--no-height.svg'), svg('width="120pt"'));
+  put(path.join(study, 'figures', 'fx-units--spare.png'), PNG);
+  put(path.join(study, 'figures', 'fx-in-fence.png'), PNG);
+  put(path.join(study, 'figures', 'old', 'fx-units--old.svg'), SIZED);
+  put(path.join(study, 'ink', 'fx-in-ink.png'), PNG);
   edit(path.join(study, 'bank', 'fxbank.md'), (s) => s.replace('title: Putnam (fixture)', 'title: Putnam (fixture)\nhidden: Never'));
   edit(path.join(study, 'basics', 'fx-div.md'), (s) => s.replace('build: 1', 'build: 1\nHidden: never'));
   edit(path.join(study, 'bank', 'fxbank.tags.md'), (s) => s.replace(/\n*$/, '\n') + '| putnam-2019-a2 | comb | pigeonhole |\n| putnam-2020-b9 | gen | invariants |\n');
@@ -182,11 +188,11 @@ function makeVault() {
 }
 
 let shared = null;
-/** One vault and one `--json --lint` run, shared by the rule tests below. */
+/** One vault and one `--json --lint --figures` run, shared by the rule tests below. */
 function lintRun() {
   if (!shared) {
     const v = makeVault();
-    const out = runStatus(v.study, '--json', '--lint');
+    const out = runStatus(v.study, '--json', '--lint', '--figures');
     shared = { ...v, status: out.status, r: JSON.parse(out.stdout), doc: path.join(v.study, 'topics', 'fx-lint.md') };
   }
   return shared;
@@ -196,7 +202,7 @@ const pick = (items, rule) => items.filter((x) => x.rule === rule).map((x) => [x
 
 test('lint: findings are { rule, doc, line, message }, and --json keeps its other fields', () => {
   const { r } = lintRun();
-  assert.deepEqual(Object.keys(r).filter((k) => k !== 'lint' && k !== 'warnings'), ['meta', 'requests', 'scaffold', 'settles', 'drills', 'katas']);
+  assert.deepEqual(Object.keys(r).filter((k) => k !== 'lint' && k !== 'unusedFigures' && k !== 'warnings'), ['meta', 'requests', 'scaffold', 'settles', 'drills', 'katas']);
   assert.ok(Array.isArray(r.warnings) && r.warnings.every((w) => typeof w === 'string'), 'the parser warnings stay as they were');
   assert.deepEqual(Object.keys(r.lint), ['errors', 'warnings', 'info']);
   for (const x of [...r.lint.errors, ...r.lint.warnings, ...r.lint.info]) {
@@ -204,7 +210,7 @@ test('lint: findings are { rule, doc, line, message }, and --json keeps its othe
     assert.ok(x.line === null || Number.isInteger(x.line));
   }
   const plain = JSON.parse(run(lintRun().study, '--json'));
-  assert.deepEqual(Object.keys(plain), ['meta', 'requests', 'scaffold', 'settles', 'drills', 'katas'], 'no lint keys without --lint');
+  assert.deepEqual(Object.keys(plain), ['meta', 'requests', 'scaffold', 'settles', 'drills', 'katas'], 'no lint keys without --lint or --figures');
 });
 
 test('lint: every error, and nothing else (no false positive)', () => {
@@ -327,15 +333,23 @@ test('lint track-bank-areas: a bank served by the docs column, with problem area
     /^track "fx-quiz" serves the bank fxbank through its docs column, but not the areas of 2 of its problems \(comb, gen\): /);
 });
 
+test('--figures: images under the study root that no doc embeds', () => {
+  const { r } = lintRun();
+  assert.deepEqual(r.unusedFigures, ['figures/fx-in-fence.png', 'figures/fx-units--spare.png', 'figures/old/fx-units--old.svg'],
+    'a path or wikilink embed still uses its file; a fence does not; ink/ and files outside the root are not listed');
+});
+
 test('exit codes: 1 with --lint and an error, else 0; markdown output', () => {
   const { study, status } = lintRun();
   assert.equal(status, 1, '--json --lint with errors');
-  const md = runStatus(study, '--lint');
+  const md = runStatus(study, '--lint', '--figures');
   assert.equal(md.status, 1, 'markdown --lint with errors');
   assert.match(md.stdout, /## Lint\n\n12 error\(s\), \d+ warning\(s\), 1 info\./);
   assert.match(md.stdout, /### Errors \(12\)\n\n- topics\/fx-lint\.md:\d+ embed-missing: no file named "fx-outer-only\.svg" in the vault\n/);
   assert.match(md.stdout, /### Info \(1\)\n\n- topics\/fx-lint\.md:\d+ solution-figure-only: /);
+  assert.match(md.stdout, /## Unused figures \(3\)\n\n- figures\/fx-in-fence\.png\n- figures\/fx-units--spare\.png\n- figures\/old\/fx-units--old\.svg\n/);
   assert.equal(runStatus(study).status, 0, 'without --lint nothing changes');
+  assert.equal(runStatus(study, '--json', '--figures').status, 0, '--figures alone never fails');
   const clean = runStatus(makeRoot(), '--json', '--lint');
   assert.equal(clean.status, 0, 'warnings only');
   assert.deepEqual(JSON.parse(clean.stdout).lint.errors, []);

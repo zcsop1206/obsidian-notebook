@@ -1,6 +1,6 @@
 // study-scan: what the iPad asked for, read on the laptop (docs/study/SPEC.md, Laptop side; ticket S10).
 //
-//   node scripts/study-scan.mjs <study root> [--since=YYYY-MM-DD] [--json] [--lint]
+//   node scripts/study-scan.mjs <study root> [--since=YYYY-MM-DD] [--json] [--lint] [--figures]
 //
 // <study root> is the study folder in the vault (in the portfolio: content/study). The script reads
 // every log/*.jsonl and every doc under it, and reports:
@@ -9,7 +9,8 @@
 //   - lost marks still in their scaffold (no request yet: the plugin's ration decides when);
 //   - settles and drills since --since (default: 7 days ago);
 //   - with --lint, a lint of the content in three levels, error, warning and info (the rules are listed
-//     above lint() below), and exit code 1 when it finds an error.
+//     above lint() below), and exit code 1 when it finds an error;
+//   - with --figures, the images under the root that no doc embeds.
 // It never writes anything. /teach reads its --json output. The parser and the track matcher are the
 // plugin's own (src/study/format, src/study/engine/state.ts), bundled on the fly with esbuild, so the
 // laptop and the iPad read docs alike.
@@ -405,6 +406,21 @@ export function lint({ root, files, index, lib }) {
   return { vault, errors, warnings, info };
 }
 
+/** Images under the study root that no markdown file under it embeds, by bare name (paths under the root). */
+export function unusedFigures(root, files) {
+  const used = new Set();
+  for (const f of files) for (const e of findEmbeds(f.text)) { const t = embedTarget(e); if (t) used.add(t.name); }
+  const out = [];
+  (function walk(dir, rel) {
+    for (const ent of readdirSync(dir, { withFileTypes: true })) {
+      const r = rel ? `${rel}/${ent.name}` : ent.name;
+      if (ent.isDirectory()) { if (ent.name !== 'ink' && !ent.name.startsWith('.')) walk(path.join(dir, ent.name), r); }
+      else if (IMAGE.test(ent.name) && !used.has(ent.name)) out.push(r);
+    }
+  })(root, '');
+  return out.sort();
+}
+
 function fmtLint(l) {
   const out = ['## Lint', '', `${l.errors.length} error(s), ${l.warnings.length} warning(s), ${l.info.length} info. Vault: ${l.vault}`];
   for (const [title, items] of [['Errors', l.errors], ['Warnings', l.warnings], ['Info', l.info]]) {
@@ -455,7 +471,7 @@ const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPat
 if (isMain) {
   const args = process.argv.slice(2);
   const root = args.find((a) => !a.startsWith('--'));
-  if (!root || !existsSync(root)) { console.error('usage: node scripts/study-scan.mjs <study root> [--since=YYYY-MM-DD] [--json] [--lint]'); process.exit(2); }
+  if (!root || !existsSync(root)) { console.error('usage: node scripts/study-scan.mjs <study root> [--since=YYYY-MM-DD] [--json] [--lint] [--figures]'); process.exit(2); }
   const sinceArg = args.find((a) => a.startsWith('--since='));
   const since = sinceArg ? sinceArg.slice(8) : new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
   const lib = loadLib();
@@ -464,14 +480,16 @@ if (isMain) {
   const r = scan(index, events, since);
   const meta = { docs: index.docs.size, events: events.length, skipped, logFiles, since };
   const l = args.includes('--lint') ? lint({ root, files, index, lib }) : null;
+  const unused = args.includes('--figures') ? unusedFigures(root, files) : null;
   if (args.includes('--json')) {
     process.stdout.write(JSON.stringify({
       meta, ...r, warnings: l ? index.warnings : undefined,
-      lint: l ? { errors: l.errors, warnings: l.warnings, info: l.info } : undefined,
+      lint: l ? { errors: l.errors, warnings: l.warnings, info: l.info } : undefined, unusedFigures: unused || undefined,
     }, null, 1) + '\n');
   } else {
     process.stdout.write(fmt(r, meta) + '\n');
     if (l) process.stdout.write(`\n${fmtLint(l)}\n`);
+    if (unused) process.stdout.write(`\n## Unused figures (${unused.length})\n\n${unused.length ? unused.map((u) => `- ${u}`).join('\n') : 'None.'}\n`);
   }
   if (l && l.errors.length) process.exitCode = 1;
 }
