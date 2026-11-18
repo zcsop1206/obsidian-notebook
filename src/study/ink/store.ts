@@ -29,6 +29,12 @@ export interface InkAdapter {
 
 export type InkListener = (why: 'load' | 'add' | 'remove' | 'keep' | 'sync') => void;
 
+/** What DocInkStore.adopt resolves to: how many strokes it added, and whether nothing is left unwritten after its flush. */
+export interface Adopted {
+  added: number;
+  saved: boolean;
+}
+
 /** Text a write may replace once it was read: blank, or valid JSON. */
 function readable(text: string): boolean {
   if (!text.trim()) return true;
@@ -151,10 +157,11 @@ export class DocInkStore {
    * Adds strokes this device wrote under another doc's file, ids kept (S12: a problem's old
    * standalone ink moving to its home doc). Going through the store, not the file, means open
    * surfaces show them at once and the store's next write keeps them. Ids this device's file
-   * already holds are skipped, so adopting twice adds nothing. Written at once; resolves to how
-   * many were added.
+   * already holds are skipped, so adopting twice adds nothing. Then flushes, and resolves to how
+   * many were added and whether nothing is left unwritten (`saved`): false when the write failed
+   * or this device's file could not be read (the store keeps the strokes and retries).
    */
-  async adopt(strokes: readonly InkStroke[]): Promise<number> {
+  async adopt(strokes: readonly InkStroke[]): Promise<Adopted> {
     await this.ready;
     const own = this.own();
     const have = new Set(own.strokes.map(s => s.id));
@@ -167,10 +174,9 @@ export class DocInkStore {
       have.add(st.id);
       n++;
     }
-    if (!n) return 0;
-    this.touch('add');
+    if (n) this.touch('add');
     await this.flush();
-    return n;
+    return { added: n, saved: !this.dirty };
   }
 
   /**

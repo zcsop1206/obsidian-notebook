@@ -328,9 +328,37 @@ test('s12: DocInkStore.adopt keeps ids, skips ids the file holds, and creates th
   const v = memVault([]);
   const store = new DocInkStore(v.adapter, 'study', 'ipad', 'fx-div');
   const s = { id: 's-a', p: [[1, 2, 0.5, 0], [3, 4, 0.5, 5]] as [number, number, number, number][], t0: 1, blk: 'call:x', dev: 'laptop' };
-  assert.equal(await store.adopt([s, { ...s }]), 1, 'a duplicate in one batch is added once');
-  assert.equal(await store.adopt([s]), 0);
+  assert.deepEqual(await store.adopt([s, { ...s }]), { added: 1, saved: true }, 'a duplicate in one batch is added once');
+  assert.deepEqual(await store.adopt([s]), { added: 0, saved: true });
   const f = parseInkFile(v.files.get('study/ink/fx-div.ipad.json')!, 'fx-div');
   assert.deepEqual(f.strokes.map(x => [x.id, x.blk, (x as { dev?: string }).dev]), [['s-a', 'call:x', undefined]], 'filed as this device\'s own stroke');
   assert.equal(store.strokesOf('call:x')[0].dev, 'ipad');
+});
+
+test('s12: a copy whose write does not land is shown but not recorded; a later copy records it once written', async () => {
+  const { srcText } = inkFiles();
+  const v = memVault([['study/ink/problems.ipad.json', srcText]]);
+  const write = v.adapter.write;
+  let failing = true;
+  v.adapter.write = async (p, d) => { if (failing) throw new Error('disk full'); return write(p, d); };
+  const store = new DocInkStore(v.adapter, 'study', 'ipad', 'fx-units');
+  const moved = movedInk(v.app, 'ipad');
+  const io: OldInkIO = { adapter: v.adapter, root: 'study', device: 'ipad', moved, adopt: (_doc, strokes) => store.adopt(strokes) };
+  const errors = console.error;
+  console.error = () => {};
+  try {
+    assert.deepEqual(await store.adopt([]), { added: 0, saved: true }, 'nothing to write is saved');
+    assert.equal(await copyOldProblemInk(io, 'fx-units', 'inv-fx-last-digit'), 2);
+    assert.deepEqual(store.strokesOf('call:inv-fx-last-digit').map(s => s.id), ['s-call'], 'shown at once');
+    assert.equal(store.pending(), true, 'the store keeps them and retries');
+    assert.ok(!moved.has('s-call') && !moved.has('s-work'), 'not recorded while unwritten');
+    assert.equal(v.app.loadLocalStorage('notebook-study-moved-ink:ipad'), null);
+    failing = false;
+    assert.equal(await copyOldProblemInk(io, 'fx-units', 'inv-fx-last-digit'), 0, 'the store holds them already');
+    assert.equal(store.pending(), false);
+    assert.deepEqual(v.app.loadLocalStorage('notebook-study-moved-ink:ipad'), ['s-call', 's-work'], 'recorded once written');
+    assert.deepEqual(parseInkFile(v.files.get('study/ink/fx-units.ipad.json')!, 'fx-units').strokes.map(s => s.id), ['s-call', 's-work']);
+  } finally {
+    console.error = errors;
+  }
 });

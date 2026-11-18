@@ -11,9 +11,9 @@
  * Old strokes: strokes this device wrote under those keys in `ink/problems.<device>.json` are
  * copied into the home doc's ink once each (`copyOldProblemInk`). The copy goes through the home
  * doc's shared ink store (ink/index.ts adoptInk), so a store already loaded this session shows
- * them at once and never writes them away. This device keeps a record of the stroke ids it has
- * copied (`movedInk`, Obsidian's per-vault local storage), so a copied stroke erased later never
- * comes back. The old file is never edited or deleted.
+ * them at once and never writes them away. Once the home doc's ink is written, this device
+ * records the stroke ids it copied (`movedInk`, Obsidian's per-vault local storage), so a copied
+ * stroke erased later never comes back. The old file is never edited or deleted.
  *
  * Kept out of register.ts so the unit tests can import it: register.ts pulls `obsidian` runtime
  * symbols, which the node test bundle cannot resolve.
@@ -21,7 +21,7 @@
 import type { ContentIndex, StudyDoc } from '../types';
 import type { InkFile } from '../ink/model';
 import { inkPath, parseInkFile } from '../ink/model';
-import type { InkAdapter } from '../ink/store';
+import type { Adopted, InkAdapter } from '../ink/store';
 import type { InkStroke } from '../view/host';
 
 /** The doc a standalone problem's ink was filed under before 0.15.1 (and the fallback now). */
@@ -98,18 +98,23 @@ export interface OldInkIO {
   adapter: Pick<InkAdapter, 'exists' | 'read'>;
   root: string;
   device: string;
-  /** Adds strokes to a doc's ink through its shared store, skipping ids it holds; resolves to how many were added. */
-  adopt(docId: string, strokes: InkStroke[]): Promise<number>;
+  /**
+   * Adds strokes to a doc's ink through its shared store, skipping ids it holds, and flushes it
+   * (ink/index.ts adoptInk): how many were added, and whether nothing is left unwritten.
+   */
+  adopt(docId: string, strokes: InkStroke[]): Promise<Adopted>;
   moved: MovedInk;
 }
 
 /**
  * Copies this device's strokes under `call:<id>`/`work:<id>` from `ink/problems.<device>.json`
- * into the home doc's ink through its store, keeping ids, and records them as copied. Each stroke
- * is copied once: a second run copies nothing, and a copied stroke erased later stays erased. The
- * old file is never edited or deleted. Returns how many strokes were added; 0 when the home doc
- * is the `problems` fallback, the old file is missing, or there is nothing new. Never throws: a
- * failure is logged and reported as 0, so the problem still opens.
+ * into the home doc's ink through its store, keeping ids, and records them as copied once the
+ * home doc's ink is written (`saved`). A copy whose write did not land stays on screen (the store
+ * retries) and is recorded by a later copy that finds it written. Each stroke is copied once: a
+ * second run copies nothing, and a copied stroke erased later stays erased. The old file is never
+ * edited or deleted. Returns how many strokes were added; 0 when the home doc is the `problems`
+ * fallback, the old file is missing, or there is nothing new. Never throws: a failure is logged
+ * and reported as 0, so the problem still opens.
  */
 export async function copyOldProblemInk(io: OldInkIO, homeId: string, id: string): Promise<number> {
   try {
@@ -119,9 +124,9 @@ export async function copyOldProblemInk(io: OldInkIO, homeId: string, id: string
     const src = parseInkFile(await io.adapter.read(srcPath), PROBLEMS_DOC);
     const todo = strokesToCopy(src, problemInkKeys(id), io.moved);
     if (!todo.length) return 0;
-    const n = await io.adopt(homeId, todo);
-    io.moved.add(todo.map(s => s.id));
-    return n;
+    const r = await io.adopt(homeId, todo);
+    if (r.saved) io.moved.add(todo.map(s => s.id));
+    return r.added;
   } catch (e) {
     console.error('[study] copying old problem ink failed', e);
     return 0;
