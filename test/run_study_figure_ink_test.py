@@ -2,18 +2,18 @@
 # and a drill prompt, exactly as wide as the displayed image; a pen stroke persists after a
 # remount, keyed `fig:`; after a viewport resize from 1024 to 600 px the surface still lies exactly
 # on the image and the stroke over the same image pixel (measured against the img, not the canvas);
-# a renamed figure shows a blank surface; a finger drag over the figure
-# draws nothing and is not prevented (so the view scrolls); a hidden pick shows nothing new
-# before the settle; a figure stroke written in the doc's problem block shows on the same figure
-# in the standalone problem view and the reverse, both filed in the home doc's ink file (S12's
-# home-doc env.doc), with nothing written to ink/problems.<device>.json; in the dark theme a figure
-# stroke still draws dark (the figures are white whatever the theme); each figure's undo chip takes
-# this device's latest stroke on that figure only, shows only while there is one, and is never
-# written on; a drill's New attempt clears its prompt's figure with the page; a problem or drill
-# destroyed before its render resolves leaves no figure surface behind. Uses the mock obsidian
-# module's in-memory vault (test/harness.html), the S4 ink module and the blocks bundled by
-# test/study-blocks-build.mjs; figure files are served by file name, as the content check does,
-# so nothing asserts on an image's src (S12 changes how the mock resolves it).
+# a renamed figure shows a blank surface; a finger drag over the figure draws nothing and is not
+# prevented, and a real one (Chromium's touch input, over CDP) scrolls the view; a hidden pick
+# shows nothing new before the settle; a figure stroke written in the doc's problem block shows on
+# the same figure in the standalone problem view and the reverse, both filed in the home doc's ink
+# file (S12's home-doc env.doc), with nothing written to ink/problems.<device>.json; in the dark
+# theme a figure stroke still draws dark (the figures are white whatever the theme); each figure's
+# undo chip takes this device's latest stroke on that figure only, shows only while there is one,
+# and is never written on; a drill's New attempt clears its prompt's figure with the page; a
+# problem or drill destroyed before its render resolves leaves no figure surface behind. Uses the
+# mock obsidian module's in-memory vault (test/harness.html), the S4 ink module and the blocks
+# bundled by test/study-blocks-build.mjs; figure files are served by file name, as the content
+# check does, so nothing asserts on an image's src (S12 changes how the mock resolves it).
 # Run: python test/run_study_figure_ink_test.py (port NB_TEST_PORT_BASE + 13, or NB_STUDY_FIGINK_PORT).
 # Exits 1 on any failure.
 import json, os, re, subprocess, sys, time
@@ -358,6 +358,30 @@ try:
         check('a finger drag adds no stroke', f == 1, f)  # only the stroke from check 2 remains
         t = ev(page, f"() => [fingerTouch(surf('{KEY_CIRCUIT}'), 'touchstart', 'direct'), fingerTouch(surf('{KEY_CIRCUIT}'), 'touchmove', 'direct'), getComputedStyle(surf('{KEY_CIRCUIT}')).touchAction]")
         check('finger touches are not prevented and panning is allowed', t == [False, False, 'auto'], t)
+        # A real finger drag: Chromium's own touch input (CDP Input.dispatchTouchEvent), so the
+        # browser itself decides whether to scroll, with every ancestor's touch-action and listener
+        # in play. Upwards over the figure, it scrolls the leaf and adds no stroke.
+        g = ev(page, f"""() => {{
+          const l = document.getElementById('leaf'), s = surf('{KEY_CIRCUIT}');
+          l.scrollTop = 0;
+          const r = s.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height * 0.8;
+          return [x, y, s.contains(document.elementFromPoint(x, y)), l.scrollHeight - l.clientHeight];
+        }}""")
+        check('setup: the drag starts on the figure and the leaf has room to scroll', g[2] is True and g[3] > 200, g)
+        count_all = "async () => { await studyBlocks.flushInk(inkCtx); const j = fileJson('study/ink/fx-fig.desktop.json'); return j ? j.strokes.length : 0; }"
+        n_before = ev(page, count_all)
+        cdp = context.new_cdp_session(page)
+        cdp.send('Input.dispatchTouchEvent', {'type': 'touchStart', 'touchPoints': [{'x': g[0], 'y': g[1]}]})
+        for i in range(1, 16):
+            cdp.send('Input.dispatchTouchEvent', {'type': 'touchMove', 'touchPoints': [{'x': g[0], 'y': g[1] - 15 * i}]})
+        cdp.send('Input.dispatchTouchEvent', {'type': 'touchEnd', 'touchPoints': []})
+        cdp.detach()
+        page.wait_for_timeout(300)
+        st = ev(page, "() => document.getElementById('leaf').scrollTop")
+        n_after = ev(page, count_all)
+        check('a real finger drag over the figure scrolls the view', st > 100, st)
+        check('and adds no stroke', n_after == n_before, [n_before, n_after])
+        ev(page, "() => { document.getElementById('leaf').scrollTop = 0; }")
 
         # --- 6. a drill prompt's figure gets the same treatment
         ev(page, "() => mountBlock('drill', 'fx-fig', 'd-bridge-balance')")
