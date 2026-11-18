@@ -359,30 +359,34 @@ try:
         check('the old ink file was never edited, and the other problem\'s strokes stayed', m[1] is True)
         check('the migrated call ink unlocks the chips in the standalone view', ev(page, "() => [...box.querySelectorAll('button[data-sb=\"conf\"]')].map(b => b.disabled)") == [False] * 6)
         # Ink written in the doc's block shows in the standalone view, and the reverse: both file
-        # under the home doc (`window.ink` above is the api over the same ctx the view uses).
-        ev(page, "() => { mountBlock('problem', 's12-figure', 'inv-s12-divider'); penStroke(surf('call:inv-s12-divider'), 60); }")
+        # under the home doc (`window.ink` above is the api over the same ctx the view uses). Each
+        # check reads the receiving surface's own canvas, in the band where the stroke was written.
+        ev(page, """() => {
+          mountBlock('problem', 's12-figure', 'inv-s12-divider');
+          const s = surf('call:inv-s12-divider');
+          window.docY = 60 * 800 / s.getBoundingClientRect().width;
+          penStroke(s, 60);
+        }""")
         r = ev(page, """async () => {
           await ctx.ui.openProblem('inv-s12-divider');
           const v = app.workspace.getLeavesOfType('notebook-study-problem').find(l => l.view.getState().id === 'inv-s12-divider').view;
+          for (let i = 0; i < 100 && !v.contentEl.querySelector('.nb-sb-pb'); i++) await new Promise(r => setTimeout(r, 20));
           window.box = v.contentEl;
-          const probe = window.ink.surface(content.docs.get('s12-figure'), document.createElement('div'), 'call:inv-s12-divider');
-          const n = probe.strokes().length;
-          probe.destroy();
-          return n;
+          const s = surf('call:inv-s12-divider');
+          return { doc: inkRows(s, docY - 10, docY + 10), old: inkRows(s, 36, 48) };
         }""")
-        check('call ink written in the doc\'s block shows in the standalone view', r == 2, r)
-        ev(page, "() => penStroke(surf('call:inv-s12-divider'), 80)")
+        check('call ink written in the doc\'s block shows on the standalone view\'s own call band', r['doc'] > 0 and r['old'] > 0, r)
+        ev(page, """() => {
+          const s = surf('call:inv-s12-divider');
+          window.viewY = 80 * 800 / s.getBoundingClientRect().width;
+          penStroke(s, 80);
+        }""")
         ev(page, "async () => await studyBlocks.flushInk(ctx)")
         f = ev(page, "() => JSON.parse(fs.get('study/ink/s12-figure.desktop.json')).strokes.map(s => s.blk)")
         check('doc and standalone ink share one file under the home doc', f.count('call:inv-s12-divider') == 3 and f.count('work:inv-s12-divider') == 1 and not ev(page, "() => fs.get('study/ink/problems.desktop.json') !== window.PROBLEMS_TEXT"), f)
         ev(page, "() => mountBlock('problem', 's12-figure', 'inv-s12-divider')")
-        r = ev(page, """() => {
-          const probe = window.ink.surface(content.docs.get('s12-figure'), document.createElement('div'), 'call:inv-s12-divider');
-          const n = probe.strokes().length;
-          probe.destroy();
-          return n;
-        }""")
-        check('call ink written in the standalone view shows in the doc block', r == 3, r)
+        r = ev(page, "() => inkRows(surf('call:inv-s12-divider'), viewY - 10, viewY + 10)")
+        check('call ink written in the standalone view shows on the doc block\'s own call band', r > 0, r)
         # Each old stroke is copied once: erased after the copy, it stays erased when the problem
         # opens again (this device records the ids it copied).
         r = ev(page, """async () => {
