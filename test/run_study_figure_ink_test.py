@@ -304,6 +304,8 @@ try:
           studyBlocks.register(ctx);
           await ctx.ui.openProblem('inv-el-mesh', { hidden: true, why: 'A stretch pick.' });
           const v = app.workspace.getLeavesOfType('notebook-study-problem')[0].view;
+          // S12: the view mounts after the old-ink copy settles, not within openProblem's promise.
+          for (let i = 0; i < 100 && !v.contentEl.querySelector('.nb-sb-pb'); i++) await new Promise(r => setTimeout(r, 20));
           window.pv = v;
           return v.contentEl.textContent;
         }""")
