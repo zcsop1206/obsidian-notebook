@@ -180,9 +180,11 @@ function makeVault() {
   put(path.join(study, 'figures', 'fx-in-fence.png'), PNG);
   put(path.join(study, 'figures', 'old', 'fx-units--old.svg'), SIZED);
   put(path.join(study, 'ink', 'fx-in-ink.png'), PNG);
-  edit(path.join(study, 'bank', 'fxbank.md'), (s) => s.replace('title: Putnam (fixture)', 'title: Putnam (fixture)\nhidden: Never'));
+  edit(path.join(study, 'bank', 'fxbank.md'), (s) => s.replace('title: Putnam (fixture)', 'title: Putnam (fixture)\nhidden: Never').replace(/\n*$/, '\n')
+    + '| fx-two-areas | Fixture problem with two areas | 3 | [paper](https://example.org/q.pdf) | [solutions](https://example.org/s.pdf) |\n');
   edit(path.join(study, 'basics', 'fx-div.md'), (s) => s.replace('build: 1', 'build: 1\nHidden: never'));
-  edit(path.join(study, 'bank', 'fxbank.tags.md'), (s) => s.replace(/\n*$/, '\n') + '| putnam-2019-a2 | comb | pigeonhole |\n| putnam-2020-b9 | gen | invariants |\n');
+  edit(path.join(study, 'bank', 'fxbank.tags.md'), (s) => s.replace(/\n*$/, '\n')
+    + '| putnam-2019-a2 | comb | pigeonhole |\n| putnam-2020-b9 | gen | invariants |\n| fx-two-areas | nt comb | pigeonhole |\n');
   edit(path.join(study, 'tracks.md'), (s) => s.replace(/\n*$/, '\n') + TRACK_ROWS.join('\n') + '\n');
   return { tmp, outer, vault, study };
 }
@@ -330,7 +332,15 @@ test('lint track-bank-areas: a bank served by the docs column, with problem area
   assert.deepEqual(pick(r.lint.warnings, 'track-bank-areas'), [['tracks.md', lineOf(tracks, '| fx-quiz |')], ['tracks.md', lineOf(tracks, '| fx-folder |')]],
     'fx-wide lists the areas; fx-via-doc reaches them through fx-comb; fx-elsewhere serves no bank; fx-paused has weight 0; putnam serves no bank');
   assert.match(r.lint.warnings.find((w) => w.rule === 'track-bank-areas').message,
-    /^track "fx-quiz" serves the bank fxbank through its docs column, but not the areas of 2 of its problems \(comb, gen\): /);
+    /^track "fx-quiz" serves the bank fxbank through its docs column, but not the areas of 2 of its problems \(comb, gen\): /,
+    'fx-two-areas ("nt comb") is left to tags-area: no areas column can reach it');
+});
+
+test('lint tags-area: a tags row with two areas in its cell, which no track reaches', () => {
+  const { r, study } = lintRun();
+  assert.deepEqual(pick(r.lint.warnings, 'tags-area'), [['bank/fxbank.tags.md', lineOf(path.join(study, 'bank', 'fxbank.tags.md'), '| fx-two-areas |')]],
+    'one area per row is fine');
+  assert.match(r.lint.warnings.find((w) => w.rule === 'tags-area').message, /^fx-two-areas: the area "nt comb" is not one area id; /);
 });
 
 test('--figures: images under the study root that no doc embeds', () => {

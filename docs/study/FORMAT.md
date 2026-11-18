@@ -204,7 +204,7 @@ Bank files hold references only: no statement, no solution, no wording from the 
 | putnam-2019-a2 | Putnam 2019 A2 | 4 | [paper](https://kskedlaya.org/putnam-archive/2019.pdf) | [solutions](https://kskedlaya.org/putnam-archive/2019s.pdf) |
 ```
 
-`bank/<source>.tags.md` has `| id | area | methods |` rows: a model's reading of the statement (never of a solution), labelled as such at the top. A problem without a tags row is never picked as hidden-topic.
+`bank/<source>.tags.md` has `| id | area | methods |` rows: a model's reading of the statement (never of a solution), labelled as such at the top. A problem without a tags row is never picked as hidden-topic. `area` is one area id, the problem's rating area: a cell such as `nt comb` reads as a single area that no track reaches, so the problem is never picked.
 
 **Using a bank problem in a doc** (a topic's Try section, a basic's problems): a `problem` callout whose title is the bank id and whose body is empty, anchored with the same id. The study view fills in the source, the links and `d` from the bank.
 

@@ -137,6 +137,8 @@ export function scan(index, events, since) {
 //   warning  hidden-value         a `hidden` frontmatter key other than exactly `hidden: never`
 //            track-bank-areas     a tracks row whose docs column serves a bank with problem areas it does
 //                                 not reach, so Today picks those problems only through another track
+//            tags-area            a bank problem whose tags row gives more than one area: the engine reads
+//                                 the cell whole, as one area no track reaches, so Today never picks it
 //            parser               the parser's other warnings
 //   info     solution-figure-only a problem whose solution embeds a figure while its statement has none
 // The vault is the nearest folder at or above the study root that holds `.obsidian`, else the root.
@@ -151,6 +153,8 @@ const FENCE_OPEN = /^\s{0,3}(`{3,}|~{3,})/;
 const SOLUTION_ORPHAN = /^a solution with no problem, example, derive or recall right above it$/;
 const SOLUTION_UNFOLDED = /^a solution callout that is not folded/;
 const ABSOLUTE_SIZE = /^\s*(\d+(\.\d*)?|\.\d+)(e[+-]?\d+)?\s*(px|pt|pc|mm|cm|in|q)?\s*$/i;
+// One area id: a tracks row's areas column splits on these, a tags row's area cell does not (parse.ts).
+const ONE_AREA = /^[^\s,;]+$/;
 
 function splitLines(text) {
   return text.replace(/\r\n?/g, '\n').split('\n');
@@ -280,15 +284,15 @@ function frontmatterLine(text, key) {
   return null;
 }
 
-/** The 1-based line of a track's row in tracks.md (its `track` cell), or null. */
-function trackRowLine(text, id) {
+/** The 1-based line of the first table row whose `column` cell is `value` (a track's row, a tags row), or null. */
+function tableRowLine(text, column, value) {
   const lines = splitLines(text);
   let col = -1;
   for (let i = 0; i < lines.length; i++) {
     if (!/^\s{0,3}\|/.test(lines[i])) { col = -1; continue; }
     const cells = lines[i].trim().replace(/^\|/, '').replace(/\|$/, '').split(/(?<!\\)\|/).map((c) => c.trim());
-    if (col < 0) { col = cells.findIndex((c) => c.toLowerCase() === 'track'); continue; }
-    if (cells[col] === id) return i + 1;
+    if (col < 0) { col = cells.findIndex((c) => c.toLowerCase() === column); continue; }
+    if (cells[col] === value) return i + 1;
   }
   return null;
 }
@@ -375,16 +379,31 @@ export function lint({ root, files, index, lib }) {
     for (const d of served) for (const a of d.areas) reach.add(a);
     for (const b of served) {
       if (b.kind !== 'bank' || !lib.trackDocsMatch(t, b)) continue;
-      const missed = new Map();
-      for (const e of b.bank) if (e.area && !reach.has(e.area)) missed.set(e.area, (missed.get(e.area) || 0) + 1);
+      const missed = new Map(); // a cell of several areas is tags-area's: no areas column can reach it
+      for (const e of b.bank) if (e.area && ONE_AREA.test(e.area) && !reach.has(e.area)) missed.set(e.area, (missed.get(e.area) || 0) + 1);
       if (!missed.size) continue;
       const areas = [...missed.keys()].sort();
       const n = [...missed.values()].reduce((x, y) => x + y, 0);
       warnings.push({
-        rule: 'track-bank-areas', doc: tracksFile ? underRoot(tracksFile.path) : null, line: tracksFile ? trackRowLine(tracksFile.text, t.id) : null,
+        rule: 'track-bank-areas', doc: tracksFile ? underRoot(tracksFile.path) : null, line: tracksFile ? tableRowLine(tracksFile.text, 'track', t.id) : null,
         message: `track "${t.id}" serves the bank ${b.id} through its docs column, but not the areas of ${n} of its problems (${areas.join(', ')}): a bank adds no areas of its own, so Today picks them only through another track; add ${areas.join(', ')} to the row's areas column`,
       });
     }
+  }
+
+  // Tags: parseTags keeps a row's area cell whole, so a cell of several areas is one area no track reaches.
+  const tagsFiles = files.filter((f) => /\.tags\.md$/i.test(f.path));
+  for (const b of index.bank.values()) {
+    if (!b.area || ONE_AREA.test(b.area)) continue;
+    let doc = null, line = null; // the row that wins: buildIndex reads tags files in order, the last row of an id counts
+    for (const f of tagsFiles) {
+      const l = tableRowLine(f.text, 'id', b.id);
+      if (l) { doc = underRoot(f.path); line = l; }
+    }
+    warnings.push({
+      rule: 'tags-area', doc, line,
+      message: `${b.id}: the area "${b.area}" is not one area id; the engine reads the whole cell as one area, which no track reaches, so Today never picks this problem (give the row one area)`,
+    });
   }
 
   // A figure only in a problem's solution: listed so a writer checks the statement does not need one.
