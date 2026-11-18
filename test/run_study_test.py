@@ -127,6 +127,24 @@ SETUP_JS = """(files) => {
   window.renderedAnchors = () => [...document.querySelectorAll('.nb-study-doc .sr-passage[data-a]')].map(e => e.getAttribute('data-a'));
   // Where an element sits in the view: its top relative to the scroller's top, in screen px.
   window.topInView = el => el.getBoundingClientRect().top - scroller().getBoundingClientRect().top;
+  // An element's top in paper px from the top of the doc on screen: the frame of page ink and the margin.
+  window.paperTop = el => { const dr = document.querySelector('.nb-study-doc').getBoundingClientRect(); return (el.getBoundingClientRect().top - dr.top) / (dr.width / 800); };
+  // Margin dots that do not sit by their passage. A dot sits 2 px above its passage's top, unless
+  // the dot above would overlap it: then 27 px below that one (marks.ts, placeDots).
+  window.dotsAstray = () => {
+    const rows = [...document.querySelectorAll('.nb-study-doc .nb-study-margin .nb-st-dot')].map(d => {
+      const el = studyEl(`[data-a="${d.dataset.a}"]`);
+      return { a: d.dataset.a, dot: parseFloat(d.style.top), top: el ? paperTop(el) : null };
+    }).sort((x, y) => x.dot - y.dot);
+    const out = [];
+    let prev = -Infinity;
+    for (const r of rows) {
+      const ok = r.top !== null && (Math.abs(r.dot - (r.top - 2)) <= 1 || (r.dot > r.top - 2 && Math.abs(r.dot - (prev + 27)) <= 1));
+      if (!ok) out.push(`${r.a}: dot ${r.dot.toFixed(1)}, passage ${r.top === null ? 'gone' : r.top.toFixed(1)}`);
+      prev = r.dot;
+    }
+    return out;
+  };
   // A pen stroke from client points (coalesced events in groups of 3, WebKit-style repeats), as
   // in test/run_study_ink_test.py; the ink layer listens for pointerdown on the doc stack.
   window.penStroke = (target, pts, type = 'pen', id = 7) => {
@@ -639,6 +657,16 @@ def section_marks(page):
       return { sc: !!document.querySelector('.nb-st-scaffold[data-a="cue-gcd"]'), marks: plugin.study.engine().marks('fx-topic') };
     }""")
     check('marks: a tap on the marked dot clears it: the scaffold goes and the engine drops the mark', not r['sc'] and not r['marks'], r)
+
+
+def section_dots(page):
+    # Margin dots sit by their passages all the way down a doc: marks.ts measures tops at the doc's
+    # scale (the margin's whole-px width), not at a scale read from each element's rounded height.
+    for d in ['fx-long', 'fx-units']:
+        open_doc(page, d)
+        ok = wait_js(page, "() => document.querySelectorAll('.nb-study-doc .nb-study-margin .nb-st-dot').length > 5 && dotsAstray().length === 0", 3000)
+        r = page.evaluate("() => ({ n: document.querySelectorAll('.nb-study-doc .nb-study-margin .nb-st-dot').length, astray: dotsAstray() })")
+        check(f'marks: every margin dot of {d} sits by its passage, down to the last', ok and r['n'] > 5 and not r['astray'], f"{r['n']} dots, astray {r['astray'][:5]}")
 
 
 def section_panels(page):
@@ -1244,7 +1272,8 @@ def main():
             page.evaluate("async () => { window.pluginData = { study: { root: '/study/', device: 'Test Pad', minutes: 45 } }; window.plugin = await loadPlugin(); }")
             for name, fn in [('settings', section_settings), ('library', section_library), ('render', section_render), ('follow', section_follow),
                              ('back', section_back), ('peek', section_peek), ('pen', section_pen), ('tabs', section_tabs), ('header', section_header),
-                             ('open paths', section_open_paths), ('content change', section_content_change), ('ink', section_ink), ('marks', section_marks), ('panels', section_panels)]:
+                             ('open paths', section_open_paths), ('content change', section_content_change), ('ink', section_ink),
+                             ('marks', section_marks), ('dots', section_dots), ('panels', section_panels)]:
                 try:
                     fn(page)
                 except Exception as e:
