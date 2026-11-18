@@ -406,6 +406,18 @@ const WORK_H = 480;
 const WORK_STEP = 400;
 const WORK_MAX = 2800;
 
+/**
+ * The work paper's height that shows every stroke given, never below `h`: the lowest point's
+ * paper y plus one WORK_STEP, rounded up to a multiple of WORK_STEP, capped at WORK_MAX. The doc's
+ * block and the standalone view share the work ink, so work written lower in one shows in the other.
+ */
+export function workPaperFit(h: number, strokes: readonly { p: readonly (readonly number[])[] }[]): number {
+  let low = -Infinity;
+  for (const s of strokes) for (const q of s.p) if (q[1] > low) low = q[1];
+  if (!isFinite(low)) return h;
+  return Math.max(h, Math.min(WORK_MAX, Math.ceil((low + WORK_STEP) / WORK_STEP) * WORK_STEP));
+}
+
 export function mountSession(host: HTMLElement, env: BlockEnv, item: ProblemItem, o: SessionOpts = {}): SessionHandle {
   ensureStyles();
   const ctx = env.ctx;
@@ -481,6 +493,15 @@ export function mountSession(host: HTMLElement, env: BlockEnv, item: ProblemItem
     meta: () => ({ e: S.gaveUp || S.phase === 'settled' || S.phase === 'done' ? 1 : 0 }),
     color: st => ((st.e || 0) > 0 ? '--color-purple' : '--text-normal'),
   });
+  /** Grows the work paper to fit its lowest stroke (workPaperFit); true when it grew. */
+  const fitWork = (): boolean => {
+    const h = workPaperFit(workH, workInk.strokes());
+    if (h === workH) return false;
+    workH = h;
+    workInk.layout();
+    return true;
+  };
+  fitWork();
   const workRow = workSec.createDiv({ cls: 'nb-sb-row' });
   button(workRow, 'Undo', 'wundo');
   const moreB = button(workRow, 'More paper', 'more');
@@ -851,6 +872,8 @@ export function mountSession(host: HTMLElement, env: BlockEnv, item: ProblemItem
   }
   root.addEventListener('click', onClick);
   const offCall = callInk.onChange(() => { if (!dead) renderCall(); });
+  // Work strokes that arrive later (an adopted copy, a sync) grow the paper the same way.
+  const offWork = workInk.onChange(() => { if (!dead && fitWork()) render(); });
   const offEvents = ctx.onChange(what => {
     if (dead || what !== 'events') return;
     // A settle from another device (after a sync) moves this card on.
@@ -871,6 +894,7 @@ export function mountSession(host: HTMLElement, env: BlockEnv, item: ProblemItem
       if (timer) window.clearInterval(timer);
       if (armTimer) window.clearTimeout(armTimer);
       giveTap?.destroy();
+      offWork();
       offCall();
       offEvents();
       root.removeEventListener('click', onClick);

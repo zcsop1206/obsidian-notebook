@@ -6,7 +6,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import {
   ARM_MS, CONF, callEvent, chipsOpen, commit, confirmCalled, confirmUsed, fromEvents, giveUp, hookItem, markLogged,
   mergeSession, methodChoices, methodHit, newSession, problemItem, readyToLog, settleEvent, skipTicks, solutionOpen,
-  tapVerb, ticksOpen, toggleNone, toggleTick, verbsOpen, type Session,
+  tapVerb, ticksOpen, toggleNone, toggleTick, verbsOpen, workPaperFit, type Session,
 } from '../../src/study/blocks/problem';
 import {
   copyOldProblemInk, homeDoc, migrateOldProblemInk, movedInk, problemInkKeys, problemsDoc, serialQueue, strokesToCopy, type OldInkIO,
@@ -214,6 +214,17 @@ test('problem: items from the index, hooks from a basic, and the tick choices', 
   // A basic/anchor method is labelled without its doc id, so a hidden pick's tick list does not name its topic.
   const labels = methodChoices(content, { methods: ['fx-div/cong-arith', 'fx-div/no-such'] }).map(m => m.label);
   assert.ok(labels.every(l => !l.includes('fx-div')), labels.join(' | '));
+});
+
+test('problem: the work paper grows to fit its lowest stroke, a step below it, in whole steps, up to the cap', () => {
+  const at = (...ys: number[]) => ys.map(y => ({ p: [[10, y, 0.5, 0], [20, y - 5, 0.5, 10]] }));
+  assert.equal(workPaperFit(480, []), 480, 'no work: as it is');
+  assert.equal(workPaperFit(480, at(60)), 800, 'any work keeps a step of paper below it');
+  assert.equal(workPaperFit(480, at(400)), 800, 'a whole number of steps');
+  assert.equal(workPaperFit(480, at(401)), 1200);
+  assert.equal(workPaperFit(480, at(1000, 120)), 1600, 'the lowest stroke counts');
+  assert.equal(workPaperFit(480, at(2600)), 2800, 'capped');
+  assert.equal(workPaperFit(1600, at(100)), 1600, 'never shrinks');
 });
 
 /* ------------------------- S12: the standalone view's home doc ------------------------- */
