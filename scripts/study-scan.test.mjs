@@ -1,7 +1,7 @@
 // node --test scripts/study-scan.test.mjs
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, cpSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, cpSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -10,10 +10,19 @@ import { fileURLToPath } from 'node:url';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FIX = path.join(HERE, '..', 'test', 'fixtures', 'study');
 
+/** A new temp folder, removed when the tests end. */
+const temps = [];
+function tempDir(prefix) {
+  const dir = mkdtempSync(path.join(tmpdir(), prefix));
+  temps.push(dir);
+  return dir;
+}
+after(() => { for (const dir of temps) rmSync(dir, { recursive: true, force: true }); });
+
 function ev(id, t, type, extra) { return JSON.stringify({ v: 1, id, t, dev: 'ipad', type, ...extra }); }
 
 function makeRoot() {
-  const root = mkdtempSync(path.join(tmpdir(), 'study-scan-'));
+  const root = tempDir('study-scan-');
   cpSync(FIX, root, { recursive: true });
   mkdirSync(path.join(root, 'log'));
   writeFileSync(path.join(root, 'log', 'ipad.jsonl'), [
@@ -157,7 +166,7 @@ const TRACK_ROWS = [
 ];
 
 function makeVault() {
-  const tmp = mkdtempSync(path.join(tmpdir(), 'study-lint-'));
+  const tmp = tempDir('study-lint-');
   const outer = path.join(tmp, 'outer');
   const vault = path.join(outer, 'vault');
   const study = path.join(vault, 'study');
@@ -259,7 +268,7 @@ test('lint embed-missing: by bare name anywhere in the nearest vault; not in cod
 
 test('lint: without a .obsidian folder above it, the vault is the study root', (t) => {
   const v = makeVault();
-  const alone = path.join(mkdtempSync(path.join(tmpdir(), 'study-alone-')), 'study');
+  const alone = path.join(tempDir('study-alone-'), 'study');
   cpSync(v.study, alone, { recursive: true });
   for (let dir = path.dirname(alone); ; dir = path.dirname(dir)) {
     if (existsSync(path.join(dir, '.obsidian'))) { t.skip(`a .obsidian folder above the temp folder (${dir})`); return; }
