@@ -15,6 +15,7 @@ import type { NewEvent, StudyContext } from '../context';
 import type { BankEntry, ContentIndex, Problem, ProofStep, StudyDoc, StudyEvent } from '../types';
 import type { BlockEnv, BlockHandle, BlockMount, InkSurface } from '../view/host';
 import { MODEL_LABEL, button, ensureStyles, fmtDur, fogBars, lastEvent, loadLocal, safe, saveLocal, timeOf, twoTap } from './drill';
+import { mountFigureInk } from './figure-ink';
 
 export const PROBLEM_VIEW = 'notebook-study-problem';
 
@@ -420,6 +421,7 @@ export function mountSession(host: HTMLElement, env: BlockEnv, item: ProblemItem
   let logging = false;
   let workH = WORK_H;
   let solDone = '';
+  let figInk: (() => void) | null = null;
   const content = () => ctx.content();
   const save = () => { if (!dead) saveLocal(LKEY(item.id), S); };
   const hiddenNow = () => (S.phase === 'call' ? o.hidden === true : S.hidden);
@@ -545,7 +547,7 @@ export function mountSession(host: HTMLElement, env: BlockEnv, item: ProblemItem
       body.createEl('p', { cls: 'nb-sb-hint', text: 'The statement is the theorem just above: prove it, after the call.' });
     } else {
       const st = body.createDiv({ cls: 'nb-sb-stmt' });
-      void env.render(item.statement || '(No statement.)', st).then(() => env.relayout());
+      void env.render(item.statement || '(No statement.)', st).then(() => { figInk?.(); figInk = mountFigureInk(st, env, item.id); env.relayout(); });
       if (!o.inline) body.createEl('p', { cls: 'nb-sb-by', text: MODEL_LABEL });
     }
   }
@@ -873,6 +875,8 @@ export function mountSession(host: HTMLElement, env: BlockEnv, item: ProblemItem
       giveTap?.destroy();
       offCall();
       offEvents();
+      figInk?.();
+      figInk = null;
       root.removeEventListener('click', onClick);
       callInk.destroy();
       workInk.destroy();
