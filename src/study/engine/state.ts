@@ -272,18 +272,27 @@ export class StudyState {
     return this.isBasic(doc) ? [doc] : [];
   }
 
-  /** A track serves a doc when the doc lists it, its areas include the doc's area, or its docs column matches (globs on ids, folder names on folders). */
+  /**
+   * A track serves a doc when the doc lists it, its areas include the doc's area, or its docs column
+   * matches. The docs column is `;`-separated sections, each `[folder] glob, glob`: a section matches
+   * when the doc sits in one of the section's folders (if it names any) and its id matches one of the
+   * globs; a section of folder names only matches the whole folder. One matching section is enough.
+   * A row with no `;` is a single section and matches exactly as it always did.
+   */
   trackMatches(t: Track, d: StudyDoc): boolean {
     if (d.tracks.includes(t.id)) return true;
     if (t.areas.some(a => d.areas.includes(a))) return true;
-    const tokens = t.docs.split(/[\s,]+/).filter(Boolean);
-    if (!tokens.length) return false;
-    const folders = tokens.filter(x => FOLDERS.has(x));
-    const globs = tokens.filter(x => !FOLDERS.has(x));
     const parts = d.path.split('/');
     const folder = parts.length > 1 ? parts[parts.length - 2] : '';
-    if (folders.length && !folders.includes(folder)) return false;
-    return globs.length ? globs.some(g => globMatch(g, d.id)) : folders.length > 0;
+    for (const section of t.docs.split(';')) {
+      const tokens = section.split(/[\s,]+/).filter(Boolean);
+      if (!tokens.length) continue;
+      const folders = tokens.filter(x => FOLDERS.has(x));
+      const globs = tokens.filter(x => !FOLDERS.has(x));
+      if (folders.length && !folders.includes(folder)) continue;
+      if (globs.length ? globs.some(g => globMatch(g, d.id)) : folders.length > 0) return true;
+    }
+    return false;
   }
 
   /** Tracks that count on a day: weight > 0 and not over (a range counts until its end). */
@@ -832,9 +841,16 @@ export class StudyState {
     return p.d != null && isFinite(p.d) && !p.unchecked && !!p.area && !this.settled.has(p.id);
   }
 
-  /** A problem can be a hidden-topic pick when its methods are known (a solution's methods line, or a tags row). */
+  /**
+   * A problem can be a hidden-topic pick when its methods are known (a solution's methods line, or a
+   * tags row) and its file does not say `hidden: never` in the frontmatter — the bank file for bank
+   * problems, the doc for invented ones. A `hidden: never` file names the topic (a course chapter),
+   * so its problems only ever come up as visible picks.
+   */
   hiddenOK(p: Problem): boolean {
-    return p.methods.length > 0;
+    if (p.methods.length === 0) return false;
+    const file = this.doc(p.bank ? p.bank.bank : p.doc);
+    return !file || file.meta.hidden !== 'never';
   }
 
   private closest<T extends { id: string }>(cands: T[], dOf: (x: T) => number, targetOf: (x: T) => number, day: string): T | null {

@@ -717,7 +717,7 @@ export function parseTracks(markdown: string): Track[] {
       deadline: range ? range[1] : one ? one[1] : null,
       until: range ? range[2] : null,
       weight: isFinite(w) && (r.weight || '').trim() !== '' ? w : 1,
-      areas: (r.areas || '').split(/[\s,]+/).filter(Boolean),
+      areas: (r.areas || '').split(/[\s,;]+/).filter(Boolean),
       docs: (r.docs || '').trim(),
     };
   });
