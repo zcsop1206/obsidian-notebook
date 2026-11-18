@@ -1,10 +1,11 @@
 // Figure ink (S13): the `fig:` key from an item and a file name (plain, spaced, URL-encoded), no
 // surface when the statement has no image or the image fails to load, the surface's height from
-// the image's natural size, the wrap under the canvas, the duplicate-name suffix and the cleanup.
+// the image's natural size, its dark ink colour, the wrap under the canvas, the duplicate-name
+// suffix and the cleanup.
 // Runs under node:test on a minimal fake DOM (document.createElement is stubbed below).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { figureHeight, figureKey, figureName, figureSurface, mountFigureInk } from '../../src/study/blocks/figure-ink';
+import { FIGURE_INK, figureHeight, figureKey, figureName, figureSurface, mountFigureInk } from '../../src/study/blocks/figure-ink';
 import type { BlockEnv, InkSurface, InkSurfaceOptions } from '../../src/study/view/host';
 import type { StudyDoc } from '../../src/study/types';
 
@@ -191,6 +192,8 @@ test('figure-ink: a loaded image gets a surface over it, the image under the can
   assert.equal(surfaces[0].el.children[0], img, 'the image was prepended under the canvas');
   const h = calls[0].opts && calls[0].opts.height;
   assert.equal(typeof h === 'function' ? h() : h, 600, 'height from the natural size');
+  const color = calls[0].opts && calls[0].opts.color;
+  assert.equal(color ? color({ id: 's-1', p: [], t0: 0 }) : '', FIGURE_INK, 'figure ink is dark in both themes, never --text-normal');
 });
 
 test('figure-ink: a second call on the same image returns the same surface', () => {

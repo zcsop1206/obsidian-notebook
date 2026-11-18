@@ -5,7 +5,8 @@
 # draws nothing and is not prevented (so the view scrolls); a hidden pick shows nothing new
 # before the settle; a figure stroke written in the doc's problem block shows on the same figure
 # in the standalone problem view and the reverse, both filed in the home doc's ink file (S12's
-# home-doc env.doc), with nothing written to ink/problems.<device>.json. Uses the mock obsidian
+# home-doc env.doc), with nothing written to ink/problems.<device>.json; in the dark theme a figure
+# stroke still draws dark (the figures are white whatever the theme). Uses the mock obsidian
 # module's in-memory vault (test/harness.html), the S4 ink module and the blocks bundled by
 # test/study-blocks-build.mjs; figure files are served by file name, as the content check does,
 # so nothing asserts on an image's src (S12 changes how the mock resolves it).
@@ -135,6 +136,19 @@ SETUP = r"""
     const d = c.getContext('2d').getImageData(x0, y0, Math.max(1, w), Math.max(1, h)).data;
     let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i] > 0) n++;
     return n;
+  };
+  /* The mean colour [r, g, b, n] of the solid ink pixels (alpha >= 128) within rad device px of
+     (fx, fy) of the surface's canvas; null when there are none. */
+  window.inkRGB = (surfEl, fx, fy, rad = 8) => {
+    const c = surfEl.querySelector('canvas');
+    if (!c) return null;
+    const X = Math.round(fx * c.width), Y = Math.round(fy * c.height);
+    const x0 = Math.max(0, X - rad), y0 = Math.max(0, Y - rad);
+    const w = Math.min(c.width - x0, 2 * rad), h = Math.min(c.height - y0, 2 * rad);
+    const d = c.getContext('2d').getImageData(x0, y0, Math.max(1, w), Math.max(1, h)).data;
+    let r = 0, g = 0, b = 0, n = 0;
+    for (let i = 0; i < d.length; i += 4) if (d[i + 3] >= 128) { r += d[i]; g += d[i + 1]; b += d[i + 2]; n++; }
+    return n ? [r / n, g / n, b / n, n] : null;
   };
   /* A finger event over el: whether the browser would act on it (not prevented). */
   window.fingerTouch = (el, type, touchType) => {
@@ -366,6 +380,24 @@ try:
             ok = False
         check('a figure stroke written in the standalone view shows on the same figure in the doc', ok)
         check('nothing was written to ink/problems.desktop.json', ev(page, "() => !fs.has('study/ink/problems.desktop.json')") is True)
+
+        # --- 9. the dark theme: figure ink stays dark. The figures are drawn on white whatever the
+        # theme, so ink in the theme's --text-normal (light grey in the dark theme) would leave the
+        # labels nearly invisible. The harness styles Obsidian's body.theme-dark.
+        ev(page, "() => { document.body.classList.add('theme-dark'); mountBlock('problem', 'fx-fig', 'inv-el-nodes'); }")
+        try:
+            page.wait_for_function(f"() => surf('{KEY_CIRCUIT}')", timeout=8000)
+            ok = True
+        except Exception:
+            ok = False
+        check('the circuit figure is back (setup for the dark theme check)', ok)
+        light = ev(page, f"() => surf('{KEY_CIRCUIT}') ? getComputedStyle(surf('{KEY_CIRCUIT}')).getPropertyValue('--text-normal').trim() : null")
+        check('the dark theme is on (setup): --text-normal is light grey over the figure', light == '#dadada', light)
+        ev(page, f"() => strokeAt(surf('{KEY_CIRCUIT}'), 0.62, 0.15)")  # a blank stretch of the figure
+        page.wait_for_timeout(80)
+        rgb = ev(page, f"() => inkRGB(surf('{KEY_CIRCUIT}'), 0.62, 0.15)")
+        check('in the dark theme a figure stroke draws dark on the white figure', bool(rgb) and max(rgb[:3]) < 100, rgb)
+        ev(page, "() => document.body.classList.remove('theme-dark')")
 
         page.screenshot(path=os.path.join(OUT, 'study-figure-ink.png'))
         check('no page errors', not errors, errors[:3])

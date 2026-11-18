@@ -13,12 +13,17 @@
  * Always on: no button, no read-only. The surface carries `.nb-study-ink`, which page ink's
  * PAGE_INK_SKIP already skips, so a figure has exactly one ink layer. The surface's canvas only
  * acts on pen and mouse pointerdowns; fingers never draw and nothing prevents a touch scroll.
+ * Figure ink is FIGURE_INK in both themes: the figures are drawn on white, where the theme's
+ * --text-normal (light grey in the dark theme) would leave the labels nearly invisible.
  * Nothing here imports 'obsidian', so the pure parts run under node:test.
  */
 import type { BlockEnv, InkSurface } from '../view/host';
 
 /** The paper width every ink surface draws on. */
 const PAPER_W = 800;
+
+/** The colour figure strokes draw in, whatever the theme: dark on the figures' white. */
+export const FIGURE_INK = '#1f1f1f';
 
 /** The paper height a figure's surface needs: the image's aspect ratio at 800 paper px wide. */
 export function figureHeight(naturalWidth: number, naturalHeight: number): number {
@@ -58,8 +63,8 @@ const mounts = new WeakMap<HTMLImageElement, FigureMount>();
 
 /**
  * Wraps `img` in a `.nb-study-figure` box and, once the image has loaded (`naturalWidth > 0`),
- * mounts `env.ink.surface(env.doc, box, key, {height})` with `height` the image's aspect ratio in
- * paper px; the image is prepended into `surface.el`, under its canvas. Returns the surface when
+ * mounts `env.ink.surface(env.doc, box, key, {height, color})` with `height` the image's aspect
+ * ratio in paper px and `color` FIGURE_INK; the image is prepended into `surface.el`, under its canvas. Returns the surface when
  * the image was already loaded, else null: the mount still happens on `load`, and on `error`
  * everything is unwrapped again — an image that never loads gains nothing.
  *
@@ -86,7 +91,10 @@ export function figureSurface(img: HTMLImageElement, env: BlockEnv, key: string)
   function mount(): void {
     if (done || !(img.naturalWidth > 0)) return;
     done = true;
-    const surface = env.ink.surface(env.doc, box, key, { height: () => figureHeight(img.naturalWidth, img.naturalHeight) });
+    const surface = env.ink.surface(env.doc, box, key, {
+      height: () => figureHeight(img.naturalWidth, img.naturalHeight),
+      color: () => FIGURE_INK,
+    });
     rec.surface = surface;
     // The paper border createInkApi draws would put the surface 2 px wider than the image.
     surface.el.style.border = 'none';
