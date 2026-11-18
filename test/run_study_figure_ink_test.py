@@ -8,7 +8,7 @@
 # home-doc env.doc), with nothing written to ink/problems.<device>.json; in the dark theme a figure
 # stroke still draws dark (the figures are white whatever the theme); each figure's undo chip takes
 # this device's latest stroke on that figure only, shows only while there is one, and is never
-# written on. Uses the mock obsidian
+# written on; a drill's New attempt clears its prompt's figure with the page. Uses the mock obsidian
 # module's in-memory vault (test/harness.html), the S4 ink module and the blocks bundled by
 # test/study-blocks-build.mjs; figure files are served by file name, as the content check does,
 # so nothing asserts on an image's src (S12 changes how the mock resolves it).
@@ -485,6 +485,46 @@ try:
         c5 = ev(page, counts)
         check("Undo never takes another device's stroke: it stays, the chip hides", r[0] is True and r[1] == 0 and r[2] > 0 and c5 == [c1[0], 0, 0], [r, c5])
         ev(page, "() => { pageInk.destroy(); window.pageInk = null; }")
+
+        # --- 11. a drill's New attempt clears the prompt's figure with the page: marks made while
+        # reading the model's steps do not stay into the next blank-page attempt.
+        KEY_DRILL = 'drill:d-bridge-balance'
+        ev(page, "() => mountBlock('drill', 'fx-fig', 'd-bridge-balance')")
+        try:
+            page.wait_for_function(f"() => surf('{KEY_BRIDGE}') && surf('{KEY_DRILL}')", timeout=8000)
+            ok = True
+        except Exception:
+            ok = False
+        check('the drill shows its prompt figure and its page (setup for New attempt)', ok)
+        ev(page, "() => box.querySelector('[data-sb=\"start\"]').click()")
+        for i in range(3):
+            ev(page, f"() => strokeAt(surf('{KEY_DRILL}'), {0.2 + 0.25 * i}, 0.3)")
+            page.wait_for_timeout(30)
+        ev(page, "() => box.querySelector('[data-sb=\"done\"]').click()")
+        for fx, fy in ((0.3, 0.2), (0.7, 0.8)):  # marks on the figure while reading the model's steps
+            ev(page, f"() => strokeAt(surf('{KEY_BRIDGE}'), {fx}, {fy})")
+            page.wait_for_timeout(30)
+        mine = (f"async () => {{ await studyBlocks.flushInk(inkCtx); const j = fileJson('study/ink/fx-fig.desktop.json'); "
+                f"return [j.strokes.filter(s => s.blk === '{KEY_BRIDGE}').length, j.strokes.filter(s => s.blk === '{KEY_DRILL}').length]; }}")
+        n0 = ev(page, mine)
+        ok = ev(page, "() => { const g = box.querySelector('[data-grade=\"clean\"]'); if (!g) return false; g.click(); return true; }")
+        try:
+            page.wait_for_function("() => box.querySelector('[data-sb=\"again\"]')", timeout=5000)
+        except Exception:
+            ok = False
+        check('setup: page strokes, Done, figure strokes, graded clean', ok and n0[0] >= 2 and n0[1] == 3, n0)
+        ev(page, "() => { const b = box.querySelector('[data-sb=\"again\"]'); b.click(); b.click(); }")  # two taps
+        try:
+            page.wait_for_function("() => box.querySelector('.nb-sb-drill').dataset.phase === 'idle'", timeout=5000)
+            ok = True
+        except Exception:
+            ok = False
+        check('New attempt starts a fresh attempt (setup)', ok)
+        page.wait_for_timeout(80)
+        n1 = ev(page, mine)
+        blank = ev(page, f"() => [inkAt(surf('{KEY_BRIDGE}'), 0.5, 0.5, 1e6), inkAt(surf('{KEY_DRILL}'), 0.5, 0.5, 1e6)]")
+        check("New attempt leaves the prompt's figure empty, as the page", blank == [0, 0], blank)
+        check("and the ink file holds none of this device's strokes under the figure's key", n1 == [0, 0], [n0, n1])
 
         page.screenshot(path=os.path.join(OUT, 'study-figure-ink.png'))
         check('no page errors', not errors, errors[:3])

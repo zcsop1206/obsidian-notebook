@@ -174,13 +174,23 @@ export function figureSurface(img: HTMLImageElement, env: BlockEnv, key: string)
   return null;
 }
 
+/** mountFigureInk's result: the cleanup, carrying `clear`. */
+export type FigureInk = (() => void) & {
+  /**
+   * Clears every mounted figure's strokes as InkSurface.clear does (this device's deleted from its
+   * file, other devices' hidden through it): a drill's New attempt clears its prompt's figures
+   * with the page. A figure still loading has nothing shown to clear.
+   */
+  clear(): void;
+};
+
 /**
  * Mounts figure ink on every `img` inside `container`, keyed `fig:<itemId>:<file name>`; a second
  * image resolving to the same name gets `~2`, `~3` and so on, so duplicates never share a stroke
  * set. Returns the cleanup: destroys every surface, cancels every pending load and puts the
- * images back.
+ * images back. The cleanup also carries `clear()`, which wipes the figures' strokes.
  */
-export function mountFigureInk(container: HTMLElement, env: BlockEnv, itemId: string): () => void {
+export function mountFigureInk(container: HTMLElement, env: BlockEnv, itemId: string): FigureInk {
   const imgs = Array.from(container.querySelectorAll('img')) as HTMLImageElement[];
   const used = new Map<string, number>();
   for (const img of imgs) {
@@ -189,7 +199,7 @@ export function mountFigureInk(container: HTMLElement, env: BlockEnv, itemId: st
     used.set(name, n + 1);
     figureSurface(img, env, figureKey(itemId, n ? `${name}~${n + 1}` : name));
   }
-  return () => {
+  const cleanup = (() => {
     for (const img of imgs) {
       try {
         mounts.get(img)?.destroy();
@@ -197,5 +207,15 @@ export function mountFigureInk(container: HTMLElement, env: BlockEnv, itemId: st
         console.error('[study] figure ink cleanup', e);
       }
     }
+  }) as FigureInk;
+  cleanup.clear = () => {
+    for (const img of imgs) {
+      try {
+        mounts.get(img)?.surface?.clear();
+      } catch (e) {
+        console.error('[study] figure ink clear', e);
+      }
+    }
   };
+  return cleanup;
 }

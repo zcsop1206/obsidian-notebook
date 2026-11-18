@@ -121,12 +121,13 @@ interface MountCall {
   opts: InkSurfaceOptions | undefined;
 }
 
-/** A stub surface: its strokes and listeners, and how often undo and destroy ran. */
+/** A stub surface: its strokes and listeners, and how often undo, clear and destroy ran. */
 interface Stub {
   el: El;
   list: InkStroke[];
   destroyed: number;
   undos: number;
+  clears: number;
   /** Replaces the strokes and tells the listeners, as the store does after any change. */
   set(l: InkStroke[]): void;
 }
@@ -151,6 +152,7 @@ function fakeEnv(device = 'desktop'): { env: BlockEnv; calls: MountCall[]; surfa
           list: [],
           destroyed: 0,
           undos: 0,
+          clears: 0,
           set: l => {
             s.list = l;
             for (const fn of [...fns]) fn(l.slice());
@@ -174,7 +176,10 @@ function fakeEnv(device = 'desktop'): { env: BlockEnv; calls: MountCall[]; surfa
             if (last) s.set(s.list.filter(x => x !== last));
             return last || null;
           },
-          clear: () => {},
+          clear: () => {
+            s.clears++;
+            s.set([]);
+          },
           layout: () => {},
           destroy: () => {
             s.destroyed++;
@@ -351,6 +356,30 @@ test('figure-ink: mountFigureInk keys each image by its file name and cleans all
   assert.equal(stmt.children.length, 3);
   assert.ok(stmt.children.indexOf(a) === 0 && stmt.children.indexOf(b) === 1 && stmt.children.indexOf(c) === 2, 'the images are back in place');
   assert.doesNotThrow(() => cleanup(), 'the cleanup is idempotent');
+});
+
+test('figure-ink: clear() wipes every mounted figure of the call; after the cleanup it does nothing', () => {
+  const { env, surfaces } = fakeEnv();
+  const prompt = new El('div');
+  const imgs = [new Img('figs/a.svg'), new Img('figs/b.svg')];
+  for (const i of imgs) {
+    i.complete = true;
+    i.naturalWidth = 300;
+    i.naturalHeight = 200;
+    prompt.appendChild(i);
+  }
+  const late = new Img('figs/late.svg'); // still loading: no surface, nothing shown to clear
+  prompt.appendChild(late);
+  const fig = mountFigureInk(prompt as unknown as HTMLElement, env, 'd-x');
+  assert.equal(typeof fig, 'function', 'still the cleanup');
+  surfaces[0].set([stroke('s-1', 'desktop')]);
+  surfaces[1].set([stroke('s-2', 'desktop'), stroke('s-3', 'ipad')]);
+  fig.clear();
+  assert.deepEqual(surfaces.map(s => s.clears), [1, 1], 'each mounted figure cleared once');
+  assert.deepEqual(surfaces.map(s => s.list.length), [0, 0]);
+  fig();
+  assert.doesNotThrow(() => fig.clear());
+  assert.deepEqual(surfaces.map(s => s.clears), [1, 1], 'a cleared-up figure is not touched again');
 });
 
 test('figure-ink: the cleanup cancels a pending load', () => {

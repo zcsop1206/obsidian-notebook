@@ -11,7 +11,7 @@
 import type { NewEvent } from '../context';
 import type { DrillGrade, ProofStep, StudyEvent } from '../types';
 import type { BlockEnv, BlockHandle, BlockMount, InkStroke, InkSurface } from '../view/host';
-import { mountFigureInk } from './figure-ink';
+import { mountFigureInk, type FigureInk } from './figure-ink';
 
 /* ------------------------------------------------------------------------------------------ *
  * Constants and pure helpers (unit-tested in test/unit/study-fog.test.ts)
@@ -418,7 +418,7 @@ export function runDrill(host: HTMLElement, env: BlockEnv, spec: DrillSpec): Dri
 
   const giveTap = giveB ? twoTap(giveB, 'Tap again: show it, counts as failed', () => finish(true)) : null;
   let againTap: { destroy(): void } | null = null;
-  let figInk: (() => void) | null = null;
+  let figInk: FigureInk | null = null;
 
   /* ----- replay state ----- */
   const rp = { T: 0, playing: false, speed: 4, raf: 0, wall0: 0, T0: 0 };
@@ -644,6 +644,8 @@ export function runDrill(host: HTMLElement, env: BlockEnv, spec: DrillSpec): Dri
   function doAgain(): void {
     if (phase() !== 'done' || !st.grade) return;
     surface.clear();
+    // Marks made on the prompt's figure (reading the model's steps, say) go with the page.
+    figInk?.clear();
     st = blank();
     restored = false;
     save();
