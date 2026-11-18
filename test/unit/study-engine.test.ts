@@ -1123,3 +1123,105 @@ test('S5 contract: a rewrite request with rev is answered only by a higher build
   r.setContent(contentWith({ 'topics/fe-moves.md': s => bumpBuild(3)(s).replace('Mix: ', 'Mix them: '), 'basics/fe-units.md': bumpBuild(2), 'basics/fe-crt.md': bumpBuild(2) }));
   assert.deepEqual(r.eng.marks('fe-moves').map(m => m.a), ['p-plain']);
 });
+
+/* ==================================================== S14: track docs sections, hidden: never */
+
+test('tracks: the docs column splits on `;`, each section `[folder] glob, glob`, matching by the docs column alone', () => {
+  // Rows shaped like the real mie342, putnam and interviews rows: folder + glob sections, a section
+  // without a folder, a trailing `;`, every areas column empty. One bank doc is added inline so the
+  // bank section has something to match; no fixture file is touched.
+  const bank: SourceFile = {
+    path: 'study/bank/course-2025.md',
+    text: [
+      '---', 'study: bank', 'id: course-2025', 'title: Course 2025 (fixture)', '---', '',
+      '| id | source | d | statement | solutions |',
+      '|---|---|---|---|---|',
+      '| course-q3 | Course 2025 Q3 | 2.37 | [paper](https://example.com/q.pdf) | [solutions](https://example.com/s.pdf) |',
+      '',
+    ].join('\n'),
+  };
+  const c = buildIndex([...sources({
+    'meta/tracks.md': s => s + [
+      '| s14-mie | 2026-12-08 | 1 | | basics fe-units, fe-crt; topics fe-count |',
+      '| s14-bank | 2026-12-09 | 1 | | bank course-*; topics fe-gen; |',
+      '| s14-loose | 2026-12-10 | 1 | | fe-geo, fe-an |',
+      '| s14-old | 2026-12-11 | 1 | | basics fe-c* |',
+      '',
+    ].join('\n'),
+  }), bank]);
+  const r = make(seed(), c);
+  const st = r.eng.state();
+  const track = (id: string) => c.tracks.find(t => t.id === id)!;
+  const serves = (tid: string) => (doc: string) => st.trackMatches(track(tid), c.docs.get(doc)!);
+
+  // Folder + glob sections: only the named globs inside the named folder, per section.
+  assert.deepEqual(['fe-units', 'fe-crt', 'fe-count'].map(serves('s14-mie')), [true, true, true]);
+  assert.deepEqual(['fe-div', 'fe-gen', 'fe-geo', 'k-crc', 'course-2025'].map(serves('s14-mie')), [false, false, false, false, false],
+    'a folder section neither leaks to the folder\'s other docs nor across to other sections');
+  // A bank section with a glob, a topics section, and a trailing `;`.
+  assert.equal(c.docs.has('course-q3'), false, 'course-q3 is a bank entry, not a doc: sections match doc ids');
+  assert.deepEqual(['course-2025', 'fe-gen'].map(serves('s14-bank')), [true, true]);
+  assert.deepEqual(['fe-count', 'fe-units'].map(serves('s14-bank')), [false, false]);
+  // A section without a folder matches its globs in any folder.
+  assert.deepEqual(['fe-geo', 'fe-an'].map(serves('s14-loose')), [true, true]);
+  assert.deepEqual(['fe-count', 'fe-units'].map(serves('s14-loose')), [false, false]);
+  // A row with no `;`: exactly the old rule (folders constrain the globs).
+  assert.deepEqual(['fe-crc', 'fe-crt'].map(serves('s14-old')), [true, true]);
+  assert.deepEqual(['fe-units', 'fe-count', 'k-crc'].map(serves('s14-old')), [false, false, false]);
+
+  const pick = (d: { date: string; daysLeft: number; track: string } | null) => d && [d.track, d.date, d.daysLeft];
+  assert.deepEqual(pick(r.eng.deadline('fe-count')), ['s14-mie', '2026-12-08', 23], 'a section match feeds the deadline');
+  assert.deepEqual(pick(r.eng.deadline('fe-geo')), ['s14-loose', '2026-12-10', 25]);
+  assert.deepEqual(pick(r.eng.deadline('fe-crt')), ['residues', '2026-11-24', 9], 's14-mie and s14-old are farther out');
+});
+
+test('hidden: never on the bank file keeps its problems out of hidden picks but in visible ones', () => {
+  // A course bank whose source names the chapter: course-q3 (area el, methods m-invariant) is the
+  // nearest hidden candidate once el is practised — until `hidden: never` rules it out.
+  const bank = (hidden: string): SourceFile => ({
+    path: 'study/bank/course-2025.md',
+    text: [
+      '---', 'study: bank', 'id: course-2025', hidden + '---', '',
+      '| id | source | d | statement | solutions |',
+      '|---|---|---|---|---|',
+      '| course-q3 | Course 2025 Q3 | 2.37 | [paper](https://example.com/q.pdf) | [solutions](https://example.com/s.pdf) |',
+      '',
+    ].join('\n'),
+  });
+  const tags: SourceFile = {
+    path: 'study/bank/course-2025.tags.md',
+    text: ['| id | area | methods |', '|---|---|---|', '| course-q3 | el | m-invariant |', ''].join('\n'),
+  };
+  const basic: SourceFile = {
+    path: 'study/basics/el-ohm.md',
+    text: [
+      '---', 'study: basic', 'id: el-ohm', 'title: Ohm (fixture)', 'area: el', 'build: 1', '---', '',
+      '> Written by a model for Adit. Not Adit\'s words.', '', 'An invented el basic for the hidden: never tests.', '',
+    ].join('\n'),
+  };
+  const events = () => [...seed(), ev('open', { doc: 'el-ohm' }, at(-1))];
+
+  const cOpen = buildIndex([...sources(), bank(''), tags, basic]);
+  const open = make(events(), cOpen);
+  assert.equal(open.eng.state().practised('el'), true, 'the opened el basic makes el practised');
+  assert.equal(open.eng.state().hiddenOK(cOpen.problems.get('course-q3')!), true, 'unflagged: methods known');
+  assert.equal(open.eng.pickProblem('nt', { hidden: true })!.id, 'course-q3', 'unflagged: nearer its hidden target than inv-gen-a');
+
+  const cFlag = buildIndex([...sources(), bank('hidden: never\n'), tags, basic]);
+  const flagged = make(events(), cFlag);
+  assert.equal(flagged.eng.state().hiddenOK(cFlag.problems.get('course-q3')!), false, 'the bank file says hidden: never');
+  assert.equal(flagged.eng.pickProblem('nt', { hidden: true })!.id, 'inv-gen-a', 'flagged out of hidden picks');
+  assert.equal(flagged.eng.pickProblem('el')!.id, 'course-q3', 'still picked as a visible problem');
+});
+
+test('hidden: never on a doc keeps its invented problems out of hidden picks but in visible ones', () => {
+  const c = contentWith({ 'topics/fe-count.md': s => s.replace('build: 1', 'build: 1\nhidden: never') });
+  const r = make(seed(), c);
+  const st = r.eng.state();
+  const p = c.problems.get('inv-comb-a')!;
+  assert.ok(p.methods.length > 0);
+  assert.equal(st.hiddenOK(p), false, 'methods known, but the doc says hidden: never');
+  assert.equal(st.hiddenOK(c.problems.get('inv-comb-b')!), false, 'still false without methods, as before');
+  r.settle('inv-comb-b', 'moot');
+  assert.equal(r.eng.pickProblem('comb')!.id, 'inv-comb-a', 'still a visible pick');
+});
