@@ -117,6 +117,8 @@ As the demo's block-fog.js, block-drill.js, block-problem.js and block-kata.js, 
 ## Laptop side (S10)
 
 - `scripts/study-scan.mjs` (in this repo, runs with node on the laptop): reads a vault's `study/log/*.jsonl` and the docs, and prints open lost marks, pending rewrite and rebuild requests with the passages' source, and settled calls since a date. `/teach` uses it.
+  - `--lint` checks the docs against FORMAT.md in three levels and exits 1 on any error. Errors: a figure embed that names no file, more than one file, a path or `![[ ]]`, an SVG without an absolute width and height, a detached or unfolded solution; warnings: a misspelt `hidden: never`, a track that serves a bank without reaching its problems' areas, the parser's other warnings; info: a problem whose figure is only in its solution.
+  - `--figures` lists the images under the study root that no doc embeds.
 - `/teach` v2 (a Claude Code skill in the portfolio repo): for each pending request, rewrite the passage (or rebuild the basic from its prerequisites), keep every anchor, bump `build:`, add a line to the doc's `## Changes`. It never writes in `log/` or `ink/`.
 
 ## Testing

@@ -9,7 +9,7 @@ Design rule: **a study doc is plain markdown that reads well in Obsidian without
 ```
 study/                      the study root (a plugin setting; in the portfolio vault it is content/study/)
   README.md                 what this folder is, for a person
-  tracks.md                 tracks with deadlines and weights (the owner edits it)
+  tracks.md                 tracks with deadlines and weights (the owner edits it; Tracks, below)
   registry.md               every basic: id, title, area, needs, key anchors, wave (generated or written once)
   methods.md                method ids, each linked to the basic that teaches it
   basics/<id>.md            fundamentals: the only place a result is proved
@@ -18,6 +18,7 @@ study/                      the study root (a plugin setting; in the portfolio v
   bank/<source>.md          competition problems by source and number only, with links; no statements
   bank/<source>.tags.md     the bank's area and method tags (hidden from the owner until a settle)
   cards/<slug>.md           numbers cards for the owner's public projects (recall drills)
+  figures/<doc-id>--<slug>.svg  figures, embedded by bare file name (Figures, below)
   log/<device>.jsonl        event logs, written only by the plugin (see SPEC.md)
   ink/<doc-id>.<device>.json  ink sidecars, one per device, written only by the plugin (see SPEC.md)
 ```
@@ -35,6 +36,7 @@ area: nt                # rating area (table below); a topic or card may list se
 needs: [nt-divisibility]  # basics this doc stands on; a basic's prerequisites, a topic's basics
 build: 1                # starts at 1; every rewrite or rebuild adds 1
 tracks: [putnam]        # optional: the tracks in tracks.md this doc serves
+hidden: never           # optional: its problems are never hidden-topic picks (below)
 ---
 ```
 
@@ -45,6 +47,8 @@ The first body line is the label, exactly:
 ```
 
 (Docs Adit writes leave it out and set `by: adit` in the frontmatter.)
+
+**`hidden: never`** in a doc's or a bank file's frontmatter keeps that file's problems out of hidden-topic picks; they stay visible picks. Use it where the file names the topic, as a course chapter's topic or a course's bank does. It applies per file: a problem checks its own doc, a bank problem its bank file, so a course topic and its bank each need it. Spell it exactly `hidden: never`; any other key or value does nothing (the scan's `--lint` warns).
 
 ## Rating areas
 
@@ -68,6 +72,23 @@ The first body line is the label, exactly:
 | bio | neural interfaces and implants |
 
 Every area starts at rating 4 (number theory 3). Difficulty `d` uses the same scale (SPEC.md, Engine).
+
+## Tracks
+
+`tracks.md` holds one table, a row per track; the owner edits it.
+
+```markdown
+| track | deadline | weight | areas | docs |
+|---|---|---|---|---|
+| contest | 2026-12-05 | 3 | nt comb an | basics nt-*, comb-*; topics contest-*; bank contest |
+| finals | 2026-12-10 to 2026-12-22 | 1 | th | basics th-* |
+```
+
+- `deadline` is a date, a range `a to b` (the track counts until its end), or empty. `weight` 0 pauses a track; an empty weight is 1.
+- `areas` lists rating areas, split on spaces, commas or `;`.
+- `docs` is `;`-separated sections, each `[folder] glob, glob`. A folder is `basics`, `topics`, `katas`, `bank` or `cards`; a glob matches doc ids (`nt-*`). A section with folders serves the docs in those folders whose id matches one of its globs, a section of folder names only serves those whole folders, and a section without a folder matches its globs in any folder. One matching section is enough.
+- A track serves a doc when the doc lists it in `tracks:`, when one of the doc's areas is in `areas`, or when `docs` matches the doc.
+- Today gives problem slots to a track's areas and to the areas of the docs it serves. A bank named in the `docs` column adds no areas of its own, so list its problems' areas (from its tags rows) in the `areas` column; otherwise Today picks them only through another track.
 
 ## Passages and anchors
 
@@ -94,6 +115,18 @@ split the modulus ([CRT](../basics/nt-crt.md#^crt))               (topic to basi
 - A topic states a result in one line and links the basic that proves it. It never proves it again.
 - External links (problem statements, solutions, datasheets) are ordinary `https://` links.
 
+## Figures
+
+- A figure is an image file in `figures/` under the study root, named `<doc-id>--<slug>.svg`: the id of the doc that uses it, two hyphens, and a short slug of what it shows (`nt-units--power-cycle.svg`).
+- Embed it inside the callout that uses it, by its bare file name: `![The powers of 3 mod 7 repeat with period 6](nt-units--power-cycle.svg)`. No path, no `../`, no `![[ ]]`. Obsidian finds the file by its name anywhere in the vault, so the name must be unique there.
+- The alt text says what the figure shows.
+- A figure has a white background (a white rectangle under the drawing), so it reads in dark mode.
+- An SVG's root `<svg>` carries `width` and `height` as absolute sizes (`480`, `480px`, `12cm`; not `%` or `em`), so the view knows its size before it loads.
+- A figure that gives an answer away goes inside the folded solution, not in the statement.
+- Ink on a figure is filed under its file name, so a renamed figure is a new version and its ink starts blank. Rename a figure when its drawing changes enough that old ink would mislead; otherwise edit it in place.
+
+The laptop scan checks these rules with `--lint` and lists figures no doc embeds with `--figures` (SPEC.md, Laptop side).
+
 ## Callouts the study view understands
 
 Callout type names are lowercase. A trailing `-` after the type folds the callout in Obsidian (`> [!proof]-`). Anything the study view does not understand renders as Obsidian renders it.
@@ -106,11 +139,13 @@ Callout type names are lowercase. A trailing `-` after the type folds the callou
 | `> [!example] Title` | no | an invented example; a worked answer goes in a folded `solution` right after it |
 | `> [!derive] Prompt` | no | a derive prompt: a statement to prove or derive on a blank page; never a solution |
 | `> [!problem] Title` | no | a problem with its statement (invented) or its reference (bank) |
-| `> [!solution]- Solution` | **yes** | the solution of the `problem`, `example` or `derive` right above it |
+| `> [!solution]- Solution` | **yes** | the solution of the `problem`, `example`, `derive` or `recall` right above it |
 | `> [!recall] Prompt` | no | a recall prompt on a numbers card |
 | `> [!kata] Title` | no | a design kata's spec (only in `katas/`) |
 | `> [!trap] Title` | no | a common error, with the smallest counterexample |
 | `> [!note]`, `> [!warning]` | either | ordinary prose |
+
+**An item's solution comes right after it.** A worked answer is a folded `> [!solution]-` callout, and it is the next passage after the `problem`, `example`, `derive` or `recall` it solves, with only a blank line between them (the item's block id line belongs to the item). A solution is found only there: one anywhere else belongs to no item, and the scan's `--lint` reports it as an error, as it does a solution that is not folded.
 
 ### Theorem and proof
 
@@ -261,3 +296,5 @@ A topic proves nothing a basic proves. A "bridge lemma" no basic holds may be st
 - Prove a result in two places. Link the basic instead.
 - Rename or delete an anchor in a rewrite.
 - Write in `log/`, `ink/` or the owner's calls ledger.
+- Embed a figure by path or with `![[ ]]`.
+- Leave a solution unfolded or away from its item.
