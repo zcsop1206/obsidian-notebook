@@ -3,8 +3,10 @@
 # 3 strokes, after-reveal ink carries `e`), fog at push 3 (the hook), and the problem block (chips
 # locked until ink, a verdict takes two taps, both tick lists, the call and settle fields, Skip ticks
 # on a reopened settled card) and the standalone problem view behind ctx.ui.openProblem (a hidden
-# pick shows no doc title before the settle). Uses the mock obsidian module's in-memory vault
-# (test/harness.html), the S4 ink module and the blocks bundled by test/study-blocks-build.mjs.
+# pick shows no doc title before the settle), then S12's home doc for that view and the load-time
+# pass that copies old standalone problem ink into home docs. Uses the mock obsidian module's
+# in-memory vault (test/harness.html), the S4 ink module and the blocks bundled by
+# test/study-blocks-build.mjs.
 # Run: python test/run_study_blocks_test.py (port NB_TEST_PORT_BASE + 10, or NB_STUDY_BLOCKS_PORT).
 # Exits 1 on any failure.
 import json, mimetypes, os, subprocess, sys, time
@@ -381,6 +383,70 @@ try:
           return [n, ids.includes('s-mig-call'), ids.includes('s-mig-work')];
         }""")
         check('an old stroke erased after the copy stays erased when the problem opens again', r == [0, False, True], r)
+
+        # --- 10. S12 review: old ink reaches its doc without a Today open. A fresh context whose
+        # index is empty until its first content change: register starts the load-time pass then.
+        # inv-s12-pass's old strokes show in its block in its doc, never opened standalone; a
+        # problem the index lacks stays pending, a second pass copies nothing, and once that
+        # problem's doc arrives its strokes are copied and content changes start no more passes.
+        r = ev(page, """async () => {
+          const SB = studyBlocks;
+          const at = (id, t0, blk) => ({ id, p: [[20, 50, 0.5, 0], [180, 58, 0.5, 300]], t0, blk });
+          window.PASS_OLD = JSON.stringify({ v: 1, doc: 'problems', strokes: [
+            at('s-pass-call', 11, 'call:inv-s12-pass'), at('s-pass-work', 12, 'work:inv-s12-pass'), at('s-pass-late', 13, 'call:inv-s12-late')] });
+          dirs.add('study/ink');
+          fs.set('study/ink/problems.desktop.json', PASS_OLD);
+          const listeners = new Set();
+          window.emit2 = what => { for (const fn of [...listeners]) fn(what); };
+          window.content2 = SB.buildIndex([]);
+          window.ctx2 = Object.assign({}, ctx, {
+            plugin: new obsidian.Plugin(), ui: Object.assign({}, ctx.ui),
+            content: () => window.content2,
+            onChange: fn => { listeners.add(fn); return () => listeners.delete(fn); },
+          });
+          SB.register(ctx2);
+          const before = await SB.oldInkPass(ctx2);
+          window.content2 = window.content;
+          emit2('content');
+          window.pass1 = await SB.oldInkPass(ctx2);
+          return { before, pass1 };
+        }""")
+        check('the load-time pass waits until the content index has docs', r['before'] is None, r)
+        check('the pass copies a problem\'s old strokes and leaves a missing problem\'s pending', r['pass1'] == {'copied': 2, 'pending': 1}, r)
+        r = ev(page, """() => {
+          window.inkCtx = ctx2; window.ink = studyBlocks.createInkApi(ctx2);
+          mountBlock('problem', 's12-pass', 'inv-s12-pass');
+          const home = fs.get('study/ink/s12-pass.desktop.json');
+          return {
+            chips: [...box.querySelectorAll('button[data-sb="conf"]')].map(b => b.disabled),
+            opened: app.workspace.getLeavesOfType('notebook-study-problem').some(l => l.view.getState().id === 'inv-s12-pass'),
+            home: home ? JSON.parse(home).strokes.map(s => s.id + ':' + s.blk).sort() : null,
+            old: fs.get('study/ink/problems.desktop.json') === PASS_OLD,
+            moved: JSON.parse(localStorage.getItem('notebook-study-moved-ink:desktop') || '[]'),
+          };
+        }""")
+        check('old strokes show in the problem\'s block in its doc, never opened standalone (its call band has ink)', r['chips'] == [False] * 6 and not r['opened'], r)
+        check('the pass filed them in the home doc\'s ink, ids kept, and left the old file as it was', r['home'] == ['s-pass-call:call:inv-s12-pass', 's-pass-work:work:inv-s12-pass'] and r['old'], r)
+        check('the pass records the strokes it copied, not the pending one', 's-pass-call' in r['moved'] and 's-pass-work' in r['moved'] and 's-pass-late' not in r['moved'], r['moved'])
+        late_doc = ('---\nstudy: basic\nid: s12-late\ntitle: A late doc (S12 fixture)\narea: el\nneeds: []\nbuild: 1\n---\n\n'
+                    '> Written by a model for Adit. Not Adit\'s words.\n\n'
+                    '> [!problem] Two in parallel (d 1)\n> Two equal resistors $R$ sit in parallel. Find the total resistance.\n^inv-s12-late\n')
+        r = page.evaluate("""async ({ files, late }) => {
+          const SB = studyBlocks;
+          emit2('content');
+          const pass2 = await SB.oldInkPass(ctx2);
+          const ran = pass2 !== pass1;
+          window.content2 = SB.buildIndex([...files, { path: 'study/basics/s12-late.md', text: late }]);
+          emit2('content');
+          const pass3 = await SB.oldInkPass(ctx2);
+          emit2('content');
+          const idle = (await SB.oldInkPass(ctx2)) === pass3;
+          const j = fs.get('study/ink/s12-late.desktop.json');
+          return { pass2, ran, pass3, idle, late: j ? JSON.parse(j).strokes.map(s => s.id) : null };
+        }""", {'files': [dict(f) for f in FILES], 'late': late_doc})  # a copy: this Playwright sends an object it sent before as undefined
+        check('a content change while strokes are pending runs a second pass, which copies nothing', r['ran'] and r['pass2'] == {'copied': 0, 'pending': 1}, r)
+        check('once the missing problem\'s doc arrives, the next pass copies its strokes', r['pass3'] == {'copied': 1, 'pending': 0} and r['late'] == ['s-pass-late'], r)
+        check('with nothing pending, a content change starts no pass', r['idle'] is True, r)
 
         page.screenshot(path=os.path.join(OUT, 'study-blocks.png'))
         check('no page errors', not errors, errors[:3])
