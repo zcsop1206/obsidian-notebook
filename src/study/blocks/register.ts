@@ -10,9 +10,9 @@ import type { StudyContext } from '../context';
 import type { Passage, StudyDoc } from '../types';
 import type { BlockEnv } from '../view/host';
 import type { InkAdapter } from '../ink/store';
-import { createInkApi } from '../ink';
+import { adoptInk, createInkApi } from '../ink';
 import { ensureStyles, removeStyles } from './drill';
-import { copyOldProblemInk, homeDoc, problemsDoc, PROBLEMS_DOC } from './home';
+import { copyOldProblemInk, homeDoc, movedInk, problemsDoc, PROBLEMS_DOC } from './home';
 import { PROBLEM_VIEW, mountSession, openProblem, problemItem, type SessionHandle } from './problem';
 import { registerUi as registerKataUi } from './kata';
 
@@ -142,10 +142,14 @@ export class ProblemView extends ItemView {
       if (!item) return false;
       // The home doc (S12) is only the render path and the ink file: its title, id and path never
       // reach the DOM here, so a hidden pick still shows nothing of it before the settle. Old
-      // strokes are copied first, so the ink store's surfaces load the merged file.
+      // strokes are copied first, through the home doc's shared store, so its surfaces show them.
       env.doc = homeDoc(ctx.content(), id, ctx.settings().root);
       const s = ctx.settings();
-      await copyOldProblemInk(ctx.app.vault.adapter as unknown as InkAdapter, s.root, s.device, env.doc.id, id);
+      await copyOldProblemInk({
+        adapter: ctx.app.vault.adapter as unknown as InkAdapter, root: s.root, device: s.device,
+        adopt: (docId, strokes) => adoptInk(ctx, docId, strokes),
+        moved: movedInk(ctx.app, s.device),
+      }, env.doc.id, id);
       if (seq !== this.mountSeq || !this.mounted || this.sess) return true;
       host.empty();
       this.sess = mountSession(host, env, item, o);

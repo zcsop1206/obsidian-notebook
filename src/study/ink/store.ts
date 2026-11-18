@@ -118,6 +118,32 @@ export class DocInkStore {
   }
 
   /**
+   * Adds strokes this device wrote under another doc's file, ids kept (S12: a problem's old
+   * standalone ink moving to its home doc). Going through the store, not the file, means open
+   * surfaces show them at once and the store's next write keeps them. Ids this device's file
+   * already holds are skipped, so adopting twice adds nothing. Written at once; resolves to how
+   * many were added.
+   */
+  async adopt(strokes: readonly InkStroke[]): Promise<number> {
+    await this.ready;
+    const own = this.own();
+    const have = new Set(own.strokes.map(s => s.id));
+    let n = 0;
+    for (const s of strokes) {
+      if (!s || typeof s.id !== 'string' || have.has(s.id)) continue;
+      const st: InkStroke = { ...s };
+      delete st.dev;
+      own.strokes.push(st);
+      have.add(st.id);
+      n++;
+    }
+    if (!n) return 0;
+    this.touch('add');
+    await this.flush();
+    return n;
+  }
+
+  /**
    * Removes strokes by key (`<dev>:<id>`): this device's from its file, other devices' by hiding
    * them in this device's file. Returns how many were removed.
    */

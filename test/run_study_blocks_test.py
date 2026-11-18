@@ -312,6 +312,9 @@ try:
             { id: 's-mig-work', p: [[10, 40, 0.5, 0], [90, 44, 0.5, 300]], t0: 2, blk: 'work:inv-s12-divider' },
             { id: 's-keep', p: [[10, 40, 0.5, 0], [90, 44, 0.5, 300]], t0: 3, blk: 'call:inv-fx-consecutive' }] }));
           window.PROBLEMS_TEXT = fs.get('study/ink/problems.desktop.json');
+          // The home doc's ink is already loaded this session (the doc was open first): the copy
+          // must reach this store, or it never shows here and the store's next write drops it.
+          window.early = window.ink.surface(content.docs.get('s12-figure'), document.createElement('div'), 'call:inv-s12-divider');
         }""")
         r = ev(page, """async () => {
           await ctx.ui.openProblem('inv-s12-divider', { why: 'S12 check' });
@@ -320,11 +323,14 @@ try:
           window.box = v.contentEl;
           const img = box.querySelector('.nb-sb-stmt img');
           for (let i = 0; i < 100 && !(img && img.complete); i++) await new Promise(r => setTimeout(r, 20));
-          return [img && img.getAttribute('src'), img ? img.naturalWidth : -1, !!box.querySelector('img[data-unresolved]')];
+          const early = window.early.strokes().map(s => s.id);
+          window.early.destroy();
+          return [img && img.getAttribute('src'), img ? img.naturalWidth : -1, !!box.querySelector('img[data-unresolved]'), early];
         }""")
         check('a bare-name figure in a subfolder resolves to its vault path', r[0] == 'study/basics/figs/s12-divider.svg', r)
         check('the resolved figure actually loads (naturalWidth > 0)', r[1] > 0, r)
         check('an embed naming a missing file is flagged data-unresolved', r[2] is True, r)
+        check('a home doc whose ink was loaded before the copy shows the old strokes at once', r[3] == ['s-mig-call'], r[3])
         m = ev(page, """() => {
           const home = fs.get('study/ink/s12-figure.desktop.json');
           return [home ? JSON.parse(home).strokes.map(s => s.id + ':' + s.blk).sort() : null, fs.get('study/ink/problems.desktop.json') === window.PROBLEMS_TEXT];
@@ -357,6 +363,24 @@ try:
           return n;
         }""")
         check('call ink written in the standalone view shows in the doc block', r == 3, r)
+        # Each old stroke is copied once: erased after the copy, it stays erased when the problem
+        # opens again (this device records the ids it copied).
+        r = ev(page, """async () => {
+          const probe = window.ink.surface(content.docs.get('s12-figure'), document.createElement('div'), 'call:inv-s12-divider');
+          probe.clear();
+          probe.destroy();
+          await studyBlocks.flushInk(ctx);
+          await ctx.ui.openProblem('inv-s12-divider', { why: 'erase check' });
+          const v = app.workspace.getLeavesOfType('notebook-study-problem').find(l => l.view.getState().id === 'inv-s12-divider').view;
+          for (let i = 0; i < 100 && !v.contentEl.querySelector('.nb-sb-stmt'); i++) await new Promise(r => setTimeout(r, 20));
+          await studyBlocks.flushInk(ctx);
+          const after = window.ink.surface(content.docs.get('s12-figure'), document.createElement('div'), 'call:inv-s12-divider');
+          const n = after.strokes().length;
+          after.destroy();
+          const ids = JSON.parse(fs.get('study/ink/s12-figure.desktop.json')).strokes.map(s => s.id);
+          return [n, ids.includes('s-mig-call'), ids.includes('s-mig-work')];
+        }""")
+        check('an old stroke erased after the copy stays erased when the problem opens again', r == [0, False, True], r)
 
         page.screenshot(path=os.path.join(OUT, 'study-blocks.png'))
         check('no page errors', not errors, errors[:3])
