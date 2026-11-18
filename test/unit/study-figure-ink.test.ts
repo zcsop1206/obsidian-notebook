@@ -18,7 +18,8 @@ class El {
   tag: string;
   children: El[] = [];
   parentNode: El | null = null;
-  style: Record<string, string> = {};
+  /** Inline style: an unset property reads '', as in the DOM. */
+  style: Record<string, string> = new Proxy({} as Record<string, string>, { get: (t, k) => (typeof k === 'string' && k in t ? t[k] : '') });
   className = '';
   hidden = false;
   textContent = '';
@@ -75,6 +76,9 @@ class El {
   }
   getAttribute(k: string): string | null {
     return this.attrs.has(k) ? this.attrs.get(k)! : null;
+  }
+  removeAttribute(k: string): void {
+    this.attrs.delete(k);
   }
   querySelectorAll(sel: string): El[] {
     const out: El[] = [];
@@ -380,6 +384,64 @@ test('figure-ink: clear() wipes every mounted figure of the call; after the clea
   fig();
   assert.doesNotThrow(() => fig.clear());
   assert.deepEqual(surfaces.map(s => s.clears), [1, 1], 'a cleared-up figure is not touched again');
+});
+
+test('figure-ink: the cleanup puts an image back as it was and forgets it, so it can get a surface again', () => {
+  const { env, calls, surfaces } = fakeEnv();
+  const stmt = new El('div');
+  const img = new Img('figs/a.svg');
+  img.complete = true;
+  img.naturalWidth = 400;
+  img.naturalHeight = 200;
+  img.style.width = '320px';
+  img.setAttribute('draggable', 'true');
+  stmt.appendChild(img);
+  const first = mountFigureInk(stmt as unknown as HTMLElement, env, 'inv-x');
+  assert.equal(img.style.width, '100%');
+  assert.equal(img.getAttribute('draggable'), 'false');
+  first();
+  assert.equal(img.parentNode, stmt, 'the image is back where it stood');
+  assert.equal(img.style.width, '320px', 'its own inline width is back');
+  assert.equal(img.getAttribute('draggable'), 'true', 'its own draggable is back');
+  const second = mountFigureInk(stmt as unknown as HTMLElement, env, 'inv-x');
+  assert.equal(calls.length, 2, 'a cleaned-up image gets a surface again');
+  assert.equal(img.style.width, '100%');
+  first();
+  assert.equal(surfaces[1].destroyed, 0, "an old cleanup called again leaves the later mount alone");
+  assert.equal(img.style.width, '100%');
+  second();
+  assert.equal(surfaces[1].destroyed, 1);
+  assert.equal(img.style.width, '320px');
+  assert.equal(stmt.querySelectorAll('.nb-study-figure').length, 0);
+
+  // An image with no inline width and no draggable of its own gets neither left behind.
+  const plain = new Img('figs/b.svg');
+  plain.complete = true;
+  plain.naturalWidth = 100;
+  plain.naturalHeight = 100;
+  stmt.appendChild(plain);
+  const third = mountFigureInk(stmt as unknown as HTMLElement, env, 'inv-x');
+  third();
+  assert.equal(plain.style.width, '');
+  assert.equal(plain.getAttribute('draggable'), null);
+});
+
+test('figure-ink: an image that fails to load is put back exactly as it was, and forgotten', () => {
+  const { env, calls } = fakeEnv();
+  const parent = new El('div');
+  const img = new Img('figs/gone.svg');
+  parent.appendChild(img);
+  assert.equal(figureSurface(asImg(img), env, 'fig:i:gone.svg'), null, 'still loading');
+  assert.equal(img.getAttribute('draggable'), 'false', 'wrapped while it loads');
+  img.complete = true; // the browser gave up
+  img.fire('error');
+  assert.equal(img.parentNode, parent, 'unwrapped');
+  assert.equal(img.style.width, '', 'no inline width left behind');
+  assert.equal(img.getAttribute('draggable'), null, 'no draggable left behind');
+  assert.equal(parent.children.length, 1);
+  assert.equal(figureSurface(asImg(img), env, 'fig:i:gone.svg'), null, 'asked again it adds nothing: it failed');
+  assert.equal(img.parentNode, parent);
+  assert.equal(calls.length, 0);
 });
 
 test('figure-ink: the cleanup cancels a pending load', () => {

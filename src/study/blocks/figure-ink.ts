@@ -66,11 +66,14 @@ export function figureKey(itemId: string, name: string): string {
 interface FigureMount {
   /** The mounted surface (null while the image loads, or after it failed). */
   surface: InkSurface | null;
-  /** Undoes everything: listeners off, the image put back where it was, the box and surface gone. */
+  /**
+   * Undoes everything, once: listeners off, the image put back where it was and as it was (its
+   * inline width and draggable attribute), the box and surface gone, the image forgotten.
+   */
   destroy(): void;
 }
 
-/** Every image figureSurface touched, so mountFigureInk's cleanup reaches late mounts too. */
+/** The images figureSurface has wrapped and not cleaned up yet: a destroyed one can mount again. */
 const mounts = new WeakMap<HTMLImageElement, FigureMount>();
 
 /**
@@ -90,6 +93,9 @@ export function figureSurface(img: HTMLImageElement, env: BlockEnv, key: string)
   if (!parent) return null;
   if (img.complete === true && !(img.naturalWidth > 0)) return null; // already failed: add nothing
 
+  // What destroy puts back.
+  const width = img.style.width;
+  const draggable = img.getAttribute('draggable');
   const box = document.createElement('div');
   box.className = 'nb-study-figure';
   parent.insertBefore(box, img);
@@ -100,6 +106,7 @@ export function figureSurface(img: HTMLImageElement, env: BlockEnv, key: string)
   const rec: FigureMount = { surface: null, destroy };
   mounts.set(img, rec);
   let done = false;
+  let gone = false;
   let chip: HTMLButtonElement | null = null;
   let offChange: (() => void) | null = null;
 
@@ -146,7 +153,10 @@ export function figureSurface(img: HTMLImageElement, env: BlockEnv, key: string)
   }
 
   function destroy(): void {
+    if (gone) return;
+    gone = true;
     done = true;
+    mounts.delete(img); // forgotten: a later render can give this image a surface again
     img.removeEventListener('load', mount);
     img.removeEventListener('error', destroy);
     offChange?.();
@@ -159,6 +169,9 @@ export function figureSurface(img: HTMLImageElement, env: BlockEnv, key: string)
     // Put the image back where the box stands (it may sit inside surface.el), then drop the box.
     if (box.parentNode) box.parentNode.insertBefore(img, box);
     box.remove();
+    img.style.width = width;
+    if (draggable === null) img.removeAttribute('draggable');
+    else img.setAttribute('draggable', draggable);
     if (rec.surface) {
       rec.surface.destroy();
       rec.surface = null;
@@ -188,30 +201,34 @@ export type FigureInk = (() => void) & {
  * Mounts figure ink on every `img` inside `container`, keyed `fig:<itemId>:<file name>`; a second
  * image resolving to the same name gets `~2`, `~3` and so on, so duplicates never share a stroke
  * set. Returns the cleanup: destroys every surface, cancels every pending load and puts the
- * images back. The cleanup also carries `clear()`, which wipes the figures' strokes.
+ * images back. The cleanup also carries `clear()`, which wipes the figures' strokes. Both act on
+ * the mounts this call made, never on a later call's mount of the same image.
  */
 export function mountFigureInk(container: HTMLElement, env: BlockEnv, itemId: string): FigureInk {
   const imgs = Array.from(container.querySelectorAll('img')) as HTMLImageElement[];
   const used = new Map<string, number>();
+  const recs: FigureMount[] = [];
   for (const img of imgs) {
     const name = figureName(img.getAttribute('src') || img.src || '');
     const n = used.get(name) || 0;
     used.set(name, n + 1);
     figureSurface(img, env, figureKey(itemId, n ? `${name}~${n + 1}` : name));
+    const rec = mounts.get(img);
+    if (rec) recs.push(rec);
   }
   const cleanup = (() => {
-    for (const img of imgs) {
+    for (const rec of recs) {
       try {
-        mounts.get(img)?.destroy();
+        rec.destroy();
       } catch (e) {
         console.error('[study] figure ink cleanup', e);
       }
     }
   }) as FigureInk;
   cleanup.clear = () => {
-    for (const img of imgs) {
+    for (const rec of recs) {
       try {
-        mounts.get(img)?.surface?.clear();
+        rec.surface?.clear();
       } catch (e) {
         console.error('[study] figure ink clear', e);
       }
