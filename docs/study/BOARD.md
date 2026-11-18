@@ -5,6 +5,9 @@ Where Claude (Claude Code on Adit's laptop), Devin sessions and Adit coordinate 
 ## How to work here
 
 1. **Base branch `study-mode`.** One ticket = one branch `study/s<n>-<slug>` = one PR into `study-mode`, titled `[S<n>] <title>`. Never push to `main` or `study-mode` directly.
+   - **One worktree per ticket**, at `../on-s<n>` beside the repo (`git worktree add ../on-s<n> -b study/s<n>-<slug> origin/study-mode`). Never work in the main checkout or another session's worktree. Start only with at least 5 GB free on C:.
+   - **Test ports:** `NB_TEST_PORT_BASE` = 9000 + 20·n (S12 9240, S13 9260, S14 9280); the 20 ports from there are yours. A view-test runner exits 1 when its port is taken (`test/serve.py`): find what holds it instead of picking another port.
+   - **The gate** is `npm run test:study` (build, unit tests, every study view suite; the content check SKIPs without `STUDY_CONTENT_DIR`). `npm test` stops at `run_view_test`, which has 5 to 7 known timing failures on Windows, so it is not the gate. Set `PYTHONIOENCODING=utf-8` in every shell.
 2. **Claim by opening a draft PR** within your first 30 minutes. Before starting, check the open PRs: if your ticket already has one, stop and say so in its thread.
 3. **Talk in your ticket's thread**, `docs/study/threads/S<n>.md`. Append only, never edit someone else's entry. Header per entry: `### 2026-11-18 14:05 devin (session <link or id>)`. Commit thread entries in your PR branch, and post anything that needs an answer as a PR comment too (that is what Claude reads first).
 4. **Entry kinds:**
@@ -34,12 +37,18 @@ Where Claude (Claude Code on Adit's laptop), Devin sessions and Adit coordinate 
 | S9 | Kata: interpreter, vectors, block | devin | S1 | `src/study/kata/*`, `src/study/blocks/kata.ts`, `test/unit/study-kata.test.ts` | done (#83) |
 | S10 | Laptop bridge and /teach v2 | claude | S2 | `scripts/study-scan.mjs`; the teach skill in the portfolio repo | done (in 0.15.0) |
 | S11 | Release 0.15.0 | claude, adit | all | `manifest.json`, `versions.json`, `CONTEXT.md` | done: 0.15.0 released 2026-11-17 (#86) |
+| S12 | Problems from Today, as in their doc | devin | | `src/study/blocks/register.ts`; the image rules in `styles.css`; image resolution in `test/mock-obsidian.js`; a section of `test/run_study_blocks_test.py`; additions to `test/unit/study-problem.test.ts`; new `test/fixtures/study-blocks/s12-*` | open: 0.15.1 |
+| S13 | Ink on figures in problems and drills | devin | S12 for its cross-view check only | `src/study/blocks/figure-ink.ts` (new); the figure hooks in `src/study/blocks/problem.ts` and `drill.ts`, and their CSS in `drill.ts`'s `BLOCK_CSS`; `test/unit/study-figure-ink.test.ts`; `test/run_study_figure_ink_test.py`; `test/fixtures/study-figure-ink/*`; its lines in `package.json` | open: 0.15.1 |
+| S14 | Tracks: `;` sections and `hidden: never` | devin | | `trackMatches` and `hiddenOK` in `src/study/engine/state.ts`; `parseTracks` in `src/study/format/parse.ts`; additions to `test/unit/study-engine.test.ts` and `test/unit/study-parse.test.ts` | open: 0.15.1 |
+| S15 | Figure and solution lint, content check, FORMAT | claude | | `scripts/study-scan.mjs`, `scripts/study-scan.test.mjs`, `test/run_study_content_check.py`, `docs/study/FORMAT.md` | open: 0.15.1 |
+| S16 | Release 0.15.1 | claude, adit | S12 to S15; fixes from the 11-20 iPad checks | `manifest.json`, `versions.json`, `CONTEXT.md`, board statuses | by 2026-11-25 |
+| S17 | Circuit lab page | claude | | `lab/circuit-lab/*`, `test/reference/*` | open: no release |
 
-S2 to S9 can all start now: each codes against the interfaces in `types.ts`, `context.ts` and `view/host.ts`, with stubs already in place so the plugin builds and behaves as before at every step. A view test section that needs another ticket's work is marked skip until that ticket merges.
+Wave 1 (0.15.1): S12, S13 and S14 (Devin) and S15 and S17 (Claude) can all start now; they own disjoint files. Claude merges S12 before S13; S13's cross-view check stays SKIP until then. A view test section that needs another ticket's work is marked skip until that ticket merges.
 
 ## Dates
 
-S2 to S9 merged and 0.15.0 released on 2026-11-17, ahead of the plan. Adit's iPad checks (the end of SPEC.md) by 2026-11-20; fixes they need ship as 0.15.1 by 2026-11-27; then no release until Putnam is over (2026-12-05).
+S2 to S9 merged and 0.15.0 released on 2026-11-17, ahead of the plan. Adit's iPad checks (the end of SPEC.md) by 2026-11-20. 0.15.1 (S12 to S15 and the fixes those checks need) by 2026-11-25; 11-26 and 11-27 are for a hotfix only. No release from 2026-11-28 to 12-05 (a timed paper on 11-28, Putnam on 12-05).
 
 ## Decisions log
 
@@ -60,3 +69,4 @@ Answered `INTERFACE:` and `Q:` entries that change the spec are copied here with
 - 2026-11-17 claude: a basic/anchor method in a tick list is labelled by its callout title only (the demo's `mLabel`), so a hidden pick's list never names its doc (review note on #82).
 - 2026-11-17 claude: accepted as built: Today has three problem slots per live area (the demo's slotSpecs), so the pick count varies; a problem opened from Today files its ink under `ink/problems.<device>.json` while its session (phase, verdict, ticks) is shared with the in-doc block, so the call ink of a session started in its doc does not show in the standalone view (open: to be revisited after Adit's iPad check); a hidden pick's topic shows once the called ticks are confirmed; "Skip ticks" appears only when a settled card is opened again.
 - 2026-11-17 claude: S10 done (`scripts/study-scan.mjs` here; `/teach` v2 in the portfolio repo, its PR #29). S11 done: on Adit's go-ahead, #86 merged `study-mode` into `main` (922da0c) and `release.yml` (workflow_dispatch) published 0.15.0 as the latest release. Fixes from Adit's iPad checks come in as tickets into `study-mode` and ship as 0.15.1.
+- 2026-11-18 claude: wave 1 for 0.15.1 opened: S12 to S17 (briefs in their threads). Every view-test runner now starts its server through `test/serve.py`, which exits 1 when the port is taken or the server dies at start; `npm run test:study` is the gate. The content check serves the study folder's figures by file name and fails on a broken or missing one.

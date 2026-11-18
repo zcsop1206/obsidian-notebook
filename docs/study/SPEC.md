@@ -8,12 +8,11 @@ Study notes on the iPad that teach without spoonfeeding: linked theory docs with
 
 | date | what |
 |---|---|
-| 2026-11-17 | foundation on `study-mode`: FORMAT, SPEC, types, parser and index with tests, wiring stubs |
-| 2026-11-22 | S2 to S9 merged into `study-mode` |
-| 2026-11-24 | 0.15.0-beta released from `study-mode` for Adit's iPad check |
-| 2026-11-28 | 0.15.0 on `main`, used for the Putnam mock that day |
-| 2026-12-01 to 12-05 | **freeze**: no release (Putnam is 12-05; nothing may break the week before) |
-| after 12-05 | 0.16: Map ties into the task ledger, peeks of other docs' figures, kata waveform, polish from use |
+| 2026-11-17 | foundation on `study-mode`; S2 to S9 merged; 0.15.0 released from `main` (ahead of the plan this table first held) |
+| 2026-11-20 | Adit's iPad checks of 0.15.0 (the end of this file) |
+| 2026-11-25 | 0.15.1: S12 to S15 and the fixes the checks need (BOARD.md); 11-26 and 11-27 for a hotfix only |
+| 2026-11-28 to 12-05 | **freeze**: no release (a timed paper on 11-28, Putnam on 12-05; nothing may break the week before) |
+| after 12-05 | 0.16, on Adit's yes: what the board's later tickets add, then Map and the task ledger, peeks of other docs' figures, kata waveform, polish from use |
 
 **Slip rule:** Putnam never depends on the plugin. The docs are plain markdown with folded proofs, so they read in Obsidian without study mode.
 
