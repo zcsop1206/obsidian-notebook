@@ -1,9 +1,10 @@
 /**
  * Registers what the study blocks need outside a doc: the standalone problem view
  * `notebook-study-problem` behind `ctx.ui.openProblem` (Today and Map open a problem there, invented
- * or bank, without showing the doc it lives in), and the blocks' CSS. The blocks inside a doc are
- * mounted by the study view through blocks/index.ts. Owned by S6 (fog and drill), S7 (problem) and
- * S9 (kata) on docs/study/BOARD.md. S9's registerUi fills `ctx.ui.openKata`.
+ * or bank, without showing the doc it lives in), the blocks' CSS, and the pass that copies old
+ * standalone problem ink into the problems' home docs once the content loads (S12). The blocks
+ * inside a doc are mounted by the study view through blocks/index.ts. Owned by S6 (fog and
+ * drill), S7 (problem) and S9 (kata) on docs/study/BOARD.md. S9's registerUi fills `ctx.ui.openKata`.
  */
 import { Component, ItemView, MarkdownRenderer, type WorkspaceLeaf } from 'obsidian';
 import type { StudyContext } from '../context';
@@ -12,11 +13,97 @@ import type { BlockEnv } from '../view/host';
 import type { InkAdapter } from '../ink/store';
 import { adoptInk, createInkApi } from '../ink';
 import { ensureStyles, removeStyles } from './drill';
-import { copyOldProblemInk, homeDoc, movedInk, problemsDoc, PROBLEMS_DOC } from './home';
+import {
+  copyOldProblemInk, homeDoc, migrateOldProblemInk, movedInk, problemsDoc, serialQueue, PROBLEMS_DOC,
+  type MovedInk, type OldInkIO, type OldInkPass, type Serial,
+} from './home';
 import { PROBLEM_VIEW, mountSession, openProblem, problemItem, type SessionHandle } from './problem';
 import { registerUi as registerKataUi } from './kata';
 
 export { PROBLEMS_DOC, problemsDoc };
+
+/**
+ * The copies of old standalone problem ink (home.ts), per StudyContext: the queue they all run
+ * through, this device's record of the ids copied (one object per device, so the load-time pass
+ * and an open see each other's), and the load-time pass.
+ */
+interface OldInk {
+  serial: Serial;
+  moved: Map<string, MovedInk>;
+  /** The pass running now; it runs once more before it resolves when `again` is set and strokes are pending. */
+  pass: Promise<OldInkPass> | null;
+  again: boolean;
+  last: OldInkPass | null;
+}
+
+const oldInks = new WeakMap<StudyContext, OldInk>();
+
+function oldInkOf(ctx: StudyContext): OldInk {
+  let o = oldInks.get(ctx);
+  if (!o) { o = { serial: serialQueue(), moved: new Map(), pass: null, again: false, last: null }; oldInks.set(ctx, o); }
+  return o;
+}
+
+/** What a copy needs, for the context's settings now. */
+function oldInkIO(ctx: StudyContext): OldInkIO {
+  const o = oldInkOf(ctx);
+  const s = ctx.settings();
+  let moved = o.moved.get(s.device);
+  if (!moved) { moved = movedInk(ctx.app, s.device); o.moved.set(s.device, moved); }
+  return {
+    adapter: ctx.app.vault.adapter as unknown as InkAdapter, root: s.root, device: s.device,
+    adopt: (docId, strokes) => adoptInk(ctx, docId, strokes),
+    moved, serial: o.serial,
+  };
+}
+
+/** Starts the load-time pass, or has the running one run once more. */
+function runOldInkPass(ctx: StudyContext): void {
+  const o = oldInkOf(ctx);
+  if (o.pass) { o.again = true; return; }
+  o.pass = (async () => {
+    let r: OldInkPass = { copied: 0, pending: 0 };
+    try {
+      do {
+        o.again = false;
+        r = await migrateOldProblemInk(oldInkIO(ctx), () => ctx.content(), ctx.settings().root);
+        o.last = r;
+      } while (o.again && r.pending > 0);
+    } finally {
+      o.pass = null;
+    }
+    return r;
+  })();
+}
+
+/**
+ * Old ink reaches its doc without a Today open (S12 review): the load-time pass (home.ts
+ * migrateOldProblemInk) starts once the content index has docs, when the layout is ready (the
+ * vault has loaded) or on the first content change; and again on a later content change while
+ * the last pass left strokes pending (a problem or its doc missing, a write that did not land).
+ * Never two at once: a change during a pass runs one more after it while strokes are pending.
+ * Returns the unsubscribe.
+ */
+function watchOldInk(ctx: StudyContext): () => void {
+  const o = oldInkOf(ctx);
+  const kick = () => {
+    try {
+      if (o.pass) o.again = true;
+      else if (o.last ? o.last.pending > 0 : ctx.content().docs.size > 0) runOldInkPass(ctx);
+    } catch (e) { console.error('[study] old problem ink: the pass did not start', e); }
+  };
+  const off = ctx.onChange(what => { if (what === 'content') kick(); });
+  const ws = ctx.app.workspace as unknown as { onLayoutReady?: (cb: () => void) => void } | undefined;
+  if (ws && typeof ws.onLayoutReady === 'function') ws.onLayoutReady(kick);
+  else kick();
+  return off;
+}
+
+/** The load-time pass now running (with any run it still owes), else the last one's result; null before the first. Tests await it. */
+export function oldInkPass(ctx: StudyContext): Promise<OldInkPass | null> {
+  const o = oldInks.get(ctx);
+  return o && o.pass ? o.pass : Promise.resolve(o ? o.last : null);
+}
 
 function problemPassage(id: string): Passage {
   return { anchor: id, explicit: true, kind: 'callout', start: 0, end: 0, source: '', markdown: '', hash: '', block: { type: 'problem', id } };
@@ -144,12 +231,7 @@ export class ProblemView extends ItemView {
       // reach the DOM here, so a hidden pick still shows nothing of it before the settle. Old
       // strokes are copied first, through the home doc's shared store, so its surfaces show them.
       env.doc = homeDoc(ctx.content(), id, ctx.settings().root);
-      const s = ctx.settings();
-      await copyOldProblemInk({
-        adapter: ctx.app.vault.adapter as unknown as InkAdapter, root: s.root, device: s.device,
-        adopt: (docId, strokes) => adoptInk(ctx, docId, strokes),
-        moved: movedInk(ctx.app, s.device),
-      }, env.doc.id, id);
+      await copyOldProblemInk(oldInkIO(ctx), env.doc.id, id);
       if (seq !== this.mountSeq || !this.mounted || this.sess) return true;
       host.empty();
       this.sess = mountSession(host, env, item, o);
@@ -175,4 +257,5 @@ export function register(ctx: StudyContext): void {
   ctx.ui.openProblem = (id, opts) => openProblem(ctx, id, opts);
   ctx.plugin.register(() => removeStyles());
   registerKataUi(ctx);
+  ctx.plugin.register(watchOldInk(ctx));
 }

@@ -231,7 +231,7 @@ def section_library(page):
       ribbon: plugin.ribbon.map(r => r.title),
     })""")
     rows = info['rows']
-    print(f'  library: {len(rows)} rows in {lib_ms:.0f} ms (open to listed, including the first index load)')
+    print(f'  library: {len(rows)} rows in {lib_ms:.0f} ms (open to listed; the content index loads when the plugin does)')
     for d in ['fx-topic', 'fx-long', 'fx-units', 'fx-div', 'k-fx', 'fxbank']:
         check(f'library: lists {d}', d in rows)
     check('library: 120 generated basics listed', sum(1 for r in rows if r.startswith('g-')) == 120)

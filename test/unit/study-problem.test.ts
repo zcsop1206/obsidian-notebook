@@ -8,7 +8,9 @@ import {
   mergeSession, methodChoices, methodHit, newSession, problemItem, readyToLog, settleEvent, skipTicks, solutionOpen,
   tapVerb, ticksOpen, toggleNone, toggleTick, verbsOpen, type Session,
 } from '../../src/study/blocks/problem';
-import { copyOldProblemInk, homeDoc, movedInk, problemInkKeys, problemsDoc, strokesToCopy, type OldInkIO } from '../../src/study/blocks/home';
+import {
+  copyOldProblemInk, homeDoc, migrateOldProblemInk, movedInk, problemInkKeys, problemsDoc, serialQueue, strokesToCopy, type OldInkIO,
+} from '../../src/study/blocks/home';
 import { parseInkFile } from '../../src/study/ink/model';
 import { DocInkStore, type InkAdapter } from '../../src/study/ink/store';
 import { buildIndex } from '../../src/study/format/index-build';
@@ -377,4 +379,104 @@ test('s12: a copy whose write does not land is shown but not recorded; a later c
   } finally {
     console.error = errors;
   }
+});
+
+/** An invented doc that holds `inv-fx-late`, a problem the fixtures lack, as if it reached the vault later. */
+const LATE_DOC = [
+  '---', 'study: basic', 'id: fx-late', 'title: A late doc (fixture)', 'area: nt', 'needs: []', 'build: 1', '---', '',
+  '> Written by a model for Adit. Not Adit\'s words.', '',
+  '> [!problem] A late problem (d 1)', '> Show that $2 + 2 = 4$.', '^inv-fx-late', '',
+].join('\n');
+
+test('s12: the load-time pass copies every problem\'s old ink into its home doc once; a missing problem stays pending', async () => {
+  const old = JSON.parse(inkFiles().srcText);
+  old.strokes.push(
+    { id: 's-bank', p: [[1, 2, 0.5, 0], [3, 4, 0.5, 5]], t0: 5, blk: 'work:putnam-2019-a1' },
+    { id: 's-late', p: [[1, 2, 0.5, 0], [3, 4, 0.5, 5]], t0: 6, blk: 'call:inv-fx-late' },
+  );
+  const srcText = JSON.stringify(old);
+  const v = memVault([['study/ink/problems.ipad.json', srcText]]);
+  const stores = new Map<string, DocInkStore>();
+  const storeOf = (doc: string) => {
+    let s = stores.get(doc);
+    if (!s) { s = new DocInkStore(v.adapter, 'study', 'ipad', doc); stores.set(doc, s); }
+    return s;
+  };
+  const adopted: string[] = [];
+  const io: OldInkIO = {
+    adapter: v.adapter, root: 'study', device: 'ipad', moved: movedInk(v.app, 'ipad'), serial: serialQueue(),
+    adopt: (doc, strokes) => { adopted.push(`${doc}:${strokes.map(s => s.id).join('+')}`); return storeOf(doc).adopt(strokes); },
+  };
+  const home = (doc: string) => {
+    const t = v.files.get(`study/ink/${doc}.ipad.json`);
+    return t === undefined ? null : parseInkFile(t, doc).strokes.map(s => `${s.id}:${s.blk}`);
+  };
+
+  // Not in the fixtures: inv-fx-consecutive (s-other) and inv-fx-late (s-late). Page ink is never taken.
+  assert.deepEqual(await migrateOldProblemInk(io, content, 'study'), { copied: 3, pending: 2 });
+  assert.deepEqual(adopted, ['fx-units:s-call+s-work', 'fxbank:s-bank'], 'one problem after another, by id; no adopt for a missing one');
+  assert.deepEqual(home('fx-units'), ['s-call:call:inv-fx-last-digit', 's-work:work:inv-fx-last-digit'], 'ids kept');
+  assert.deepEqual(home('fxbank'), ['s-bank:work:putnam-2019-a1'], 'a bank problem\'s home is the bank file');
+  assert.deepEqual(v.app.loadLocalStorage('notebook-study-moved-ink:ipad'), ['s-call', 's-work', 's-bank']);
+  assert.equal(v.files.get('study/ink/problems.ipad.json'), srcText, 'the old file is never edited');
+
+  assert.deepEqual(await migrateOldProblemInk(io, content, 'study'), { copied: 0, pending: 2 }, 'a second pass copies nothing');
+  assert.equal(adopted.length, 2);
+  storeOf('fx-units').remove(['ipad:s-call']);
+  await storeOf('fx-units').flush();
+  assert.deepEqual(await migrateOldProblemInk(io, content, 'study'), { copied: 0, pending: 2 });
+  assert.deepEqual(home('fx-units'), ['s-work:work:inv-fx-last-digit'], 'an erased copy stays erased');
+
+  // Its doc reaches the index (read through a getter, as register.ts passes ctx.content).
+  const later = buildIndex([...files(), { path: 'study/basics/fx-late.md', text: LATE_DOC }]);
+  assert.deepEqual(await migrateOldProblemInk(io, () => later, 'study'), { copied: 1, pending: 1 });
+  assert.deepEqual(home('fx-late'), ['s-late:call:inv-fx-late']);
+
+  // No old file: nothing to do. An old file that cannot be read: one pending, so a later pass reads it again.
+  v.files.delete('study/ink/problems.ipad.json');
+  assert.deepEqual(await migrateOldProblemInk(io, later, 'study'), { copied: 0, pending: 0 });
+  const errors = console.error;
+  console.error = () => {};
+  try {
+    const broken: OldInkIO = { ...io, adapter: { exists: async () => true, read: async () => { throw new Error('EIO'); } } };
+    assert.deepEqual(await migrateOldProblemInk(broken, later, 'study'), { copied: 0, pending: 1 });
+  } finally {
+    console.error = errors;
+  }
+});
+
+test('s12: copies run one at a time through the queue, in order, and one that fails does not stop the next', async () => {
+  const q = serialQueue();
+  const log: string[] = [];
+  const job = (name: string, ms: number, fail = false) => () => new Promise<string>((resolve, reject) => {
+    log.push(`start ${name}`);
+    setTimeout(() => { log.push(`end ${name}`); if (fail) reject(new Error(name)); else resolve(name); }, ms);
+  });
+  const a = q(job('a', 15));
+  const b = q(job('b', 1, true));
+  const c = q(job('c', 1));
+  assert.equal(await a, 'a');
+  assert.equal(await b.then(() => 'resolved', () => 'rejected'), 'rejected');
+  assert.equal(await c, 'c');
+  assert.deepEqual(log, ['start a', 'end a', 'start b', 'end b', 'start c', 'end c']);
+});
+
+test('s12: an open during the load-time pass waits its turn, and neither copies a stroke the other did', async () => {
+  const v = memVault([['study/ink/problems.ipad.json', inkFiles().srcText]]);
+  const store = new DocInkStore(v.adapter, 'study', 'ipad', 'fx-units');
+  let active = 0;
+  let overlap = false;
+  const io: OldInkIO = {
+    adapter: v.adapter, root: 'study', device: 'ipad', moved: movedInk(v.app, 'ipad'), serial: serialQueue(),
+    adopt: async (_doc, strokes) => {
+      if (++active > 1) overlap = true;
+      await new Promise(r => setTimeout(r, 5));
+      try { return await store.adopt(strokes); } finally { active--; }
+    },
+  };
+  const [pass, opened] = await Promise.all([migrateOldProblemInk(io, content, 'study'), copyOldProblemInk(io, 'fx-units', 'inv-fx-last-digit')]);
+  assert.equal(pass.copied + opened, 2, 'each stroke copied once between them');
+  assert.equal(pass.pending, 1, 'inv-fx-consecutive is not in the fixtures');
+  assert.equal(overlap, false, 'never two copies at once');
+  assert.deepEqual(parseInkFile(v.files.get('study/ink/fx-units.ipad.json')!, 'fx-units').strokes.map(s => s.id), ['s-call', 's-work']);
 });

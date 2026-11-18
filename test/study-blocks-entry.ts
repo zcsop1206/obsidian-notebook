@@ -6,6 +6,6 @@ import { mount as fog } from '../src/study/blocks/fog';
 import { mount as drill } from '../src/study/blocks/drill';
 import { mount as recall } from '../src/study/blocks/recall';
 import { mount as problem, mountHook } from '../src/study/blocks/problem';
-import { register, PROBLEMS_DOC } from '../src/study/blocks/register';
+import { oldInkPass, register, PROBLEMS_DOC } from '../src/study/blocks/register';
 
-(window as unknown as Record<string, unknown>).studyBlocks = { createInkApi, flushInk, buildIndex, fog, drill, recall, problem, mountHook, register, PROBLEMS_DOC };
+(window as unknown as Record<string, unknown>).studyBlocks = { createInkApi, flushInk, buildIndex, fog, drill, recall, problem, mountHook, register, oldInkPass, PROBLEMS_DOC };

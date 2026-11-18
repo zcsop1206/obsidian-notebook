@@ -9,11 +9,13 @@
  * shown, so a hidden pick still names no topic before the settle.
  *
  * Old strokes: strokes this device wrote under those keys in `ink/problems.<device>.json` are
- * copied into the home doc's ink once each (`copyOldProblemInk`). The copy goes through the home
- * doc's shared ink store (ink/index.ts adoptInk), so a store already loaded this session shows
- * them at once and never writes them away. Once the home doc's ink is written, this device
- * records the stroke ids it copied (`movedInk`, Obsidian's per-vault local storage), so a copied
- * stroke erased later never comes back. The old file is never edited or deleted.
+ * copied into the home doc's ink once each: every problem's by a pass after the plugin loads
+ * (`migrateOldProblemInk`), and one problem's again when it opens (`copyOldProblemInk`), both
+ * through one queue. The copy goes through the home doc's shared ink store (ink/index.ts
+ * adoptInk), so a store already loaded this session shows them at once and never writes them
+ * away. Once the home doc's ink is written, this device records the stroke ids it copied
+ * (`movedInk`, Obsidian's per-vault local storage), so a copied stroke erased later never comes
+ * back. The old file is never edited or deleted.
  *
  * Kept out of register.ts so the unit tests can import it: register.ts pulls `obsidian` runtime
  * symbols, which the node test bundle cannot resolve.
@@ -98,6 +100,19 @@ export function strokesToCopy(src: InkFile, keys: readonly string[], moved: Pick
   return src.strokes.filter(s => typeof s.blk === 'string' && keys.indexOf(s.blk) >= 0 && !moved.has(s.id));
 }
 
+/** Runs a job after every job given before it has settled, and resolves as the job does. */
+export type Serial = <T>(job: () => Promise<T>) => Promise<T>;
+
+/** A queue of jobs run one at a time, in order (register.ts keeps one per StudyContext for the copies of old ink). */
+export function serialQueue(): Serial {
+  let tail: Promise<unknown> = Promise.resolve();
+  return <T>(job: () => Promise<T>): Promise<T> => {
+    const run = tail.then(job);
+    tail = run.catch(() => undefined);
+    return run;
+  };
+}
+
 /** What the old-strokes copy needs: the old file's reader, where it lives, the home doc's store, and the record. */
 export interface OldInkIO {
   adapter: Pick<InkAdapter, 'exists' | 'read'>;
@@ -109,7 +124,15 @@ export interface OldInkIO {
    */
   adopt(docId: string, strokes: InkStroke[]): Promise<Adopted>;
   moved: MovedInk;
+  /**
+   * The queue every copy runs through, one problem at a time, so two copies of one problem never
+   * interleave (one per StudyContext: the load-time pass and the standalone view share it).
+   * Without it a copy runs at once.
+   */
+  serial?: Serial;
 }
+
+const queued = <T>(io: OldInkIO, job: () => Promise<T>): Promise<T> => (io.serial ? io.serial(job) : job());
 
 /**
  * Copies this device's strokes under `call:<id>`/`work:<id>` from `ink/problems.<device>.json`
@@ -118,22 +141,91 @@ export interface OldInkIO {
  * retries) and is recorded by a later copy that finds it written. Each stroke is copied once: a
  * second run copies nothing, and a copied stroke erased later stays erased. The old file is never
  * edited or deleted. Returns how many strokes were added; 0 when the home doc is the `problems`
- * fallback, the old file is missing, or there is nothing new. Never throws: a failure is logged
- * and reported as 0, so the problem still opens.
+ * fallback, the old file is missing, or there is nothing new. Runs in the copy queue. Never
+ * throws: a failure is logged and reported as 0, so the problem still opens.
  */
-export async function copyOldProblemInk(io: OldInkIO, homeId: string, id: string): Promise<number> {
+export function copyOldProblemInk(io: OldInkIO, homeId: string, id: string): Promise<number> {
+  return queued(io, async () => {
+    try {
+      if (homeId === PROBLEMS_DOC) return 0;
+      const srcPath = inkPath(io.root, PROBLEMS_DOC, io.device);
+      if (!(await io.adapter.exists(srcPath))) return 0;
+      const src = parseInkFile(await io.adapter.read(srcPath), PROBLEMS_DOC);
+      const todo = strokesToCopy(src, problemInkKeys(id), io.moved);
+      if (!todo.length) return 0;
+      const r = await io.adopt(homeId, todo);
+      if (r.saved) io.moved.add(todo.map(s => s.id));
+      return r.added;
+    } catch (e) {
+      console.error('[study] copying old problem ink failed', e);
+      return 0;
+    }
+  });
+}
+
+/** What a load-time pass did: strokes copied into their home docs and written, and strokes left for a later pass. */
+export interface OldInkPass {
+  copied: number;
+  pending: number;
+}
+
+/** The problem a call band or work paper key names (`call:<id>`, `work:<id>`), else null. */
+function problemOfKey(blk: string | null | undefined): string | null {
+  const m = typeof blk === 'string' ? /^(?:call|work):(.+)$/.exec(blk) : null;
+  return m ? m[1] : null;
+}
+
+/**
+ * The load-time pass (register.ts starts it): copies this device's old standalone problem ink
+ * into every problem's home doc, so a problem Today never picks again still shows its call in its
+ * doc. Reads `ink/problems.<device>.json` once and takes every stroke under `call:<id>` or
+ * `work:<id>` whose id the record lacks, grouped by problem. Then, one problem after another
+ * (sorted ids, each a job in the copy queue), resolves its home doc in `content` (an index, or a
+ * getter read at each problem): the `problems` fallback (the problem or its doc is missing)
+ * leaves its strokes pending; otherwise they are adopted into the home doc's store and their ids
+ * recorded once written, else they too stay pending. An old file that exists but cannot be read
+ * counts as one pending stroke (its strokes are unknown), so a later pass reads it again. Never
+ * throws.
+ */
+export async function migrateOldProblemInk(io: OldInkIO, content: ContentIndex | (() => ContentIndex), root: string): Promise<OldInkPass> {
+  const out: OldInkPass = { copied: 0, pending: 0 };
+  let src: InkFile;
   try {
-    if (homeId === PROBLEMS_DOC) return 0;
-    const srcPath = inkPath(io.root, PROBLEMS_DOC, io.device);
-    if (!(await io.adapter.exists(srcPath))) return 0;
-    const src = parseInkFile(await io.adapter.read(srcPath), PROBLEMS_DOC);
-    const todo = strokesToCopy(src, problemInkKeys(id), io.moved);
-    if (!todo.length) return 0;
-    const r = await io.adopt(homeId, todo);
-    if (r.saved) io.moved.add(todo.map(s => s.id));
-    return r.added;
+    const path = inkPath(io.root, PROBLEMS_DOC, io.device);
+    if (!(await io.adapter.exists(path))) return out;
+    src = parseInkFile(await io.adapter.read(path), PROBLEMS_DOC);
   } catch (e) {
-    console.error('[study] copying old problem ink failed', e);
-    return 0;
+    console.error('[study] reading old problem ink failed', e);
+    return { copied: 0, pending: 1 };
   }
+  const groups = new Map<string, InkStroke[]>();
+  for (const s of src.strokes) {
+    const id = problemOfKey(s.blk);
+    if (!id || io.moved.has(s.id)) continue;
+    const g = groups.get(id);
+    if (g) g.push(s); else groups.set(id, [s]);
+  }
+  const index = typeof content === 'function' ? content : () => content;
+  for (const id of [...groups.keys()].sort()) {
+    const r = await queued(io, async (): Promise<OldInkPass> => {
+      let todo: InkStroke[] = [];
+      try {
+        // An open of this problem may have copied some of them since the read.
+        todo = (groups.get(id) || []).filter(s => !io.moved.has(s.id));
+        if (!todo.length) return { copied: 0, pending: 0 };
+        const home = homeDoc(index(), id, root);
+        if (home.id === PROBLEMS_DOC) return { copied: 0, pending: todo.length };
+        const a = await io.adopt(home.id, todo);
+        if (!a.saved) return { copied: 0, pending: todo.length };
+        io.moved.add(todo.map(s => s.id));
+        return { copied: a.added, pending: 0 };
+      } catch (e) {
+        console.error('[study] copying old problem ink failed', id, e);
+        return { copied: 0, pending: todo.length };
+      }
+    });
+    out.copied += r.copied;
+    out.pending += r.pending;
+  }
+  return out;
 }
