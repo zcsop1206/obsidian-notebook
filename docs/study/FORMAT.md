@@ -145,7 +145,7 @@ Callout type names are lowercase. A trailing `-` after the type folds the callou
 | `> [!trap] Title` | no | a common error, with the smallest counterexample |
 | `> [!note]`, `> [!warning]` | either | ordinary prose |
 
-**An item's solution comes right after it.** A worked answer is a folded `> [!solution]-` callout, and it is the next passage after the `problem`, `example`, `derive` or `recall` it solves, with only a blank line between them (the item's block id line belongs to the item). A solution is found only there: one anywhere else belongs to no item, and the scan's `--lint` reports it as an error, as it does a solution that is not folded.
+**An item's solution comes right after it.** A worked answer is a folded `> [!solution]-` callout, and it is the next passage after the `problem`, `example`, `derive` or `recall` it solves, with only a blank line between them (the item's block id line belongs to the item). A solution is found only there: one anywhere else belongs to no item, and the scan's `--lint` reports it as an error, as it does a solution that is not folded. The blank line matters: a solution run on into its item (no blank line between them) or nested inside it becomes part of the item's text, shows its answer, and the lint does not see it.
 
 ### Theorem and proof
 

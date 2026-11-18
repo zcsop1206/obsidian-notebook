@@ -685,8 +685,9 @@ def section_example_solution(page):
     check('example solution: folded on load, its title shown and its answer hidden',
           r['on'] and r['folded'] and r['hidden'] and r['holds'] and r['title'] == 'Solution' and r['titleShown'] and 'the order is' not in r['seen'], json.dumps(r))
 
-    # Marks and page ink take it as any passage: a margin dot by it that opens the marks menu, and
-    # a pen stroke over its title is filed under it. A second stroke goes under the passage below.
+    # Marks take it as any passage: a margin dot by it that opens the marks menu. Page ink does not:
+    # it starts folded on every load, so ink on it opened would land on the passages below. A pen
+    # stroke over its title writes nothing; a stroke over the passage below is filed there.
     r = page.evaluate("""async () => {
       const dot = document.querySelector(`.nb-study-margin .nb-st-dot[data-a="${exIds.sol}"]`);
       if (!dot) return { dot: false };
@@ -702,13 +703,15 @@ def section_example_solution(page):
     page.wait_for_timeout(1300)
     saved = page.evaluate("() => fileJson('study/ink/fx-units.test-pad.json')")
     last = [(s.get('at') or {}).get('a') for s in (saved or {}).get('strokes', [])[-2:]]
-    check('example solution: page ink over its title is filed under it, ink below under the passage below',
-          len(last) == 2 and last[0] == ids['sol'] and last[1] in (ids['below'], 'cue-exponent'), json.dumps(last))
+    all_at = [(s.get('at') or {}).get('a') for s in (saved or {}).get('strokes', [])]
+    check('example solution: a pen stroke over its title writes no ink; one below is filed under the passage below',
+          ids['sol'] not in all_at and len(last) >= 1 and last[-1] in (ids['below'], 'cue-exponent'), json.dumps(last))
     s0 = page.evaluate("""() => {
       window.exBelow0 = paperTop(exBelow());
-      return { below: exBelow0, ink: inkBand(exBelow()), title: titleInk(), dots: dotAnchors() };
+      return { below: exBelow0, ink: inkBand(exBelow()), title: titleInk(), dots: dotAnchors(), ...solState() };
     }""")
-    check('example solution (setup): both strokes are drawn where written', s0['ink'] > 50 and s0['title'] > 50, json.dumps({k: s0[k] for k in ('ink', 'title')}))
+    check('example solution (setup): the stroke below is drawn where written, nothing over the title, and it is still folded',
+          s0['ink'] > 50 and s0['title'] == 0 and s0['folded'], json.dumps({k: s0[k] for k in ('ink', 'title', 'folded')}))
 
     # A finger tap on the title opens it; the page lays out again (the view's ResizeObserver).
     page.evaluate("() => tapTitle()")
@@ -721,7 +724,12 @@ def section_example_solution(page):
     print(f"  example solution: opening it moved the passage below by {shift:.1f} paper px")
     check('example solution: once open, the stroke below it is drawn at its own passage, not where the passage was',
           shift > 28 and s1['ink'] > 50 and s1['old'] == 0, json.dumps({'shift': shift, 'ink': s1['ink'], 'old': s1['old']}))
-    check('example solution: once open, the stroke over its title stays there', s1['title'] > 50, s1['title'])
+    page.evaluate("""() => { const c = exSol().querySelector('.callout-content'); if (c) strokeOver(c, 20); }""")
+    page.wait_for_timeout(1300)
+    saved = page.evaluate("() => fileJson('study/ink/fx-units.test-pad.json')")
+    all_at = [(s.get('at') or {}).get('a') for s in (saved or {}).get('strokes', [])]
+    check('example solution: once open, a pen stroke over its answer writes no ink',
+          ids['sol'] not in all_at and s1['title'] == 0, json.dumps({'title': s1['title'], 'n': len(all_at)}))
     check('example solution: once open, every margin dot is still there and sits by its passage',
           settled and not s1['astray'] and sorted(s1['dots']) == sorted(s0['dots']) and ids['sol'] in s1['dots'], json.dumps({'astray': s1['astray'][:6], 'dots': len(s1['dots'])}))
 
