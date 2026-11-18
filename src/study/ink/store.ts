@@ -35,9 +35,12 @@ export interface Adopted {
   saved: boolean;
 }
 
-/** Text a write may replace once it was read: blank, or valid JSON. */
-function readable(text: string): boolean {
-  if (!text.trim()) return true;
+/**
+ * Text a write may replace once it was read: blank, or valid JSON. `parsed` is parseInkFile's
+ * reading of it: any stroke, hide or keep there means the JSON parsed, so it is not parsed twice.
+ */
+function readable(text: string, parsed: InkFile): boolean {
+  if (parsed.strokes.length || parsed.hide || parsed.keep || !text.trim()) return true;
   try { JSON.parse(text); return true; } catch { return false; }
 }
 
@@ -94,8 +97,9 @@ export class DocInkStore {
       if (!dev) continue;
       try {
         const text = await this.adapter.read(p);
-        this.files.set(dev, parseInkFile(text, this.docId));
-        if (dev === this.device) { this.ownExisted = true; ownOk = readable(text); }
+        const f = parseInkFile(text, this.docId);
+        this.files.set(dev, f);
+        if (dev === this.device) { this.ownExisted = true; ownOk = readable(text, f); }
       } catch (e) {
         if (dev === this.device) ownOk = false;
         console.error('[study] ink: reading failed', p, e);
@@ -295,7 +299,8 @@ export class DocInkStore {
     try {
       if (await this.adapter.exists(this.path)) {
         const text = await this.adapter.read(this.path);
-        if (readable(text)) this.merge(parseInkFile(text, this.docId));
+        const f = parseInkFile(text, this.docId);
+        if (readable(text, f)) this.merge(f);
         else await this.adapter.write(unreadablePath(this.path, new Date()), text);
         this.ownExisted = true;
       }
