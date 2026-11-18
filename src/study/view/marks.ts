@@ -186,18 +186,23 @@ export function attachMarks(host: MarksHost): Marks {
   function markable(): { anchor: string; item: boolean }[] {
     const out: { anchor: string; item: boolean }[] = [];
     for (const p of doc().passages) {
-      if (!UNMARKABLE.has(p.kind) && !p.block) out.push({ anchor: p.anchor, item: false });
+      // A solution is text, not a mounted block: the one on the page (an example's) gets a dot like any passage.
+      if (!UNMARKABLE.has(p.kind) && (!p.block || p.block.type === 'solution')) out.push({ anchor: p.anchor, item: false });
       if (p.items) for (const it of p.items) out.push({ anchor: it.anchor, item: true });
     }
     return out;
   }
-  /** Top of `el` in paper px relative to the margin. Rects are scaled; the element's own scale converts. */
+  /**
+   * Top of `el` in paper px relative to the margin. Rects are scaled; the margin's width, a whole
+   * number of px, gives the scale. (An element's offsetHeight is rounded to whole px, so a scale
+   * taken from it was off by up to 0.5 / height, and a dot far down a doc sat tens of px away.)
+   */
   function topOf(el: HTMLElement): number | null {
     if (!el.getClientRects().length) return null;
     const er = el.getBoundingClientRect();
     const mr = margin.getBoundingClientRect();
-    const scale = el.offsetHeight > 0 ? er.height / el.offsetHeight : 1;
-    return (er.top - mr.top) / (scale || 1);
+    const scale = margin.offsetWidth > 0 && mr.width > 0 ? mr.width / margin.offsetWidth : 1;
+    return (er.top - mr.top) / scale;
   }
   function openMarks(): Map<string, { verb: MarkVerb; t: string }> {
     const e = engine();

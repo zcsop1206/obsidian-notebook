@@ -200,6 +200,27 @@ export function coerceEvent(e: StudyEvent): StudyEvent {
   return { ...base, ...out } as unknown as StudyEvent;
 }
 
+/**
+ * A track's docs column against a doc. The column is `;`-separated sections, each `[folder] glob,
+ * glob`: a section matches when the doc sits in one of the section's folders (if it names any) and its
+ * id matches one of the globs; a section of folder names only matches the whole folder. One matching
+ * section is enough. A row with no `;` is a single section and matches exactly as it always did.
+ * StudyState.trackMatches and the laptop scan's lint (scripts/study-scan.mjs) both use this.
+ */
+export function trackDocsMatch(t: { docs: string }, d: { id: string; path: string }): boolean {
+  const parts = d.path.split('/');
+  const folder = parts.length > 1 ? parts[parts.length - 2] : '';
+  for (const section of t.docs.split(';')) {
+    const tokens = section.split(/[\s,]+/).filter(Boolean);
+    if (!tokens.length) continue;
+    const folders = tokens.filter(x => FOLDERS.has(x));
+    const globs = tokens.filter(x => !FOLDERS.has(x));
+    if (folders.length && !folders.includes(folder)) continue;
+    if (globs.length ? globs.some(g => globMatch(g, d.id)) : folders.length > 0) return true;
+  }
+  return false;
+}
+
 /** The passage a request was made on: `a` is `<doc>#<anchor>` when the mark sat in another doc than the one to rebuild. */
 export function requestTarget(r: { doc: string; a: string }): { doc: string; a: string } {
   const i = r.a.indexOf('#');
@@ -272,27 +293,11 @@ export class StudyState {
     return this.isBasic(doc) ? [doc] : [];
   }
 
-  /**
-   * A track serves a doc when the doc lists it, its areas include the doc's area, or its docs column
-   * matches. The docs column is `;`-separated sections, each `[folder] glob, glob`: a section matches
-   * when the doc sits in one of the section's folders (if it names any) and its id matches one of the
-   * globs; a section of folder names only matches the whole folder. One matching section is enough.
-   * A row with no `;` is a single section and matches exactly as it always did.
-   */
+  /** A track serves a doc when the doc lists it, its areas include the doc's area, or its docs column matches (trackDocsMatch). */
   trackMatches(t: Track, d: StudyDoc): boolean {
     if (d.tracks.includes(t.id)) return true;
     if (t.areas.some(a => d.areas.includes(a))) return true;
-    const parts = d.path.split('/');
-    const folder = parts.length > 1 ? parts[parts.length - 2] : '';
-    for (const section of t.docs.split(';')) {
-      const tokens = section.split(/[\s,]+/).filter(Boolean);
-      if (!tokens.length) continue;
-      const folders = tokens.filter(x => FOLDERS.has(x));
-      const globs = tokens.filter(x => !FOLDERS.has(x));
-      if (folders.length && !folders.includes(folder)) continue;
-      if (globs.length ? globs.some(g => globMatch(g, d.id)) : folders.length > 0) return true;
-    }
-    return false;
+    return trackDocsMatch(t, d);
   }
 
   /** Tracks that count on a day: weight > 0 and not over (a range counts until its end). */

@@ -573,7 +573,9 @@
   // ---- MarkdownRenderer (study view, S3): a tiny markdown-to-HTML converter, enough for the
   // study fixtures: headings, paragraphs, lists (nested by indent), bold and italics, inline and
   // display math as text in span/div.math, code spans and fences, tables, blockquotes, callouts as
-  // div.callout[data-callout] (folded ones get .is-collapsed), internal links as
+  // div.callout[data-callout] (foldable ones, `-` or `+`, get .is-collapsible and open and close on a
+  // click of their .callout-title as in Obsidian; folded ones start .is-collapsed with their
+  // .callout-content hidden), internal links as
   // a.internal-link[data-href] and external ones as a.external-link. Image embeds `![alt](href)`
   // resolve as Obsidian does (S12): through metadataCache.getFirstLinkpathDest(href, sourcePath),
   // emitting the resolved vault path as src; an unresolved embed is marked data-unresolved (no src,
@@ -636,7 +638,7 @@
         const head = /^\[!([A-Za-z][\w-]*)\]([+-]?)\s*(.*)$/.exec(body[0] || '');
         if (head) {
           const type = head[1].toLowerCase(), fold = head[2];
-          out.push(`<div class="callout${fold === '-' ? ' is-collapsible is-collapsed' : ''}" data-callout="${escHtml(type)}"${fold ? ` data-callout-fold="${fold}"` : ''}>` +
+          out.push(`<div class="callout${fold ? ' is-collapsible' : ''}${fold === '-' ? ' is-collapsed' : ''}" data-callout="${escHtml(type)}"${fold ? ` data-callout-fold="${fold}"` : ''}>` +
             `<div class="callout-title"><div class="callout-title-inner">${inlineMd(head[3] || type, sourcePath)}</div></div>` +
             `<div class="callout-content"${fold === '-' ? ' style="display:none"' : ''}>${renderBlocks(body.slice(1).join('\n'), sourcePath)}</div></div>`);
         } else out.push(`<blockquote>${renderBlocks(body.join('\n'), sourcePath)}</blockquote>`);
@@ -671,6 +673,19 @@
     }
     return out.join('');
   };
+  // A click on a foldable callout's title opens or closes it, as Obsidian's does: the callout
+  // toggles .is-collapsed and its content shows or hides.
+  const foldOnClick = root => {
+    for (const title of root.querySelectorAll('.callout.is-collapsible > .callout-title')) {
+      title.addEventListener('click', () => {
+        const callout = title.parentElement;
+        const content = callout.querySelector(':scope > .callout-content');
+        const shut = !callout.classList.contains('is-collapsed');
+        callout.classList.toggle('is-collapsed', shut);
+        if (content) content.style.display = shut ? 'none' : '';
+      });
+    }
+  };
   window.markdownRenders = 0;
   window.renderMarkdownForTest = renderBlocks;
   const MarkdownRenderer = {
@@ -679,6 +694,7 @@
       window.markdownRenders++;
       const div = document.createElement('div');
       div.innerHTML = renderBlocks(markdown, sourcePath);
+      foldOnClick(div);
       while (div.firstChild) el.appendChild(div.firstChild);
     },
     async renderMarkdown(markdown, el, sourcePath, component) { return MarkdownRenderer.render(app, markdown, el, sourcePath, component); },
