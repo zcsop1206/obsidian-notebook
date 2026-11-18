@@ -11,6 +11,7 @@
 import type { NewEvent } from '../context';
 import type { DrillGrade, ProofStep, StudyEvent } from '../types';
 import type { BlockEnv, BlockHandle, BlockMount, InkStroke, InkSurface } from '../view/host';
+import { mountFigureInk, type FigureInk } from './figure-ink';
 
 /* ------------------------------------------------------------------------------------------ *
  * Constants and pure helpers (unit-tested in test/unit/study-fog.test.ts)
@@ -304,6 +305,10 @@ export const BLOCK_CSS = `
 .nb-sb .nb-sb-ticks{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}
 .nb-sb .nb-sb-gap{padding:8px 12px;border-left:3px solid var(--color-purple,#8a3ffc);background:var(--background-secondary)}
 .nb-sb .nb-sb-legend i{display:inline-block;width:16px;height:3px;border-radius:2px;vertical-align:middle;margin:0 5px 0 8px}
+.nb-study-figure{display:inline-block;max-width:100%;line-height:0;position:relative;isolation:isolate}
+.nb-study-figure img{display:block;width:100%;height:auto;-webkit-user-drag:none}
+.nb-study-figure .nb-study-figure-undo{position:absolute;top:6px;right:6px;z-index:1;margin:0;height:auto;min-height:0;padding:4px 10px;font-size:12px;line-height:1.3;border-radius:999px;border:1px solid var(--background-modifier-border,#ddd);background:var(--background-primary,#fff);color:var(--text-normal);box-shadow:0 1px 4px rgba(0,0,0,.18);cursor:pointer}
+.nb-study-figure .nb-study-figure-undo[hidden]{display:none}
 `;
 
 const STYLE_ID = 'nb-study-blocks-css';
@@ -387,7 +392,8 @@ export function runDrill(host: HTMLElement, env: BlockEnv, spec: DrillSpec): Dri
   const clock = head.createSpan({ cls: 'nb-sb-timer', text: recall ? '' : '0:00' });
   if (spec.prompt) {
     const pr = root.createDiv({ cls: 'nb-sb-prompt' });
-    void env.render(spec.prompt, pr).then(() => env.relayout());
+    // Destroyed while it rendered: mount no figure ink, which nothing would destroy.
+    void env.render(spec.prompt, pr).then(() => { if (dead) return; figInk?.(); figInk = mountFigureInk(pr, env, spec.item); env.relayout(); });
   }
   const paper = root.createDiv({ cls: 'nb-sb-paper' });
   const surface: InkSurface = env.ink.surface(env.doc, paper, spec.key, {
@@ -413,6 +419,7 @@ export function runDrill(host: HTMLElement, env: BlockEnv, spec: DrillSpec): Dri
 
   const giveTap = giveB ? twoTap(giveB, 'Tap again: show it, counts as failed', () => finish(true)) : null;
   let againTap: { destroy(): void } | null = null;
+  let figInk: FigureInk | null = null;
 
   /* ----- replay state ----- */
   const rp = { T: 0, playing: false, speed: 4, raf: 0, wall0: 0, T0: 0 };
@@ -638,6 +645,8 @@ export function runDrill(host: HTMLElement, env: BlockEnv, spec: DrillSpec): Dri
   function doAgain(): void {
     if (phase() !== 'done' || !st.grade) return;
     surface.clear();
+    // Marks made on the prompt's figure (reading the model's steps, say) go with the page.
+    figInk?.clear();
     st = blank();
     restored = false;
     save();
@@ -700,6 +709,8 @@ export function runDrill(host: HTMLElement, env: BlockEnv, spec: DrillSpec): Dri
       giveTap?.destroy();
       againTap?.destroy();
       offInk();
+      figInk?.();
+      figInk = null;
       root.removeEventListener('click', onClick);
       surface.destroy();
       root.remove();
