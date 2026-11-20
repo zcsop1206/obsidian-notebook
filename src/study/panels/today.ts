@@ -215,8 +215,9 @@ export class TodayView extends ItemView {
   }
 
   /**
-   * The Plan section. It shows the cached rows at once when the file was read before, then reads
-   * the file and fills the section again if the text differs, unless a later render has begun.
+   * The Plan section. It shows the cached rows at once when the file was read before (else a
+   * "Plan" heading and a reading line), then reads the file and fills the section again if the
+   * text differs, unless a later render has begun.
    */
   private planSec(root: HTMLElement, path: string, file: TFile, gen: number): void {
     const sec = root.createEl('section', { cls: 'nb-sp-sec nb-sp-plan' });
@@ -224,6 +225,11 @@ export class TodayView extends ItemView {
     if (this.cache && this.cache.path === path) {
       shown = this.cache.text;
       this.fillPlan(sec, path, shown);
+    } else {
+      // Not read yet: give the section its label and some height now, so what lies below does
+      // not jump down when the read lands.
+      sec.createEl('h3', { text: 'Plan' });
+      sec.createDiv({ cls: 'nb-sp-empty nb-sp-planwait', text: 'Reading the day file…' });
     }
     this.ctx.app.vault.cachedRead(file).then(
       text => {

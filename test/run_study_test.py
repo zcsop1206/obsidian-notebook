@@ -1013,12 +1013,17 @@ def section_today_plan(page):
       window.dayRow = i => dayRows()[i];
       externalWrite(path, text);
       ctx.fire('content');
+      // Before the first read lands: the section already has its heading and a reading line.
+      const sec0 = view.contentEl.querySelector('.nb-sp-plan');
+      const early = sec0 ? { h: sec0.querySelector('h3') ? sec0.querySelector('h3').textContent : null,
+        wait: sec0.querySelector('.nb-sp-planwait') ? sec0.querySelector('.nb-sp-planwait').textContent : null,
+        height: sec0.getBoundingClientRect().height } : null;
       await sleep(40);
       const el = view.contentEl;
       const plan = el.querySelector('.nb-sp-plan');
       const kids = [...el.querySelector('.nb-sp').children].map(c => c.className.split(' ').pop() + ':' + (c.querySelector('h3, summary') ? c.querySelector('h3, summary').firstChild.textContent : ''));
       return {
-        kids,
+        kids, early, waitLeft: el.querySelectorAll('.nb-sp-planwait').length,
         count: plan && plan.querySelector('h3 .nb-sp-count').textContent,
         rows: dayRows().map(x => ({ line: x.dataset.line, text: x.querySelector('.nb-sp-rowbody').textContent,
           label: x.querySelector('.nb-sp-rowlabel').textContent, checked: x.querySelector('input[type=checkbox]').checked,
@@ -1030,6 +1035,10 @@ def section_today_plan(page):
     }""", [DAY_PATH, DAY_FILE])
     check('plan: the Plan section comes first, right after the date and deadline, then Drills, More, Settled, Requests',
           r['kids'] == ['nb-sp-date:', 'nb-sp-next:', 'nb-sp-plan:Plan', 'nb-sp-sec:Drills', 'nb-sp-more:More (2)', 'nb-sp-sec:Settled today', 'nb-sp-sec:Requests'], r['kids'])
+    check('plan: before the first read lands, the section shows "Plan" and a reading line, so nothing below jumps unlabelled',
+          r['early'] is not None and r['early']['h'] == 'Plan' and r['early']['wait'] == 'Reading the day file…'
+          and r['early']['height'] > 30, r['early'])
+    check('plan: the reading line is gone once the rows are in', r['waitLeft'] == 0, r['waitLeft'])
     check('plan: done and planned minutes, and the day minutes', r['count'] == '45 / 155 min done · day 240 min', r['count'])
     rows = r['rows']
     check('plan: one row per day-file row, in file order', [x['line'] for x in rows] == ['6', '7', '8', '9', '10'], [x['line'] for x in rows])
