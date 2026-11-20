@@ -10,6 +10,7 @@
 # Needs Python Playwright and pypdf (`pip install pypdf`). Run by `npm test`; the PDFs land in
 # test/out/. Exits non-zero if any check fails.
 import base64, io, os, re, subprocess, sys, time
+import serve  # test/serve.py: the static server, refusing a port another run holds
 try:
     import pypdf
 except Exception as e:  # missing, or a broken dependency (e.g. cryptography)
@@ -21,8 +22,7 @@ ROOT = os.path.dirname(HERE)
 OUT = os.path.join(HERE, 'out')
 os.makedirs(OUT, exist_ok=True)
 port = int(os.environ.get('NB_TEST_PORT_BASE', 8765)) + 3
-srv = subprocess.Popen([sys.executable, '-m', 'http.server', str(port)], cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-time.sleep(1)
+srv = serve.start(port, ROOT)
 
 failures = []
 

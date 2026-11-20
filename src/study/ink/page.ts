@@ -26,6 +26,9 @@ import type { DocInkStore } from './store';
 export const PAGE_INK_SKIP = [
   '.nb-study-ink', '.nb-study-ink-chip', '.nb-study-ink-orphans', '.nb-st-scaffold', 'button', 'input', 'textarea', 'select', 'label', 'summary',
   '[contenteditable="true"]', '[contenteditable=""]', '[role="button"]', '.no-ink', '.nb-study-no-ink',
+  // An example's solution starts folded on every load, so ink written on it opened would land on the
+  // passages below. No page ink on it: a Pencil tap on its title opens it, as a finger does.
+  '.callout[data-callout="solution"]',
 ].join(', ');
 /** Where the mouse does not write either: links and chips, so a click follows them. */
 const MOUSE_SKIP = 'a[href], a.internal-link, a.external-link, .sr-ref, [data-href], .chip, [data-act]';

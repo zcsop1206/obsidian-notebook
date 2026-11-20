@@ -6,8 +6,9 @@
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
-    "test": "npm run build && npm run test:unit && python test/run_spike_test.py && python test/run_format_test.py && python test/run_view_test.py && python test/run_study_ink_test.py && python test/run_study_test.py && python test/run_study_blocks_test.py && python test/run_study_kata_test.py && python test/run_study_content_check.py && python test/run_export_test.py && python test/run_large_test.py",
+    "test": "npm run build && npm run test:unit && node --test scripts/study-scan.test.mjs scripts/study-progress.test.mjs && python test/run_spike_test.py && python test/run_format_test.py && python test/run_view_test.py && python test/run_study_ink_test.py && python test/run_study_test.py && python test/run_study_blocks_test.py && python test/run_study_figure_ink_test.py && python test/run_study_kata_test.py && python test/run_study_content_check.py && python test/run_export_test.py && python test/run_large_test.py",
     "test:unit": "node test/build.mjs && node --test test/out/unit.js",
+    "test:study": "npm run build && npm run test:unit && node --test scripts/study-scan.test.mjs scripts/study-progress.test.mjs && python test/run_study_ink_test.py && python test/run_study_test.py && python test/run_study_blocks_test.py && python test/run_study_figure_ink_test.py && python test/run_study_kata_test.py && python test/run_study_content_check.py",
     "fixture": "node test/build.mjs && node test/out/make-fixture.js"
   },
   "author": "Adit Bhargava",

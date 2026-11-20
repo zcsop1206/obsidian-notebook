@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { sha1Hex } from '../../src/study/format/sha1';
-import { hash8, parseFrontmatter, parsePorts, parseStudyDoc, parseSteps, parseVectors, slug } from '../../src/study/format/parse';
+import { hash8, parseFrontmatter, parsePorts, parseStudyDoc, parseSteps, parseTracks, parseVectors, slug } from '../../src/study/format/parse';
 import { buildIndex, type SourceFile } from '../../src/study/format/index-build';
 
 const ROOT = 'test/fixtures/study';
@@ -176,6 +176,19 @@ test('the index: docs, bank with tags, bank refs, tracks, methods, warnings', ()
   assert.ok(!/putnam-2020-b9" is not in any bank file/.test(w));
   assert.equal(idx.problems.get('putnam-2020-b9')!.d, 5);
   assert.match(w, /method "ghost" links a missing anchor \^nope/);
+});
+
+test('tracks: the areas column also splits on `;`; the docs column is kept as written', () => {
+  const tracks = parseTracks([
+    '| track | deadline | weight | areas | docs |',
+    '|---|---|---|---|---|',
+    '| mie342 | 2026-12-08 | 2 | el; th | basics el-*, th-*; topics m342-* |',
+    '| interviews | 2026-11-30 | | gen ; la | topics iv-*; bank jane-*; |',
+  ].join('\n'));
+  assert.deepEqual(tracks.map(t => [t.id, t.areas, t.docs]), [
+    ['mie342', ['el', 'th'], 'basics el-*, th-*; topics m342-*'],
+    ['interviews', ['gen', 'la'], 'topics iv-*; bank jane-*;'],
+  ]);
 });
 
 test('slugs for heading anchors', () => {

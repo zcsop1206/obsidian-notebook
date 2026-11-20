@@ -1,68 +1,179 @@
 # Running the study-mode build with Devin
 
-For Adit. How to start the Devin sessions, what to paste, and how Claude and Devin talk.
+For Adit. Which Devin sessions to start, what to paste, and how Claude and Devin talk. Written by a model for Adit. Not Adit's words.
 
-## Start these now, in parallel
+## Wave 1 (0.15.1): start these three
 
-One Devin session per ticket. All eight can run at once; each owns different files (BOARD.md, Tickets).
+One Devin session per ticket; the three can run at once (they own different files, BOARD.md). Never more than four sessions at a time, and only with at least 5 GB free on C:. Each session opens a draft PR within 30 minutes and writes in its thread.
 
 | session | ticket | size |
 |---|---|---|
-| 1 | S2 Engine and event store | large |
-| 2 | S3 Study view shell | large |
-| 3 | S4 Anchored ink | medium |
-| 4 | S6 Fog, drill and recall blocks | medium |
-| 5 | S7 Problem block | medium |
-| 6 | S9 Kata: interpreter, vectors, block | medium |
-| 7 | S5 Marks and triage UI | medium |
-| 8 | S8 Today and Map | small |
+| 1 | S12 Problems from Today, as in their doc | 5 h |
+| 2 | S13 Ink on figures in problems and drills | 4 h |
+| 3 | S14 Tracks: `;` sections and `hidden: never` | 2 h |
 
-If you would rather run fewer at once, start S2, S3 and S4 first: the rest lean on them.
+Claude builds S15 (figure lint) and S17 (the circuit lab page) itself, and releases 0.15.1 (S16) only with your OK. Later waves get their prompts here once their tickets are on the board.
 
-## The prompt
-
-Paste this as each session's prompt, with the ticket id filled in (save it as a reusable prompt if your plan has them). Devin needs access to `zcsop1206/obsidian-notebook`.
+### Session 1: S12
 
 ```text
 You are building one ticket of "study mode" in the Obsidian plugin repo zcsop1206/obsidian-notebook
 (TypeScript, bundled by esbuild; it runs in Obsidian on an iPad, inside the iOS web view, and on a
-Windows laptop).
+Windows laptop). Other build sessions run on this machine at the same time, each on its own ticket.
 
-Your ticket: S__   (fill in: S2, S3, S4, S5, S6, S7, S8 or S9)
+Ticket: S12 "Problems from Today, as in their doc". Release 0.15.1.
+Base branch: study-mode. Your branch: study/s12-today-problems. Your worktree: ../on-s12.
+Your test ports: NB_TEST_PORT_BASE=9240 (9240 to 9259 are yours; other sessions use other ranges).
 
 Before writing code:
-1. Fetch the branch study-mode and create your branch from it: study/s<n>-<short-slug>.
-2. Read, in this order: docs/study/BOARD.md (how we work and the rules), docs/study/threads/S<n>.md
-   (your brief and the conversation so far), docs/study/SPEC.md, docs/study/FORMAT.md,
-   src/study/types.ts, src/study/context.ts, src/study/view/host.ts, and the "Repo mechanics"
-   section of CONTEXT.md (build, tests, mock harness, release).
-3. Check the open pull requests. If one already exists for your ticket, stop and say so.
-   Otherwise open a draft PR into study-mode titled "[S<n>] <ticket title>" within 30 minutes.
+1. In the repo run `git fetch origin`, then
+   `git worktree add ../on-s12 -b study/s12-today-problems origin/study-mode`.
+   Work only in ../on-s12: never in the main checkout or another session's worktree.
+   If C: has under 5 GB free, stop and say so in your thread.
+2. Check the open pull requests (`gh pr list --base study-mode`). If one exists for S12, stop and say
+   so. Otherwise push your branch and open a draft PR into study-mode titled
+   "[S12] Problems from Today, as in their doc" within 30 minutes. The draft PR is your claim.
+3. Read, in this order: docs/study/BOARD.md (how we work), docs/study/threads/S12.md (your brief and
+   any answers since), docs/study/SPEC.md, docs/study/FORMAT.md, src/study/types.ts,
+   src/study/context.ts, src/study/view/host.ts, the files your brief names, and the
+   "Repo mechanics" section of CONTEXT.md.
 
 While building:
-- lab/study-reader/ is a working single-page demo of most of this, tested by the owner on
-  2026-11-15. Port behaviour from it. Where it and SPEC.md differ, SPEC.md wins.
-- Touch only the files your ticket owns (BOARD.md, Tickets). A change to a shared file
-  (types.ts, context.ts, view/host.ts, index.ts, blocks/index.ts, main.ts) needs an INTERFACE:
-  entry first; keep coding against the current interface meanwhile.
+- Touch only the files your brief lists. A change to a shared file (src/study/types.ts, context.ts,
+  view/host.ts, index.ts, blocks/index.ts, src/main.ts) needs an INTERFACE: entry and Claude's OK
+  first; keep coding against the current interface meanwhile.
+- npm install. Before every push: npm run build && npm run test:unit. In every shell set
+  PYTHONIOENCODING=utf-8 and NB_TEST_PORT_BASE=9240. A view-test runner exits 1 if its port is
+  taken: find out what holds it instead of picking another port.
+- The gate is npm run test:study (build, unit tests, every study view suite). Do not use npm test:
+  it stops at run_view_test, which has 5 to 7 known timing failures on Windows.
+- View tests use Python Playwright with Chromium on test/harness.html and the mock obsidian module
+  (pip install playwright; python -m playwright install chromium).
 - No new npm dependencies without an OK in the thread. No Node built-ins under src/.
-- npm install, then before every push: npm run build && npm run test:unit. Add tests for what
-  you build. View tests use Python Playwright with Chromium on test/harness.html and the mock
-  obsidian module (pip install playwright, python -m playwright install chromium).
-- The repo is public: commit nothing private and no kata reference designs. Test content is
-  invented fixtures under test/fixtures/study/.
+- The repo is public. Test content is invented fixtures. Commit no personal data, no course
+  material, no tokens.
 
-Talking to Claude (the reviewer) and the owner:
-- Your thread is docs/study/threads/S<n>.md. Append entries only, headed
-  "### <date> <time> devin (<this session's link or id>)". Commit them on your branch.
-- A question: a "Q:" entry, posted as a PR comment too. Say whether it blocks you. If it does
-  not, keep going and record what you chose in an "ASSUMED:" entry.
+Talking to Claude (the reviewer) and Adit (the owner):
+- Your thread is docs/study/threads/S12.md. Append entries only, headed
+  "### <date> <time> devin (<this session's link or id>)", and commit them on your branch.
+- Q: is a question; say whether it blocks you. If it does not, keep going and record what you chose
+  in an ASSUMED: entry. Post every Q: as a PR comment too; Claude reads PR comments first.
+- INTERFACE: is a change you need in a shared file; wait for Claude's OK.
 - Claude reviews on the PR. Answer and fix in the same PR. Never merge your own PR.
-- When done: a "DONE:" entry with what you built, the output of the build and the tests, and
-  the iPad checks your change needs. Then mark the PR ready for review.
+- When done, post a DONE: entry: what you built; the output of npm run build, npm run test:unit and
+  npm run test:study (pass and fail counts); the iPad checks your brief lists; anything you assumed.
+  Then mark the PR ready for review.
 
-Never push to main or study-mode, never edit someone else's thread entries, never commit
-tokens or personal data.
+Never push to main or study-mode. Never edit someone else's thread entries. Never commit tokens or
+personal data.
+```
+
+### Session 2: S13
+
+```text
+You are building one ticket of "study mode" in the Obsidian plugin repo zcsop1206/obsidian-notebook
+(TypeScript, bundled by esbuild; it runs in Obsidian on an iPad, inside the iOS web view, and on a
+Windows laptop). Other build sessions run on this machine at the same time, each on its own ticket.
+
+Ticket: S13 "Ink on figures in problems and drills". Release 0.15.1.
+Base branch: study-mode. Your branch: study/s13-figure-ink. Your worktree: ../on-s13.
+Your test ports: NB_TEST_PORT_BASE=9260 (9260 to 9279 are yours; other sessions use other ranges).
+
+Before writing code:
+1. In the repo run `git fetch origin`, then
+   `git worktree add ../on-s13 -b study/s13-figure-ink origin/study-mode`.
+   Work only in ../on-s13: never in the main checkout or another session's worktree.
+   If C: has under 5 GB free, stop and say so in your thread.
+2. Check the open pull requests (`gh pr list --base study-mode`). If one exists for S13, stop and say
+   so. Otherwise push your branch and open a draft PR into study-mode titled
+   "[S13] Ink on figures in problems and drills" within 30 minutes. The draft PR is your claim.
+3. Read, in this order: docs/study/BOARD.md (how we work), docs/study/threads/S13.md (your brief and
+   any answers since), docs/study/SPEC.md, docs/study/FORMAT.md, src/study/types.ts,
+   src/study/context.ts, src/study/view/host.ts, the files your brief names, and the
+   "Repo mechanics" section of CONTEXT.md.
+
+While building:
+- Touch only the files your brief lists. A change to a shared file (src/study/types.ts, context.ts,
+  view/host.ts, index.ts, blocks/index.ts, src/main.ts) needs an INTERFACE: entry and Claude's OK
+  first; keep coding against the current interface meanwhile.
+- npm install. Before every push: npm run build && npm run test:unit. In every shell set
+  PYTHONIOENCODING=utf-8 and NB_TEST_PORT_BASE=9260. A view-test runner exits 1 if its port is
+  taken: find out what holds it instead of picking another port.
+- The gate is npm run test:study (build, unit tests, every study view suite). Do not use npm test:
+  it stops at run_view_test, which has 5 to 7 known timing failures on Windows.
+- View tests use Python Playwright with Chromium on test/harness.html and the mock obsidian module
+  (pip install playwright; python -m playwright install chromium).
+- No new npm dependencies without an OK in the thread. No Node built-ins under src/.
+- The repo is public. Test content is invented fixtures. Commit no personal data, no course
+  material, no tokens.
+
+Talking to Claude (the reviewer) and Adit (the owner):
+- Your thread is docs/study/threads/S13.md. Append entries only, headed
+  "### <date> <time> devin (<this session's link or id>)", and commit them on your branch.
+- Q: is a question; say whether it blocks you. If it does not, keep going and record what you chose
+  in an ASSUMED: entry. Post every Q: as a PR comment too; Claude reads PR comments first.
+- INTERFACE: is a change you need in a shared file; wait for Claude's OK.
+- Claude reviews on the PR. Answer and fix in the same PR. Never merge your own PR.
+- When done, post a DONE: entry: what you built; the output of npm run build, npm run test:unit and
+  npm run test:study (pass and fail counts); the iPad checks your brief lists; anything you assumed.
+  Then mark the PR ready for review.
+
+Never push to main or study-mode. Never edit someone else's thread entries. Never commit tokens or
+personal data.
+```
+
+### Session 3: S14
+
+```text
+You are building one ticket of "study mode" in the Obsidian plugin repo zcsop1206/obsidian-notebook
+(TypeScript, bundled by esbuild; it runs in Obsidian on an iPad, inside the iOS web view, and on a
+Windows laptop). Other build sessions run on this machine at the same time, each on its own ticket.
+
+Ticket: S14 "Tracks: ; sections and hidden: never". Release 0.15.1.
+Base branch: study-mode. Your branch: study/s14-tracks. Your worktree: ../on-s14.
+Your test ports: NB_TEST_PORT_BASE=9280 (9280 to 9299 are yours; other sessions use other ranges).
+
+Before writing code:
+1. In the repo run `git fetch origin`, then
+   `git worktree add ../on-s14 -b study/s14-tracks origin/study-mode`.
+   Work only in ../on-s14: never in the main checkout or another session's worktree.
+   If C: has under 5 GB free, stop and say so in your thread.
+2. Check the open pull requests (`gh pr list --base study-mode`). If one exists for S14, stop and say
+   so. Otherwise push your branch and open a draft PR into study-mode titled
+   "[S14] Tracks: ; sections and hidden: never" within 30 minutes. The draft PR is your claim.
+3. Read, in this order: docs/study/BOARD.md (how we work), docs/study/threads/S14.md (your brief and
+   any answers since), docs/study/SPEC.md, docs/study/FORMAT.md, src/study/types.ts,
+   src/study/context.ts, src/study/view/host.ts, the files your brief names, and the
+   "Repo mechanics" section of CONTEXT.md.
+
+While building:
+- Touch only the files your brief lists. A change to a shared file (src/study/types.ts, context.ts,
+  view/host.ts, index.ts, blocks/index.ts, src/main.ts) needs an INTERFACE: entry and Claude's OK
+  first; keep coding against the current interface meanwhile.
+- npm install. Before every push: npm run build && npm run test:unit. In every shell set
+  PYTHONIOENCODING=utf-8 and NB_TEST_PORT_BASE=9280. A view-test runner exits 1 if its port is
+  taken: find out what holds it instead of picking another port.
+- The gate is npm run test:study (build, unit tests, every study view suite). Do not use npm test:
+  it stops at run_view_test, which has 5 to 7 known timing failures on Windows.
+- View tests use Python Playwright with Chromium on test/harness.html and the mock obsidian module
+  (pip install playwright; python -m playwright install chromium).
+- No new npm dependencies without an OK in the thread. No Node built-ins under src/.
+- The repo is public. Test content is invented fixtures. Commit no personal data, no course
+  material, no tokens.
+
+Talking to Claude (the reviewer) and Adit (the owner):
+- Your thread is docs/study/threads/S14.md. Append entries only, headed
+  "### <date> <time> devin (<this session's link or id>)", and commit them on your branch.
+- Q: is a question; say whether it blocks you. If it does not, keep going and record what you chose
+  in an ASSUMED: entry. Post every Q: as a PR comment too; Claude reads PR comments first.
+- INTERFACE: is a change you need in a shared file; wait for Claude's OK.
+- Claude reviews on the PR. Answer and fix in the same PR. Never merge your own PR.
+- When done, post a DONE: entry: what you built; the output of npm run build, npm run test:unit and
+  npm run test:study (pass and fail counts); the iPad checks your brief lists; anything you assumed.
+  Then mark the PR ready for review.
+
+Never push to main or study-mode. Never edit someone else's thread entries. Never commit tokens or
+personal data.
 ```
 
 ## How the conversation works
@@ -81,4 +192,4 @@ tokens or personal data.
 
 ## When PRs come in
 
-Tell Claude "review the study PRs". Claude builds each one, runs the tests, reads the diff against SPEC and FORMAT, comments, and merges into `study-mode` when it passes. After S2 to S9 are in, Claude cuts the beta (S11) for your iPad.
+Tell Claude "review the study PRs". Claude builds each one, runs the gate (`npm run test:study`), reads the diff against SPEC and FORMAT, comments, and merges into `study-mode` when it passes: S12 before S13. When S12 to S15 are in, Claude asks you before releasing 0.15.1 (S16).

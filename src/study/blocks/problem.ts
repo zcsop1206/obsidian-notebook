@@ -15,6 +15,7 @@ import type { NewEvent, StudyContext } from '../context';
 import type { BankEntry, ContentIndex, Problem, ProofStep, StudyDoc, StudyEvent } from '../types';
 import type { BlockEnv, BlockHandle, BlockMount, InkSurface } from '../view/host';
 import { MODEL_LABEL, button, ensureStyles, fmtDur, fogBars, lastEvent, loadLocal, safe, saveLocal, timeOf, twoTap } from './drill';
+import { mountFigureInk } from './figure-ink';
 
 export const PROBLEM_VIEW = 'notebook-study-problem';
 
@@ -406,6 +407,20 @@ const WORK_H = 480;
 const WORK_STEP = 400;
 const WORK_MAX = 2800;
 
+/**
+ * The work paper's height that shows every stroke given, never below `h`: the lowest point's
+ * paper y plus one WORK_STEP, rounded up to a multiple of WORK_STEP, capped at WORK_MAX. The doc's
+ * block and the standalone view share the work ink, so work written lower in one shows in the other.
+ * With `onlyBelow`, it grows only when a stroke lies below the paper (an adopted copy or a sync), so
+ * writing near the bottom never moves the paper; More paper stays the way to get more.
+ */
+export function workPaperFit(h: number, strokes: readonly { p: readonly (readonly number[])[] }[], onlyBelow = false): number {
+  let low = -Infinity;
+  for (const s of strokes) for (const q of s.p) if (q[1] > low) low = q[1];
+  if (!isFinite(low) || (onlyBelow && low <= h)) return h;
+  return Math.max(h, Math.min(WORK_MAX, Math.ceil((low + WORK_STEP) / WORK_STEP) * WORK_STEP));
+}
+
 export function mountSession(host: HTMLElement, env: BlockEnv, item: ProblemItem, o: SessionOpts = {}): SessionHandle {
   ensureStyles();
   const ctx = env.ctx;
@@ -420,6 +435,7 @@ export function mountSession(host: HTMLElement, env: BlockEnv, item: ProblemItem
   let logging = false;
   let workH = WORK_H;
   let solDone = '';
+  let figInk: (() => void) | null = null;
   const content = () => ctx.content();
   const save = () => { if (!dead) saveLocal(LKEY(item.id), S); };
   const hiddenNow = () => (S.phase === 'call' ? o.hidden === true : S.hidden);
@@ -481,6 +497,15 @@ export function mountSession(host: HTMLElement, env: BlockEnv, item: ProblemItem
     meta: () => ({ e: S.gaveUp || S.phase === 'settled' || S.phase === 'done' ? 1 : 0 }),
     color: st => ((st.e || 0) > 0 ? '--color-purple' : '--text-normal'),
   });
+  /** Grows the work paper to fit its lowest stroke (workPaperFit); later changes only when one lies below it. True when it grew. */
+  const fitWork = (onlyBelow = false): boolean => {
+    const h = workPaperFit(workH, workInk.strokes(), onlyBelow);
+    if (h === workH) return false;
+    workH = h;
+    workInk.layout();
+    return true;
+  };
+  fitWork();
   const workRow = workSec.createDiv({ cls: 'nb-sb-row' });
   button(workRow, 'Undo', 'wundo');
   const moreB = button(workRow, 'More paper', 'more');
@@ -545,7 +570,8 @@ export function mountSession(host: HTMLElement, env: BlockEnv, item: ProblemItem
       body.createEl('p', { cls: 'nb-sb-hint', text: 'The statement is the theorem just above: prove it, after the call.' });
     } else {
       const st = body.createDiv({ cls: 'nb-sb-stmt' });
-      void env.render(item.statement || '(No statement.)', st).then(() => env.relayout());
+      // Destroyed while it rendered: mount no figure ink, which nothing would destroy.
+      void env.render(item.statement || '(No statement.)', st).then(() => { if (dead) return; figInk?.(); figInk = mountFigureInk(st, env, item.id); env.relayout(); });
       if (!o.inline) body.createEl('p', { cls: 'nb-sb-by', text: MODEL_LABEL });
     }
   }
@@ -851,6 +877,8 @@ export function mountSession(host: HTMLElement, env: BlockEnv, item: ProblemItem
   }
   root.addEventListener('click', onClick);
   const offCall = callInk.onChange(() => { if (!dead) renderCall(); });
+  // Work strokes that arrive later below the paper (an adopted copy, a sync) grow it; writing does not.
+  const offWork = workInk.onChange(() => { if (!dead && fitWork(true)) render(); });
   const offEvents = ctx.onChange(what => {
     if (dead || what !== 'events') return;
     // A settle from another device (after a sync) moves this card on.
@@ -871,8 +899,11 @@ export function mountSession(host: HTMLElement, env: BlockEnv, item: ProblemItem
       if (timer) window.clearInterval(timer);
       if (armTimer) window.clearTimeout(armTimer);
       giveTap?.destroy();
+      offWork();
       offCall();
       offEvents();
+      figInk?.();
+      figInk = null;
       root.removeEventListener('click', onClick);
       callInk.destroy();
       workInk.destroy();

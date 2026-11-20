@@ -10,7 +10,7 @@ import {
   lastOwnIndex, nearestAnchor, newStrokeId, orphanGroups, pageBand, parseInkFile, placeStroke, reanchorCounts, serializeInkFile,
   strokeState, unionStrokes, type AnchorTop, type InkPoint,
 } from '../../src/study/ink/model';
-import { DocInkStore, type InkAdapter } from '../../src/study/ink/store';
+import { DocInkStore, unreadablePath, type InkAdapter } from '../../src/study/ink/store';
 
 const V1_TEXT = readFileSync('test/fixtures/study/basics/fx-units.md', 'utf8').replace(/\r\n/g, '\n');
 
@@ -279,4 +279,112 @@ test('ink store: creates the ink folder, and writes nothing when nothing changed
   assert.deepEqual(ad.writes, ['notes/study/ink/fx-div.desktop.json']);
   await st.flush();
   assert.equal(ad.writes.length, 1, 'no second write without a change');
+});
+
+/** Runs `fn` with console.error silenced (the store logs the reads it could not make). */
+async function quietly(fn: () => Promise<void>): Promise<void> {
+  const errors = console.error;
+  console.error = () => {};
+  try { await fn(); } finally { console.error = errors; }
+}
+
+test('ink store: an own file whose read failed at load is read again before the first write and merged, never written over', async () => {
+  const files = new Map<string, string>();
+  const own = 'study/ink/fx-units.ipad.json';
+  files.set(own, serializeInkFile('fx-units', [stroke('s-old', 50, { t0: 1 })], ['laptop:s-x'], { 'laptop:s-y': 'disk', 'laptop:s-z': 'z' }));
+  const ad = fakeAdapter(files, new Set(['study', 'study/ink']));
+  const read = ad.read.bind(ad);
+  let fails = 1;
+  ad.read = async p => { if (p === own && fails > 0) { fails--; throw new Error('EIO'); } return read(p); };
+  await quietly(async () => {
+    const st = new DocInkStore(ad, 'study', 'ipad', 'fx-units');
+    await st.ready;
+    assert.deepEqual(st.strokes(), [], 'the read failed: nothing shown');
+    const told: string[] = [];
+    st.onChange(w => { told.push(w); });
+    assert.equal(st.keep(['laptop:s-y'], 'mine', 3), 1);
+    st.add(stroke('s-new', 100, { t0: 2 }));
+    await st.flush();
+    const f = parseInkFile(files.get(own)!, 'fx-units');
+    assert.deepEqual(f.strokes.map(s => s.id), ['s-old', 's-new'], 'the file\'s strokes merged in, not written over');
+    assert.deepEqual(f.hide, ['laptop:s-x'], 'its hides kept');
+    assert.deepEqual(f.keep, { 'laptop:s-y': 'mine', 'laptop:s-z': 'z' }, 'its keeps kept, a keep made here wins');
+    assert.deepEqual(st.strokes().map(s => `${s.dev}:${s.id}`), ['ipad:s-old', 'ipad:s-new'], 'the merged strokes show');
+    assert.ok(told.includes('sync'), 'its surfaces are told');
+    assert.equal(st.pending(), false);
+  });
+});
+
+test('ink store: while its own file still cannot be read, nothing is written and the change waits', async () => {
+  const files = new Map<string, string>();
+  const own = 'study/ink/fx-units.ipad.json';
+  const before = serializeInkFile('fx-units', [stroke('s-old', 50, { t0: 1 })]);
+  files.set(own, before);
+  const ad = fakeAdapter(files, new Set(['study', 'study/ink']));
+  const read = ad.read.bind(ad);
+  let failing = true;
+  ad.read = async p => { if (p === own && failing) throw new Error('EIO'); return read(p); };
+  await quietly(async () => {
+    const st = new DocInkStore(ad, 'study', 'ipad', 'fx-units');
+    await st.ready;
+    st.add(stroke('s-new', 100, { t0: 2 }));
+    await st.flush();
+    assert.deepEqual(ad.writes, [], 'the read throws again: not written');
+    assert.equal(files.get(own), before);
+    assert.equal(st.pending(), true, 'the change waits, as after a failed write');
+    failing = false;
+    await st.flush();
+    assert.deepEqual(parseInkFile(files.get(own)!, 'fx-units').strokes.map(s => s.id), ['s-old', 's-new'], 'once readable: merged, then written');
+    assert.equal(st.pending(), false);
+  });
+});
+
+test('ink store: after a failed listing, the first write reads its own file and merges it', async () => {
+  const files = new Map<string, string>();
+  const own = 'study/ink/fx-div.desktop.json';
+  files.set(own, serializeInkFile('fx-div', [stroke('s-old', 50, { t0: 1 })]));
+  const ad = fakeAdapter(files, new Set(['study', 'study/ink']));
+  ad.list = async () => { throw new Error('EIO'); };
+  await quietly(async () => {
+    const st = new DocInkStore(ad, 'study', 'desktop', 'fx-div');
+    await st.ready;
+    assert.deepEqual(st.strokes(), []);
+    st.add(stroke('s-new', 100, { t0: 2 }));
+    await st.flush();
+    assert.deepEqual(parseInkFile(files.get(own)!, 'fx-div').strokes.map(s => s.id), ['s-old', 's-new']);
+    assert.deepEqual(st.strokes().map(s => s.id), ['s-old', 's-new']);
+  });
+});
+
+test('ink store: an own file that is not JSON is saved beside it before the first write replaces it', async () => {
+  const files = new Map<string, string>();
+  const own = 'study/ink/fx-units.ipad.json';
+  const broken = '{"v": 1, "doc": "fx-units", "strokes": [\n  {"id": "s-old", "p": [[1, 2, 0.5, 0], [3, 4';
+  files.set(own, broken);
+  const ad = fakeAdapter(files, new Set(['study', 'study/ink']));
+  const st = new DocInkStore(ad, 'study', 'ipad', 'fx-units');
+  await st.ready;
+  st.add(stroke('s-new', 100, { t0: 2 }));
+  await st.flush();
+  const copies = () => [...files.keys()].filter(p => p.includes('.unreadable-'));
+  assert.equal(copies().length, 1);
+  assert.match(copies()[0], /^study\/ink\/fx-units\.ipad\.json\.unreadable-\d{8}-\d{6}\.txt$/, 'beside the file, never .json');
+  assert.equal(files.get(copies()[0]), broken, 'its text as it was');
+  assert.deepEqual(ad.writes, [copies()[0], own], 'the copy is saved before the file is written');
+  assert.deepEqual(parseInkFile(files.get(own)!, 'fx-units').strokes.map(s => s.id), ['s-new']);
+  st.add(stroke('s-2', 200, { t0: 3 }));
+  await st.flush();
+  assert.equal(copies().length, 1, 'saved once');
+  const again = new DocInkStore(ad, 'study', 'ipad', 'fx-units');
+  await again.ready;
+  assert.deepEqual(again.strokes().map(s => s.id), ['s-new', 's-2'], 'the copy is not read as ink');
+  // A blank file holds nothing to lose: written over directly.
+  files.set('study/ink/fx-div.ipad.json', '  \n');
+  const blank = new DocInkStore(ad, 'study', 'ipad', 'fx-div');
+  await blank.ready;
+  blank.add(stroke('s-b', 10));
+  await blank.flush();
+  assert.equal(copies().length, 1, 'no copy of a blank file');
+  assert.deepEqual(parseInkFile(files.get('study/ink/fx-div.ipad.json')!, 'fx-div').strokes.map(s => s.id), ['s-b']);
+  assert.equal(unreadablePath('study/ink/a.ipad.json', new Date(2026, 10, 18, 9, 5, 7)), 'study/ink/a.ipad.json.unreadable-20261118-090507.txt');
 });

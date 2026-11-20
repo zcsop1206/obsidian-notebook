@@ -56,6 +56,7 @@ test('search: titles and passages, accents and case ignored', () => {
 test('search: never proofs, solutions or kata code the block owns', () => {
   assert.deepEqual(search(idx, 'minimality'), [], 'proof text');
   assert.deepEqual(search(idx, '2401'), [], 'solution text');
+  assert.deepEqual(search(idx, '2, 4, 1'), [], "an example's solution, though the page shows it folded");
   assert.deepEqual(search(idx, 'endmodule'), [], 'kata skeleton');
   assert.deepEqual(search(idx, 'comment line'), [], 'kata vectors');
 });
@@ -85,13 +86,51 @@ test('anchored list items map to their top-level item', () => {
   assert.deepEqual([...itemIndexes(cues)], [['cue-gcd', 0], ['cue-broken', 1]]);
 });
 
-test('solutions and kata-owned code get no element', () => {
+test('a solution its block shows and kata-owned code get no element; an example\'s solution does', () => {
   const units = doc('fx-units');
   const sol = units.passages.filter(p => p.callout?.type === 'solution');
-  assert.equal(sol.length, 2);
-  assert.ok(sol.every(p => isUnrendered(units, p)));
+  assert.deepEqual(sol.map(p => [p.block?.id, isUnrendered(units, p)]), [['ex-order', false], ['inv-fx-last-digit', true]]);
   const k = doc('k-fx');
   assert.deepEqual(k.passages.filter(p => isUnrendered(k, p)).map(p => p.lang), ['skeleton', 'vectors']);
+});
+
+// An invented basic for the solution rules, each answer a word found nowhere else: a worked
+// example's solution, one that belongs to nothing (right after another solution), and the ones a
+// derive, a recall card and a bank problem show themselves.
+const WORKED = [
+  '---', 'study: basic', 'id: fx-worked', 'title: Worked answers (fixture)', 'area: nt', 'needs: []', 'build: 1', '---', '',
+  "> Written by a model for Adit. Not Adit's words.", '',
+  '## Halves', '',
+  '> [!example] Half of six', '> Halve $6$.', '^ex-half', '',
+  '> [!solution]- Solution', '> Three kumquats.', '',
+  '> [!solution]- Solution', '> A stray persimmon.', '',
+  '## Drills', '',
+  '> [!derive] Show that half of an even number is whole.', '^d-half', '',
+  '> [!solution]- Solution', '> Write it as twice a tamarind.', '',
+  '> [!recall] How many halves make a whole?', '^r-halves', '',
+  '> [!solution]- Answer', '> Two loquats.', '',
+  '> [!problem] putnam-2019-a1', '^putnam-2019-a1', '',
+  '> [!solution]- Solution', '> A mangosteen.', '',
+].join('\n');
+
+test('solutions by what they belong to: the page, peeks and search', () => {
+  const idx2 = buildIndex([...allFiles(), { path: 'study/basics/fx-worked.md', text: WORKED }]);
+  const d = idx2.docs.get('fx-worked')!;
+  const word = (p: { markdown: string }) => /kumquat|persimmon|tamarind|loquat|mangosteen/.exec(p.markdown)?.[0];
+  const sols = d.passages.filter(p => p.callout?.type === 'solution');
+  assert.deepEqual(sols.map(p => [word(p), p.block?.id ?? null, isUnrendered(d, p)]), [
+    ['kumquat', 'ex-half', false],
+    ['persimmon', null, false],
+    ['tamarind', 'd-half', true],
+    ['loquat', 'r-halves', true],
+    ['mangosteen', 'putnam-2019-a1', true],
+  ]);
+  // A heading's section holds the example and both solutions: the peek leaves every solution out.
+  const sec = peekParts(d, 'h-halves');
+  assert.deepEqual(sec.map(p => p.anchor), ['h-halves', 'ex-half']);
+  assert.ok(sec.every(p => !p.placeholder && !word({ markdown: p.markdown ?? '' })));
+  for (const p of sols) assert.deepEqual(peekParts(d, p.anchor), [], `a peek of the solution itself (${word(p)})`);
+  for (const w of ['kumquat', 'persimmon', 'tamarind', 'loquat', 'mangosteen']) assert.deepEqual(search(idx2, w), [], w);
 });
 
 test('peek: the passage, a section for a heading, never a proof or a solution', () => {

@@ -5,13 +5,15 @@
 # proofs or solutions), every passage rendered with its data-a, block mounts, finger taps that
 # follow and flash, Back with scroll restore, a 450 ms hold that peeks (never a proof), Pencil
 # events over a link that do not navigate, tabs, the header buttons, the protocol handler, "Open
-# as study doc", re-render on a content change, and the layout at 1024x768 and 390x844.
+# as study doc", re-render on a content change, page ink, a worked example's folded solution
+# (opens on a finger tap, ink and marks follow), and the layout at 1024x768 and 390x844.
 # A second part (part_marks_panels) runs S5's marks and S8's Today and Map against the mock
 # StudyContext and mock engine in test/out/study-fixture.js (built by test/build.mjs).
 # Port: NB_STUDY_TEST_PORT, else NB_TEST_PORT_BASE + 6 (8771). Screenshots land in test/out/.
 # Exits non-zero on a failure.
 import json, os, subprocess, sys, time
 from playwright.sync_api import sync_playwright
+import serve  # test/serve.py: the static server, refusing a port another run holds
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -117,15 +119,36 @@ SETUP_JS = """(files) => {
     el.dispatchEvent(new PointerEvent('pointerup', { ...base, buttons: 0, clientX: x + (opts.move || 0), clientY: y + (opts.move || 0) }));
     if (!opts.noClick) el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, composed: true, clientX: x, clientY: y, detail: 1 }));
   };
-  // The passages the view must render for a doc: all but solutions and kata-owned code.
+  // The passages the view must render for a doc: all but the solutions whose item (the passage
+  // their block names) is a block, which shows them itself, and kata-owned code. An example is no
+  // block, so its solution is on the page.
   window.expectedAnchors = id => {
     const d = plugin.study.content().docs.get(id);
-    return d.passages.filter(p => !(p.block && p.block.type === 'solution') && !(p.callout && p.callout.type === 'solution')
+    const itemIsBlock = a => d.passages.some(q => q.anchor === a && !!q.block);
+    return d.passages.filter(p => !(p.block && p.block.type === 'solution' && itemIsBlock(p.block.id))
       && !(d.kind === 'kata' && p.kind === 'code' && (p.lang === 'skeleton' || p.lang === 'vectors'))).map(p => p.anchor);
   };
   window.renderedAnchors = () => [...document.querySelectorAll('.nb-study-doc .sr-passage[data-a]')].map(e => e.getAttribute('data-a'));
   // Where an element sits in the view: its top relative to the scroller's top, in screen px.
   window.topInView = el => el.getBoundingClientRect().top - scroller().getBoundingClientRect().top;
+  // An element's top in paper px from the top of the doc on screen: the frame of page ink and the margin.
+  window.paperTop = el => { const dr = document.querySelector('.nb-study-doc').getBoundingClientRect(); return (el.getBoundingClientRect().top - dr.top) / (dr.width / 800); };
+  // Margin dots that do not sit by their passage. A dot sits 2 px above its passage's top, unless
+  // the dot above would overlap it: then 27 px below that one (marks.ts, placeDots).
+  window.dotsAstray = () => {
+    const rows = [...document.querySelectorAll('.nb-study-doc .nb-study-margin .nb-st-dot')].map(d => {
+      const el = studyEl(`[data-a="${d.dataset.a}"]`);
+      return { a: d.dataset.a, dot: parseFloat(d.style.top), top: el ? paperTop(el) : null };
+    }).sort((x, y) => x.dot - y.dot);
+    const out = [];
+    let prev = -Infinity;
+    for (const r of rows) {
+      const ok = r.top !== null && (Math.abs(r.dot - (r.top - 2)) <= 1 || (r.dot > r.top - 2 && Math.abs(r.dot - (prev + 27)) <= 1));
+      if (!ok) out.push(`${r.a}: dot ${r.dot.toFixed(1)}, passage ${r.top === null ? 'gone' : r.top.toFixed(1)}`);
+      prev = r.dot;
+    }
+    return out;
+  };
   // A pen stroke from client points (coalesced events in groups of 3, WebKit-style repeats), as
   // in test/run_study_ink_test.py; the ink layer listens for pointerdown on the doc stack.
   window.penStroke = (target, pts, type = 'pen', id = 7) => {
@@ -230,7 +253,7 @@ def section_library(page):
       ribbon: plugin.ribbon.map(r => r.title),
     })""")
     rows = info['rows']
-    print(f'  library: {len(rows)} rows in {lib_ms:.0f} ms (open to listed, including the first index load)')
+    print(f'  library: {len(rows)} rows in {lib_ms:.0f} ms (open to listed; the content index loads when the plugin does)')
     for d in ['fx-topic', 'fx-long', 'fx-units', 'fx-div', 'k-fx', 'fxbank']:
         check(f'library: lists {d}', d in rows)
     check('library: 120 generated basics listed', sum(1 for r in rows if r.startswith('g-')) == 120)
@@ -264,7 +287,7 @@ def section_render(page):
     check('render: a library row opens the doc', ok)
     want = page.evaluate("() => expectedAnchors('fx-units')")
     got = page.evaluate("() => renderedAnchors()")
-    check('render: every passage in order with its data-a (solutions left out)', got == want, f'got {got} want {want}')
+    check('render: every passage in order with its data-a (the solutions blocks show left out)', got == want, f'got {got} want {want}')
     info = page.evaluate("""() => ({
       item: !!studyEl('li.sr-item[data-a="cue-exponent"]'),
       itemInList: !!studyEl('.sr-passage li[data-a="cue-exponent"]'),
@@ -606,6 +629,147 @@ def section_ink(page):
     check('ink: after reopening the view the stroke is drawn under its passage', ok and px > 50, f'reopen {ok}, pixels {px}')
 
 
+def section_example_solution(page):
+    # S15: a worked example's solution (fx-units #ex-order) is on the page as the folded callout
+    # FORMAT puts after it, closed until a finger tap on its title opens it. It takes a margin dot
+    # and page ink like any passage. Opening and closing it lay the page out again: a stroke below
+    # it stays at its own passage and every margin dot by its passage. A problem's solution stays
+    # off the page (its block shows it after a settle); peeks and search never show an answer.
+    # (Values reach the polled waits through window: this Playwright drops array args on a poll.)
+    open_doc(page, 'fx-units')
+    page.wait_for_timeout(150)
+    ids = page.evaluate("""() => {
+      const d = plugin.study.content().docs.get('fx-units');
+      const at = of => d.passages.findIndex(p => p.block && p.block.type === 'solution' && p.block.id === of);
+      const i = at('ex-order'), k = at('inv-fx-last-digit');
+      return { sol: i >= 0 ? d.passages[i].anchor : null, below: i >= 0 && d.passages[i + 1] ? d.passages[i + 1].anchor : null,
+               pb: k >= 0 ? d.passages[k].anchor : null };
+    }""")
+    check('example solution (setup): the parser ties a solution to ex-order and one to inv-fx-last-digit', bool(ids['sol'] and ids['below'] and ids['pb']), json.dumps(ids))
+    page.evaluate("""ids => {
+      window.exIds = ids;
+      window.exSol = () => studyEl(`.sr-passage[data-a="${ids.sol}"]`);
+      window.exTitle = () => { const el = exSol(); return el ? el.querySelector('.callout-title') : null; };
+      window.exBelow = () => studyEl(`.sr-passage[data-a="${ids.below}"]`);
+      // Ink pixels from 4 to 28 paper px under `top` (el's top now by default), across where strokeOver(el, ...) writes.
+      window.inkBand = (el, top) => {
+        if (!el) return -1;
+        const dr = document.querySelector('.nb-study-doc').getBoundingClientRect(), r = el.getBoundingClientRect(), s = dr.width / 800;
+        const x = (r.left - dr.left) / s, y = top === undefined ? (r.top - dr.top) / s : top;
+        return inkPx(x + 40, y + 4, x + 260, y + 28);
+      };
+      // Ink pixels over the solution's title (-1 when it is not on the page).
+      window.titleInk = () => { const t = exTitle(); return t ? inkBand(t, paperTop(t) - 4) : -1; };
+      // A finger tap on the solution's title (none when the solution is not on the page).
+      window.tapTitle = () => { const t = exTitle(); if (t) press(t, 'touch', 60); return !!t; };
+      window.dotAnchors = () => [...document.querySelectorAll('.nb-study-doc .nb-study-margin .nb-st-dot')].map(d => d.dataset.a);
+      window.solState = () => {
+        const el = exSol(), c = el && el.querySelector('.callout[data-callout="solution"]');
+        const content = c && c.querySelector(':scope > .callout-content');
+        return { folded: !!c && c.classList.contains('is-collapsed'),
+                 hidden: !!content && getComputedStyle(content).display === 'none' && content.getClientRects().length === 0,
+                 seen: el ? el.innerText : '' };
+      };
+    }""", ids)
+
+    # On load: on the page right after its example, folded, its answer in the DOM but not shown.
+    r = page.evaluate("""() => {
+      const el = exSol();
+      if (!el) return { on: false };
+      const order = renderedAnchors(), c = el.querySelector('.callout[data-callout="solution"]');
+      return { on: true, next: order.indexOf(el.dataset.a) === order.indexOf('ex-order') + 1, block: el.classList.contains('sr-block'),
+               title: exTitle() ? exTitle().textContent.trim() : null, titleShown: !!exTitle() && exTitle().getClientRects().length > 0,
+               holds: !!c && c.textContent.includes('the order is'), ...solState() };
+    }""")
+    check('example solution: on the page, right after its example, as a callout (not a block)', r['on'] and r.get('next') and not r.get('block'), json.dumps(r))
+    check('example solution: folded on load, its title shown and its answer hidden',
+          r['on'] and r['folded'] and r['hidden'] and r['holds'] and r['title'] == 'Solution' and r['titleShown'] and 'the order is' not in r['seen'], json.dumps(r))
+
+    # Marks take it as any passage: a margin dot by it that opens the marks menu. Page ink does not:
+    # it starts folded on every load, so ink on it opened would land on the passages below. A pen
+    # stroke over its title writes nothing; a stroke over the passage below is filed there.
+    r = page.evaluate("""async () => {
+      const dot = document.querySelector(`.nb-study-margin .nb-st-dot[data-a="${exIds.sol}"]`);
+      if (!dot) return { dot: false };
+      dot.click(); await sleep(30);
+      const menu = document.querySelector('.nb-st-menu');
+      const verbs = menu ? [...menu.querySelectorAll('button')].map(b => b.textContent) : [];
+      dot.click(); await sleep(30);
+      return { dot: true, verbs, closed: !document.querySelector('.nb-st-menu'), astray: dotsAstray() };
+    }""")
+    check('example solution: a margin dot sits by it and opens the marks menu',
+          r['dot'] and r.get('verbs', [])[:3] == ['lost', 'easy', 'forgot'] and r.get('closed') and not r.get('astray'), json.dumps(r))
+    page.evaluate("() => { const t = exTitle(); if (t) strokeOver(t, t.getBoundingClientRect().height / 2); strokeOver(exBelow(), 14); }")
+    page.wait_for_timeout(1300)
+    saved = page.evaluate("() => fileJson('study/ink/fx-units.test-pad.json')")
+    last = [(s.get('at') or {}).get('a') for s in (saved or {}).get('strokes', [])[-2:]]
+    all_at = [(s.get('at') or {}).get('a') for s in (saved or {}).get('strokes', [])]
+    check('example solution: a pen stroke over its title writes no ink; one below is filed under the passage below',
+          ids['sol'] not in all_at and len(last) >= 1 and last[-1] in (ids['below'], 'cue-exponent'), json.dumps(last))
+    s0 = page.evaluate("""() => {
+      window.exBelow0 = paperTop(exBelow());
+      return { below: exBelow0, ink: inkBand(exBelow()), title: titleInk(), dots: dotAnchors(), ...solState() };
+    }""")
+    check('example solution (setup): the stroke below is drawn where written, nothing over the title, and it is still folded',
+          s0['ink'] > 50 and s0['title'] == 0 and s0['folded'], json.dumps({k: s0[k] for k in ('ink', 'title', 'folded')}))
+
+    # A finger tap on the title opens it; the page lays out again (the view's ResizeObserver).
+    page.evaluate("() => tapTitle()")
+    moved = wait_js(page, "() => paperTop(exBelow()) - exBelow0 > 10", 3000)
+    st = page.evaluate("() => solState()")
+    check('example solution: a finger tap on its title opens it', moved and not st['folded'] and not st['hidden'] and 'the order is' in st['seen'], json.dumps(st))
+    settled = wait_js(page, "() => dotsAstray().length === 0", 3000)
+    s1 = page.evaluate("() => ({ below: paperTop(exBelow()), ink: inkBand(exBelow()), old: inkBand(exBelow(), exBelow0), title: titleInk(), dots: dotAnchors(), astray: dotsAstray() })")
+    shift = s1['below'] - s0['below']
+    print(f"  example solution: opening it moved the passage below by {shift:.1f} paper px")
+    check('example solution: once open, the stroke below it is drawn at its own passage, not where the passage was',
+          shift > 28 and s1['ink'] > 50 and s1['old'] == 0, json.dumps({'shift': shift, 'ink': s1['ink'], 'old': s1['old']}))
+    page.evaluate("""() => { const c = exSol().querySelector('.callout-content'); if (c) strokeOver(c, 20); }""")
+    page.wait_for_timeout(1300)
+    saved = page.evaluate("() => fileJson('study/ink/fx-units.test-pad.json')")
+    all_at = [(s.get('at') or {}).get('a') for s in (saved or {}).get('strokes', [])]
+    check('example solution: once open, a pen stroke over its answer writes no ink',
+          ids['sol'] not in all_at and s1['title'] == 0, json.dumps({'title': s1['title'], 'n': len(all_at)}))
+    check('example solution: once open, every margin dot is still there and sits by its passage',
+          settled and not s1['astray'] and sorted(s1['dots']) == sorted(s0['dots']) and ids['sol'] in s1['dots'], json.dumps({'astray': s1['astray'][:6], 'dots': len(s1['dots'])}))
+
+    # Another tap closes it, and the page goes back.
+    page.evaluate("() => tapTitle()")
+    back = wait_js(page, "() => Math.abs(paperTop(exBelow()) - exBelow0) <= 1", 3000)
+    settled = wait_js(page, "() => dotsAstray().length === 0", 3000)
+    s2 = page.evaluate("() => ({ ink: inkBand(exBelow()), dots: dotAnchors(), astray: dotsAstray(), ...solState() })")
+    check('example solution: a second tap folds it again; the ink and the dots go back with the page',
+          back and settled and s2['folded'] and s2['hidden'] and s2['ink'] > 50 and not s2['astray'] and sorted(s2['dots']) == sorted(s0['dots']),
+          json.dumps({'back': back, 'folded': s2['folded'], 'ink': s2['ink'], 'astray': s2['astray'][:6]}))
+
+    # A problem's solution stays off the page: the problem block shows it after a settle.
+    r = page.evaluate("""() => ({
+      sol: !!studyEl(`.sr-passage[data-a="${exIds.pb}"]`),
+      block: !!studyEl('.sr-passage.sr-block[data-block="problem"][data-a="inv-fx-last-digit"]'),
+      text: document.querySelector('.nb-study-doc').textContent.includes('2401'),
+    })""")
+    check("example solution: a problem's solution still gets no element (its block shows it)", not r['sol'] and r['block'] and not r['text'], json.dumps(r))
+
+    # A peek of the example, or of its solution's own anchor, never shows the answer; nor does search.
+    r = page.evaluate("""async () => {
+      await V().openPeek({ doc: 'fx-units', anchor: 'ex-order' });
+      const ex = document.querySelector('.nb-study-peek').textContent;
+      await V().openPeek({ doc: 'fx-units', anchor: exIds.sol });
+      const own = document.querySelector('.nb-study-peek .nb-study-peek-body').textContent;
+      V().closePeek();
+      return { ex, own };
+    }""")
+    check('example solution: a peek of the example shows it without its solution, and a peek of the solution shows nothing',
+          'Find the order of' in r['ex'] and 'the order is' not in r['ex'] and '2, 4, 1' not in r['ex'] and r['own'].strip() == '', json.dumps(r))
+    page.click('.nb-study-hdr [data-act="library"]')
+    page.fill('.nb-study-search', '2, 4, 1')
+    page.wait_for_timeout(300)
+    n = page.evaluate("() => document.querySelectorAll('.nb-study-hit').length")
+    page.fill('.nb-study-search', '')
+    page.click('.nb-study-lib-close')
+    check('example solution: library search never finds its answer', n == 0, n)
+
+
 def section_marks(page):
     # Marks on the real plugin (S5 over S2's engine): a dot per markable passage, "lost" asks the
     # engine's triage, logs the mark to this device's log, the engine folds it, the scaffold opens.
@@ -640,6 +804,16 @@ def section_marks(page):
     check('marks: a tap on the marked dot clears it: the scaffold goes and the engine drops the mark', not r['sc'] and not r['marks'], r)
 
 
+def section_dots(page):
+    # Margin dots sit by their passages all the way down a doc: marks.ts measures tops at the doc's
+    # scale (the margin's whole-px width), not at a scale read from each element's rounded height.
+    for d in ['fx-long', 'fx-units']:
+        open_doc(page, d)
+        ok = wait_js(page, "() => document.querySelectorAll('.nb-study-doc .nb-study-margin .nb-st-dot').length > 5 && dotsAstray().length === 0", 3000)
+        r = page.evaluate("() => ({ n: document.querySelectorAll('.nb-study-doc .nb-study-margin .nb-st-dot').length, astray: dotsAstray() })")
+        check(f'marks: every margin dot of {d} sits by its passage, down to the last', ok and r['n'] > 5 and not r['astray'], f"{r['n']} dots, astray {r['astray'][:5]}")
+
+
 def section_panels(page):
     # Today and Map on the real engine: the plan's picks come from engine.todayPlan, a pick opens
     # the standalone problem view (ctx.ui.openProblem), and every ctx.ui hook is filled.
@@ -661,11 +835,36 @@ def section_panels(page):
       const it = [...l.view.contentEl.querySelectorAll('.nb-sp-item')].find(e => /problem/.test(e.textContent));
       if (!it) return { tapped: false };
       (it.querySelector('button, a, .nb-sp-t') || it).click();
-      await sleep(300);
-      const pv = app.workspace.getLeavesOfType('notebook-study-problem')[0];
-      return { tapped: true, problem: !!pv, title: pv ? pv.view.getDisplayText() : '', body: pv ? pv.view.contentEl.textContent.slice(0, 200) : '' };
+      // The view mounts its card after the old-ink copy (S12), so it comes a little later.
+      let pv = null, card = null;
+      for (let i = 0; i < 100 && !card; i++) {
+        await sleep(30);
+        pv = app.workspace.getLeavesOfType('notebook-study-problem')[0];
+        card = pv ? pv.view.contentEl.querySelector('.nb-sb-pb') : null;
+      }
+      return { tapped: true, problem: !!pv, card: !!card, cardId: card ? card.dataset.problem : '', id: pv ? pv.view.getState().id : '',
+               title: pv ? pv.view.getDisplayText() : '', body: pv ? pv.view.contentEl.textContent.slice(0, 200) : '' };
     }""")
-    check('panels: a Today problem pick opens the standalone problem view', r.get('problem') and 'not in the study folder' not in r.get('body', ''), r)
+    check('panels: a Today problem pick opens the standalone problem view',
+          r.get('problem') and r.get('card') and r.get('cardId') == r.get('id') != '' and 'not in the study folder' not in r.get('body', ''), r)
+    # S42: a day file for the engine's today reaches Today through the real content loader's onChange
+    # (no listener of Today's own), and leaves again when it is deleted.
+    r = page.evaluate("""async () => {
+      const l = app.workspace.getLeavesOfType('notebook-study-today')[0];
+      const path = 'study/plan/' + plugin.study.engine().today() + '.md';
+      const plan = () => l.view.contentEl.querySelector('.nb-sp-plan .nb-sp-row');
+      externalWrite(path, '---\\nstudy: plan\\n---\\n# Day · 30 min\\n\\n- [ ] 30 · nt · a row from the laptop\\n');
+      let shown = null;
+      for (let i = 0; i < 60 && !shown; i++) { await sleep(50); shown = plan(); }
+      const text = shown ? shown.textContent : '';
+      const docs = plugin.study.content().docs.size;
+      await app.vault.delete(app.vault.getFile(path));
+      let gone = false;
+      for (let i = 0; i < 60 && !gone; i++) { await sleep(50); gone = !plan(); }
+      return { text, gone, docs, after: plugin.study.content().docs.size };
+    }""")
+    check('panels: a day file synced in shows in Today through the content loader, and leaves when deleted',
+          'a row from the laptop' in r['text'] and r['gone'] and r['docs'] == r['after'], r)
     r = page.evaluate("""async () => {
       await plugin.study.ui.openMap();
       await sleep(200);
@@ -783,6 +982,257 @@ MARKS_PANELS_SETUP = """() => {
 }"""
 
 
+# S42: an invented day file for the fixture's date (2025-06-10), put in the mock vault at run time
+# (never in test/fixtures/study/, whose docs other checks count). Rows 0..4 sit on lines 6..10.
+DAY_FILE = '\n'.join([
+    '---',
+    'study: plan',
+    '---',
+    '# Tue 06-10 · 240 min',
+    'A planner line. Work from the top.',
+    '',
+    "- [ ] 30 · drills · Today's drills (one is 2 days overdue)",
+    '- [x] 45 · cs-core · first pass [[topic-dp]], part 1 of 2',
+    '- [ ] 20 · cs-core · reread [[b-logic|the logic basic]] then **the timed paper** · due 06-12',
+    '- [ ] 45 · private',
+    '- [ ] 15 · misc · look at [[not-a-doc]] only',
+    'hours 2025-07-01 60',
+    'answer fx-q a',
+    '',
+])
+DAY_PATH = 'study/plan/2025-06-10.md'
+
+
+def section_today_plan(page):
+    ev = page.evaluate
+    # The panel before any day file: its DOM is the baseline the end of this section compares to.
+    base = ev("""async () => { ctx.fire('events'); await sleep(30); return view.contentEl.innerHTML; }""")
+    r = ev("""async ([path, text]) => {
+      window.planPath = path;
+      window.dayRows = () => [...view.contentEl.querySelectorAll('.nb-sp-plan .nb-sp-row')];
+      window.dayRow = i => dayRows()[i];
+      externalWrite(path, text);
+      ctx.fire('content');
+      // Before the first read lands: the section already has its heading and a reading line.
+      const sec0 = view.contentEl.querySelector('.nb-sp-plan');
+      const early = sec0 ? { h: sec0.querySelector('h3') ? sec0.querySelector('h3').textContent : null,
+        wait: sec0.querySelector('.nb-sp-planwait') ? sec0.querySelector('.nb-sp-planwait').textContent : null,
+        height: sec0.getBoundingClientRect().height } : null;
+      await sleep(40);
+      const el = view.contentEl;
+      const plan = el.querySelector('.nb-sp-plan');
+      const kids = [...el.querySelector('.nb-sp').children].map(c => c.className.split(' ').pop() + ':' + (c.querySelector('h3, summary') ? c.querySelector('h3, summary').firstChild.textContent : ''));
+      return {
+        kids, early, waitLeft: el.querySelectorAll('.nb-sp-planwait').length,
+        count: plan && plan.querySelector('h3 .nb-sp-count').textContent,
+        rows: dayRows().map(x => ({ line: x.dataset.line, text: x.querySelector('.nb-sp-rowbody').textContent,
+          label: x.querySelector('.nb-sp-rowlabel').textContent, checked: x.querySelector('input[type=checkbox]').checked,
+          done: x.classList.contains('is-done'), button: x.querySelector('.nb-sp-rowbody').tagName === 'BUTTON',
+          strong: [...x.querySelectorAll('strong')].map(s => s.textContent) })),
+        planText: plan ? plan.textContent : '',
+        nested: el.querySelectorAll('button input, button label, button button').length,
+      };
+    }""", [DAY_PATH, DAY_FILE])
+    check('plan: the Plan section comes first, right after the date and deadline, then Drills, More, Settled, Requests',
+          r['kids'] == ['nb-sp-date:', 'nb-sp-next:', 'nb-sp-plan:Plan', 'nb-sp-sec:Drills', 'nb-sp-more:More (2)', 'nb-sp-sec:Settled today', 'nb-sp-sec:Requests'], r['kids'])
+    check('plan: before the first read lands, the section shows "Plan" and a reading line, so nothing below jumps unlabelled',
+          r['early'] is not None and r['early']['h'] == 'Plan' and r['early']['wait'] == 'Reading the day file…'
+          and r['early']['height'] > 30, r['early'])
+    check('plan: the reading line is gone once the rows are in', r['waitLeft'] == 0, r['waitLeft'])
+    check('plan: done and planned minutes, and the day minutes', r['count'] == '45 / 155 min done · day 240 min', r['count'])
+    rows = r['rows']
+    check('plan: one row per day-file row, in file order', [x['line'] for x in rows] == ['6', '7', '8', '9', '10'], [x['line'] for x in rows])
+    check('plan: a row shows minutes, deliverable and label',
+          rows and "Today's drills (one is 2 days overdue)" == rows[0]['label'] and '30 min' in rows[0]['text'] and 'drills' in rows[0]['text'], rows[:1])
+    check('plan: links show the doc title or the alias, bold shows bold, no markup shows',
+          len(rows) == 5 and rows[1]['label'] == 'first pass Dynamic programming, part 1 of 2'
+          and rows[2]['label'] == 'reread the logic basic then the timed paper · due 06-12' and rows[2]['strong'] == ['the timed paper']
+          and rows[4]['label'] == 'look at not-a-doc only'
+          and '[[' not in r['planText'] and '**' not in r['planText'], [x['label'] for x in rows])
+    check('plan: a private row shows "private" and its minutes only',
+          len(rows) == 5 and rows[3]['label'] == 'private' and rows[3]['text'] == 'private45 min', rows[3:4])
+    check('plan: ticked rows show ticked', [x['checked'] for x in rows] == [False, True, False, False, False] and [x['done'] for x in rows] == [False, True, False, False, False])
+    check('plan: no checkbox sits inside a button; only rows linking a study doc are buttons',
+          r['nested'] == 0 and [x['button'] for x in rows] == [False, True, True, False, False], (r['nested'], [x['button'] for x in rows]))
+
+    # taps: a link row opens its first study doc; the private row and a row linking no study doc open nothing
+    r = ev("""async () => {
+      const before = ctx.uiCalls.length;
+      dayRow(1).querySelector('.nb-sp-rowbody').click();
+      dayRow(2).querySelector('.nb-sp-rowbody').click();
+      dayRow(3).querySelector('.nb-sp-rowbody').click();
+      dayRow(4).querySelector('.nb-sp-rowbody').click();
+      dayRow(0).querySelector('.nb-sp-rowbody').click();
+      await sleep(20);
+      const btn = view.contentEl.querySelector('.nb-sp-plan .nb-sp-planfile');
+      window.openedLinks = [];
+      btn.click();
+      await sleep(20);
+      return { calls: ctx.uiCalls.slice(before), links: openedLinks.slice() };
+    }""")
+    check('plan: a link row opens its doc; the private row and a row without a study doc open nothing',
+          r['calls'] == [{'fn': 'openDoc', 'args': ['topic-dp']}, {'fn': 'openDoc', 'args': ['b-logic']}], r['calls'])
+    check('plan: "Open the day file" opens the file in a tab', r['links'] == [{'linktext': DAY_PATH, 'sourcePath': '', 'newLeaf': 'tab'}], r['links'])
+
+    # tick a checkbox: exactly that line changes in the vault file, the view shows it ticked, no doc opens
+    r = ev("""async () => {
+      const before = ctx.uiCalls.length;
+      const w0 = app.vault.writes.length;
+      const old = fs.get(planPath);
+      dayRow(0).querySelector('input[type=checkbox]').click();
+      await sleep(40);
+      const now = fs.get(planPath);
+      const a = old.split('\\n'), b = now.split('\\n');
+      const diff = a.map((l, i) => l === b[i] ? null : [i, b[i]]).filter(Boolean);
+      return { diff, lines: [a.length, b.length], writes: app.vault.writes.slice(w0), calls: ctx.uiCalls.length - before,
+        checked: dayRow(0).querySelector('input').checked, done: dayRow(0).classList.contains('is-done'),
+        count: view.contentEl.querySelector('.nb-sp-plan h3 .nb-sp-count').textContent, toasts: ctx.toasts.slice() };
+    }""")
+    check('plan: a tick changes exactly that line in the day file (one write through vault.process)',
+          r['diff'] == [[6, "- [x] 30 · drills · Today's drills (one is 2 days overdue)"]] and r['lines'][0] == r['lines'][1] and r['writes'] == [DAY_PATH], r)
+    check('plan: after the tick Today shows the row ticked and the new minutes; no doc opens',
+          r['checked'] and r['done'] and r['count'] == '75 / 155 min done · day 240 min' and r['calls'] == 0 and r['toasts'] == [], r)
+
+    # a tick on a row that links a study doc opens nothing either: untick row 1 (topic-dp), tick it back
+    r = ev("""async () => {
+      const before = ctx.uiCalls.length, l0 = openedLinks.length, w0 = app.vault.writes.length;
+      const old = fs.get(planPath);
+      dayRow(1).querySelector('input[type=checkbox]').click();
+      await sleep(40);
+      const mid = { checked: dayRow(1).querySelector('input').checked, done: dayRow(1).classList.contains('is-done') };
+      dayRow(1).querySelector('input[type=checkbox]').click();
+      await sleep(40);
+      return { mid, calls: ctx.uiCalls.slice(before), links: openedLinks.length - l0, writes: app.vault.writes.length - w0,
+        same: fs.get(planPath) === old, checked: dayRow(1).querySelector('input').checked, toasts: ctx.toasts.slice() };
+    }""")
+    check('plan: ticking a row that links a study doc never opens the doc (untick and tick back)',
+          r['calls'] == [] and r['links'] == 0 and r['writes'] == 2 and r['same'] and r['checked']
+          and r['mid'] == {'checked': False, 'done': False} and r['toasts'] == [], r)
+
+    # a tick on a line that changed under it (a sync Today has not seen) writes nothing and says so
+    r = ev("""async () => {
+      const synced = fs.get(planPath).replace('- [ ] 20 · cs-core · reread', '- [ ] 25 · cs-core · reread');
+      fs.set(planPath, synced);   // as a sync would, before Today re-rendered
+      const w0 = app.vault.writes.length, c0 = ctx.uiCalls.length;
+      dayRow(2).querySelector('input[type=checkbox]').click();
+      await sleep(40);
+      return { same: fs.get(planPath) === synced, writes: app.vault.writes.length - w0, toasts: ctx.toasts.slice(),
+        text: dayRow(2).textContent, checked: dayRow(2).querySelector('input').checked, calls: ctx.uiCalls.slice(c0) };
+    }""")
+    check('plan: a tick on a changed line writes nothing, opens nothing, and a toast says the plan changed',
+          r['same'] and r['writes'] == 0 and r['calls'] == [] and len(r['toasts']) == 1 and 'plan changed' in r['toasts'][0] and 'try again' in r['toasts'][0], r)
+    check('plan: after a refused tick Today shows the file as it is now', '25 min' in r['text'] and not r['checked'], r['text'])
+
+    # a narrow pane: ticking a row below the fold keeps the panel where it was, through the tick's
+    # render and the content loader's re-render that follows it
+    r = ev("""async () => {
+      const ce = view.contentEl, css = ce.style.cssText;
+      ce.style.cssText = 'height:220px;flex:none;min-height:0';
+      const sp = () => ce.querySelector('.nb-sp');
+      const out = { overflow: sp().scrollHeight > sp().clientHeight + 100 };
+      dayRow(4).scrollIntoView({ block: 'end' });
+      out.at = sp().scrollTop;
+      const top0 = dayRow(4).getBoundingClientRect().top;
+      dayRow(4).querySelector('input[type=checkbox]').click();
+      await sleep(40);
+      out.afterTick = sp().scrollTop;
+      out.moved = Math.abs(dayRow(4).getBoundingClientRect().top - top0);
+      out.ticked = dayRow(4).querySelector('input').checked;
+      ctx.fire('content');               // the loader's reload after vault.process fires 'modify'
+      await sleep(40);
+      out.afterReload = sp().scrollTop;
+      dayRow(4).querySelector('input[type=checkbox]').click();   // untick: leave the file as it was
+      await sleep(40);
+      out.unticked = !dayRow(4).querySelector('input').checked;
+      ce.style.cssText = css;
+      return out;
+    }""")
+    check('plan: a tick below the fold keeps the scroll position, through the tick and the reload after it',
+          r['overflow'] and r['at'] > 50 and abs(r['afterTick'] - r['at']) <= 1 and abs(r['afterReload'] - r['at']) <= 1
+          and r['moved'] <= 1 and r['ticked'] and r['unticked'], r)
+
+    # touch targets: the day-file button, the checkbox and the fold are at least 44 px, as a one-line card
+    r = ev("""() => {
+      const el = view.contentEl, h = q => el.querySelector(q).getBoundingClientRect();
+      return { file: h('.nb-sp-plan .nb-sp-planfile').height, tick: h('.nb-sp-row .nb-sp-tick').height,
+        tickW: h('.nb-sp-row .nb-sp-tick').width, fold: h('details.nb-sp-more > summary').height };
+    }""")
+    check('plan: "Open the day file", the checkbox and the fold are touch-sized (44 px or more)',
+          r['file'] >= 44 and r['tick'] >= 44 and r['tickW'] >= 44 and r['fold'] >= 44, r)
+
+    # the More fold: collapsed, the picks' count, open across a re-render once opened
+    r = ev("""async () => {
+      const f = () => view.contentEl.querySelector('details.nb-sp-more');
+      const out = { open0: f().open, sum: f().querySelector('summary').textContent,
+        inside: [...f().querySelectorAll('h3')].map(h => h.firstChild.textContent), picks: f().querySelectorAll('.nb-sp-item').length };
+      f().querySelector('summary').click();
+      await sleep(30);
+      out.open1 = f().open;
+      ctx.fire('events');
+      await sleep(30);
+      out.open2 = f().open;
+      out.fresh = true;
+      f().querySelector('summary').click();
+      await sleep(30);
+      ctx.fire('events');
+      await sleep(30);
+      out.open3 = f().open;
+      f().querySelector('summary').click();   // leave it open for the checks below
+      await sleep(30);
+      return out;
+    }""")
+    check('plan: the picks sit under a collapsed "More (n)" fold, n the number of picks',
+          r['open0'] is False and r['sum'] == 'More (2)' and r['inside'] == ['Problems and katas'] and r['picks'] == 2, r)
+    check('plan: the fold stays open across a re-render once opened (and closed once closed)',
+          r['open1'] is True and r['open2'] is True and r['open3'] is False, r)
+
+    # a vault change to the day file re-renders Today (the content loader fires onChange for any .md under the root)
+    r = ev("""async () => {
+      externalWrite(planPath, fs.get(planPath) + '- [ ] 10 · misc · a row added on the iPad\\n');
+      ctx.fire('content');
+      await sleep(40);
+      return { n: dayRows().length, last: dayRows().length ? dayRows()[dayRows().length - 1].textContent : '',
+        open: view.contentEl.querySelector('details.nb-sp-more').open };
+    }""")
+    check('plan: a change to the day file re-renders Today with it', r['n'] == 6 and 'a row added on the iPad' in r['last'] and r['open'], r)
+
+    # a read that an earlier render started never fills a later render
+    r = ev("""async () => {
+      const v = app.vault, real = v.cachedRead;
+      let first = true;
+      v.cachedRead = async f => {
+        if (first && f.path === planPath) { first = false; await sleep(120); return fs.get(planPath) + '- [ ] 5 · misc · a stale row\\n'; }
+        return real.call(v, f);
+      };
+      ctx.fire('events');                 // render 1: its read is slow and returns a stale text
+      await sleep(10);
+      ctx.fire('events');                 // render 2: reads the file as it is
+      await sleep(200);                   // render 1's read has now resolved
+      const afterSlow = view.contentEl.textContent.includes('a stale row');
+      ctx.fire('events');                 // render 3 draws from what the panel kept, before its read
+      const sync3 = view.contentEl.textContent.includes('a stale row');
+      await sleep(40);
+      v.cachedRead = real;
+      return { afterSlow, sync3, end: view.contentEl.textContent.includes('a stale row'), n: dayRows().length };
+    }""")
+    check('plan: a stale read from an earlier render never fills the panel', not r['afterSlow'] and not r['sync3'] and not r['end'] and r['n'] == 6, r)
+
+    # only another date's day file: Today is exactly the S8 panel again
+    r = ev("""async () => {
+      const text = fs.get(planPath);
+      await app.vault.delete(app.vault.getFile(planPath));
+      externalWrite('study/plan/2025-06-09.md', text);
+      ctx.fire('content');
+      await sleep(40);
+      const el = view.contentEl;
+      return { html: el.innerHTML, plan: !!el.querySelector('.nb-sp-plan'), fold: !!el.querySelector('details'),
+        sections: [...el.querySelectorAll('h3')].map(h => h.firstChild.textContent) };
+    }""")
+    check('plan: a day file for another date shows nothing', not r['plan'] and not r['fold'] and r['sections'] == ['Drills', 'Problems and katas', 'Settled today', 'Requests'], r['sections'])
+    check('plan: without a day file for today the Today DOM is exactly as before', r['html'] == base, (len(r['html']), len(base)))
+    ev("""async () => { await app.vault.delete(app.vault.getFile('study/plan/2025-06-09.md')); ctx.fire('content'); await sleep(20); }""")
+
+
 def part_marks_panels(b):
     """S5 marks and S8 Today/Map, on the mock StudyContext from test/out/study-fixture.js (a mocked
     engine steered through triageOverride), in its own browser context."""
@@ -856,6 +1306,9 @@ def part_marks_panels(b):
     }""")
     check('today: a pending request row opens the doc at its anchor',
           r['row'] and 'rewrite' in r['row'] and r['calls'] == [['topic-dp', 'p-def']], r)
+
+    # ================= S42: Today's day file =================
+    section_today_plan(page)
 
     # ================= S8: Map =================
     r = ev("""async () => {
@@ -1223,8 +1676,7 @@ def main():
     files = fixture_files()
     files['study/topics/fx-long.md'] = long_doc()
     files.update(generated_docs())
-    srv = subprocess.Popen([sys.executable, '-m', 'http.server', str(port)], cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(1)
+    srv = serve.start(port, ROOT)
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch()
@@ -1237,7 +1689,8 @@ def main():
             page.evaluate("async () => { window.pluginData = { study: { root: '/study/', device: 'Test Pad', minutes: 45 } }; window.plugin = await loadPlugin(); }")
             for name, fn in [('settings', section_settings), ('library', section_library), ('render', section_render), ('follow', section_follow),
                              ('back', section_back), ('peek', section_peek), ('pen', section_pen), ('tabs', section_tabs), ('header', section_header),
-                             ('open paths', section_open_paths), ('content change', section_content_change), ('ink', section_ink), ('marks', section_marks), ('panels', section_panels)]:
+                             ('open paths', section_open_paths), ('content change', section_content_change), ('ink', section_ink),
+                             ('example solution', section_example_solution), ('marks', section_marks), ('dots', section_dots), ('panels', section_panels)]:
                 try:
                     fn(page)
                 except Exception as e:
