@@ -102,12 +102,23 @@ export class TodayView extends ItemView {
     return this.ctx.content().docs.get(id)?.title || id;
   }
 
+  /**
+   * Rebuilds the panel. `.nb-sp` is the panel's scroller and a render replaces it, so the old
+   * scroll position is carried over: a tick or a sync must not send Today back to the top.
+   */
   render(): void {
     const gen = ++this.gen;
     const el = this.contentEl;
+    const prev = el.querySelector<HTMLElement>(':scope > .nb-sp');
+    const keep = { inner: prev?.scrollTop ?? 0, outer: el.scrollTop };
     el.empty();
     const root = el.createDiv({ cls: 'nb-sp nb-sp-today' });
+    this.draw(root, gen);
+    if (keep.outer) el.scrollTop = keep.outer;
+    if (keep.inner) root.scrollTop = keep.inner;
+  }
 
+  private draw(root: HTMLElement, gen: number): void {
     let plan: TodayPlan | null = null;
     let engineMissing = false;
     try {

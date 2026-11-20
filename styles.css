@@ -1046,7 +1046,7 @@
 .nb-sp-row .nb-sp-private { color: var(--text-muted, #777); font-style: italic; }
 .nb-sp-row.is-done .nb-sp-rowlabel { color: var(--text-muted, #777); text-decoration: line-through; }
 .nb-sp-row.is-done .nb-sp-link { color: var(--text-muted, #777); }
-.nb-sp .nb-sp-planfile { margin: 0; padding: 2px 8px; height: auto; font-size: 12px; cursor: pointer; }
+.nb-sp .nb-sp-planfile { margin: 0; padding: 4px 12px; min-width: 44px; min-height: 44px; height: auto; font-size: 12px; cursor: pointer; }
 .nb-sp .nb-sp-more > summary { min-height: 44px; display: flex; align-items: center; margin: 4px 0; font-size: 14px;
   font-weight: 600; cursor: pointer; list-style: none; }
 .nb-sp .nb-sp-more > summary::-webkit-details-marker { display: none; }

@@ -1084,19 +1084,72 @@ def section_today_plan(page):
     check('plan: after the tick Today shows the row ticked and the new minutes; no doc opens',
           r['checked'] and r['done'] and r['count'] == '75 / 155 min done · day 240 min' and r['calls'] == 0 and r['toasts'] == [], r)
 
+    # a tick on a row that links a study doc opens nothing either: untick row 1 (topic-dp), tick it back
+    r = ev("""async () => {
+      const before = ctx.uiCalls.length, l0 = openedLinks.length, w0 = app.vault.writes.length;
+      const old = fs.get(planPath);
+      dayRow(1).querySelector('input[type=checkbox]').click();
+      await sleep(40);
+      const mid = { checked: dayRow(1).querySelector('input').checked, done: dayRow(1).classList.contains('is-done') };
+      dayRow(1).querySelector('input[type=checkbox]').click();
+      await sleep(40);
+      return { mid, calls: ctx.uiCalls.slice(before), links: openedLinks.length - l0, writes: app.vault.writes.length - w0,
+        same: fs.get(planPath) === old, checked: dayRow(1).querySelector('input').checked, toasts: ctx.toasts.slice() };
+    }""")
+    check('plan: ticking a row that links a study doc never opens the doc (untick and tick back)',
+          r['calls'] == [] and r['links'] == 0 and r['writes'] == 2 and r['same'] and r['checked']
+          and r['mid'] == {'checked': False, 'done': False} and r['toasts'] == [], r)
+
     # a tick on a line that changed under it (a sync Today has not seen) writes nothing and says so
     r = ev("""async () => {
       const synced = fs.get(planPath).replace('- [ ] 20 · cs-core · reread', '- [ ] 25 · cs-core · reread');
       fs.set(planPath, synced);   // as a sync would, before Today re-rendered
-      const w0 = app.vault.writes.length;
+      const w0 = app.vault.writes.length, c0 = ctx.uiCalls.length;
       dayRow(2).querySelector('input[type=checkbox]').click();
       await sleep(40);
       return { same: fs.get(planPath) === synced, writes: app.vault.writes.length - w0, toasts: ctx.toasts.slice(),
-        text: dayRow(2).textContent, checked: dayRow(2).querySelector('input').checked };
+        text: dayRow(2).textContent, checked: dayRow(2).querySelector('input').checked, calls: ctx.uiCalls.slice(c0) };
     }""")
-    check('plan: a tick on a changed line writes nothing and a toast says the plan changed',
-          r['same'] and r['writes'] == 0 and len(r['toasts']) == 1 and 'plan changed' in r['toasts'][0] and 'try again' in r['toasts'][0], r)
+    check('plan: a tick on a changed line writes nothing, opens nothing, and a toast says the plan changed',
+          r['same'] and r['writes'] == 0 and r['calls'] == [] and len(r['toasts']) == 1 and 'plan changed' in r['toasts'][0] and 'try again' in r['toasts'][0], r)
     check('plan: after a refused tick Today shows the file as it is now', '25 min' in r['text'] and not r['checked'], r['text'])
+
+    # a narrow pane: ticking a row below the fold keeps the panel where it was, through the tick's
+    # render and the content loader's re-render that follows it
+    r = ev("""async () => {
+      const ce = view.contentEl, css = ce.style.cssText;
+      ce.style.cssText = 'height:220px;flex:none;min-height:0';
+      const sp = () => ce.querySelector('.nb-sp');
+      const out = { overflow: sp().scrollHeight > sp().clientHeight + 100 };
+      dayRow(4).scrollIntoView({ block: 'end' });
+      out.at = sp().scrollTop;
+      const top0 = dayRow(4).getBoundingClientRect().top;
+      dayRow(4).querySelector('input[type=checkbox]').click();
+      await sleep(40);
+      out.afterTick = sp().scrollTop;
+      out.moved = Math.abs(dayRow(4).getBoundingClientRect().top - top0);
+      out.ticked = dayRow(4).querySelector('input').checked;
+      ctx.fire('content');               // the loader's reload after vault.process fires 'modify'
+      await sleep(40);
+      out.afterReload = sp().scrollTop;
+      dayRow(4).querySelector('input[type=checkbox]').click();   // untick: leave the file as it was
+      await sleep(40);
+      out.unticked = !dayRow(4).querySelector('input').checked;
+      ce.style.cssText = css;
+      return out;
+    }""")
+    check('plan: a tick below the fold keeps the scroll position, through the tick and the reload after it',
+          r['overflow'] and r['at'] > 50 and abs(r['afterTick'] - r['at']) <= 1 and abs(r['afterReload'] - r['at']) <= 1
+          and r['moved'] <= 1 and r['ticked'] and r['unticked'], r)
+
+    # touch targets: the day-file button, the checkbox and the fold are at least 44 px, as a one-line card
+    r = ev("""() => {
+      const el = view.contentEl, h = q => el.querySelector(q).getBoundingClientRect();
+      return { file: h('.nb-sp-plan .nb-sp-planfile').height, tick: h('.nb-sp-row .nb-sp-tick').height,
+        tickW: h('.nb-sp-row .nb-sp-tick').width, fold: h('details.nb-sp-more > summary').height };
+    }""")
+    check('plan: "Open the day file", the checkbox and the fold are touch-sized (44 px or more)',
+          r['file'] >= 44 and r['tick'] >= 44 and r['tickW'] >= 44 and r['fold'] >= 44, r)
 
     # the More fold: collapsed, the picks' count, open across a re-render once opened
     r = ev("""async () => {
