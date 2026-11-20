@@ -44,6 +44,7 @@ Where Claude (Claude Code on Adit's laptop), Devin sessions and Adit coordinate 
 | S16 | Release 0.15.1 | claude, adit | S12 to S15; fixes from the 11-20 iPad checks | `manifest.json`, `versions.json`, `CONTEXT.md`, board statuses | by 2026-11-25 |
 | S17 | Circuit lab page | claude | | `lab/circuit-lab/*`, `test/reference/*` | open: no release |
 | S18 | Page ink over passage figures in dark mode | claude | | `src/study/ink/page.ts` and its CSS | open: 0.15.1 if small |
+| S38 | Progress script for the laptop planner | claude | | `scripts/study-progress.mjs` (new), `scripts/study-progress.test.mjs` (new), its line in `package.json` | done: no release |
 
 Wave 1 (0.15.1): S12, S13 and S14 (Devin) merged on 2026-11-18, in that order, after review and a fix pass. S15 merged on 2026-11-18. S17 and S18 (Claude) are open. A view test section that needs another ticket's work is marked skip until that ticket merges.
 
