@@ -1029,3 +1029,26 @@
 }
 .nb-study-peek-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .nb-study-peek-ph { margin: 8px 0; padding: 8px 12px; border: 1px dashed var(--background-modifier-border); border-radius: 8px; color: var(--text-muted); font-size: 14px; }
+
+/* Today's plan (S42): the day file's rows in the Today panel. The rows reuse the panel's nb-sp-*
+   cards, chips and counts (src/study/panels/register.ts); these rules cover only the checkbox and
+   the row body as two separate targets, a ticked row, and the "More (n)" fold. */
+.nb-sp .nb-sp-item.nb-sp-row { display: flex; align-items: stretch; gap: 0; padding: 0; cursor: default; }
+.nb-sp-row .nb-sp-tick { flex: 0 0 auto; display: flex; align-items: center; justify-content: center;
+  min-width: 44px; min-height: 44px; cursor: pointer; border-right: 1px solid var(--background-modifier-border, #ddd); }
+.nb-sp-row .nb-sp-tick input { width: 20px; height: 20px; margin: 0; cursor: pointer; }
+.nb-sp-row .nb-sp-rowbody { flex: 1 1 auto; min-width: 0; display: block; width: auto; height: auto; margin: 0;
+  padding: 8px 10px; border: 0; border-radius: 0 8px 8px 0; background: transparent; box-shadow: none;
+  text-align: left; color: inherit; font: inherit; font-size: 13px; line-height: 1.45; white-space: normal; }
+.nb-sp-row button.nb-sp-rowbody { cursor: pointer; }
+.nb-sp-row .nb-sp-rowlabel { overflow-wrap: anywhere; }
+.nb-sp-row .nb-sp-link { color: var(--interactive-accent, #705dcf); }
+.nb-sp-row .nb-sp-private { color: var(--text-muted, #777); font-style: italic; }
+.nb-sp-row.is-done .nb-sp-rowlabel { color: var(--text-muted, #777); text-decoration: line-through; }
+.nb-sp-row.is-done .nb-sp-link { color: var(--text-muted, #777); }
+.nb-sp .nb-sp-planfile { margin: 0; padding: 2px 8px; height: auto; font-size: 12px; cursor: pointer; }
+.nb-sp .nb-sp-more > summary { min-height: 44px; display: flex; align-items: center; margin: 4px 0; font-size: 14px;
+  font-weight: 600; cursor: pointer; list-style: none; }
+.nb-sp .nb-sp-more > summary::-webkit-details-marker { display: none; }
+.nb-sp .nb-sp-more > summary::before { content: '\25B8'; display: inline-block; width: 1.2em; color: var(--text-muted, #777); }
+.nb-sp .nb-sp-more[open] > summary::before { content: '\25BE'; }

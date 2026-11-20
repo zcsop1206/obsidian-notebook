@@ -4,10 +4,17 @@
  * its target in one tap. Data comes only from `ctx.engine()` and `ctx.content()` — the engine owns
  * the rules; the stub engine (before S2 lands) makes each section degrade to a "not built" note,
  * as the demo's no-engine build does.
+ *
+ * S42: when the day file `<root>/plan/<today>.md` exists (the laptop planner writes it), its rows
+ * come first under "Plan" and the problem and kata picks fold under "More (n)". Without that file
+ * the panel is exactly the S8 one. The file is read through `ctx.app`; a change to it (a sync, a
+ * tick) reaches the panel through `ctx.onChange`, since the content loader rebuilds on any `.md`
+ * under the root.
  */
-import { ItemView, type WorkspaceLeaf } from 'obsidian';
+import { ItemView, TFile, type WorkspaceLeaf } from 'obsidian';
 import type { StudyContext } from '../context';
 import type { Pick, TodayPlan } from '../types';
+import { isPrivate, labelSegments, parseDayFile, toggleRow, type DayRow } from './plan-day';
 
 export const VIEW_TYPE_STUDY_TODAY = 'notebook-study-today';
 
@@ -39,8 +46,18 @@ function f1(x: number | null): string {
   return x == null || !isFinite(x) ? '–' : (Math.round(x * 10) / 10).toFixed(1);
 }
 
+/** Thrown inside `vault.process` when the row's line changed, so nothing is written. */
+class PlanChanged extends Error {}
+
 export class TodayView extends ItemView {
   private off: (() => void) | null = null;
+  private live = false;
+  /** Bumped by every render: an async day-file read fills its render only if no later one began. */
+  private gen = 0;
+  /** The last day file read, so a re-render shows its rows at once and refreshes after the read. */
+  private cache: { path: string; text: string } | null = null;
+  /** The "More (n)" fold's state, kept across re-renders while the panel is open. */
+  private moreOpen = false;
 
   constructor(leaf: WorkspaceLeaf, private ctx: StudyContext) {
     super(leaf);
@@ -57,11 +74,16 @@ export class TodayView extends ItemView {
   }
 
   async onOpen(): Promise<void> {
+    this.live = true;
     this.off = this.ctx.onChange(() => this.render());
     this.render();
   }
 
   async onClose(): Promise<void> {
+    this.live = false;
+    this.gen++;
+    this.moreOpen = false;
+    this.cache = null;
     this.off?.();
     this.off = null;
     this.contentEl.empty();
@@ -81,6 +103,7 @@ export class TodayView extends ItemView {
   }
 
   render(): void {
+    const gen = ++this.gen;
     const el = this.contentEl;
     el.empty();
     const root = el.createDiv({ cls: 'nb-sp nb-sp-today' });
@@ -113,6 +136,10 @@ export class TodayView extends ItemView {
         : 'No deadline ahead.',
     });
 
+    // The day file, when there is one for the plan's date.
+    const day = this.call(() => this.dayFile(plan!.date), null);
+    if (day) this.planSec(root, day.path, day.file, gen);
+
     // Drills.
     const dsec = root.createEl('section', { cls: 'nb-sp-sec' });
     const dh = dsec.createEl('h3', { text: 'Drills' });
@@ -134,8 +161,18 @@ export class TodayView extends ItemView {
       card.addEventListener('click', () => void this.ctx.ui.openDrill(x.basic, x.item));
     }
 
-    // Problem and kata slots.
-    const psec = root.createEl('section', { cls: 'nb-sp-sec' });
+    // Problem and kata slots; under a "More (n)" fold when the day file leads.
+    let pparent: HTMLElement = root;
+    if (day) {
+      const fold = root.createEl('details', { cls: 'nb-sp-sec nb-sp-more' }) as HTMLDetailsElement;
+      if (this.moreOpen) fold.open = true;
+      fold.createEl('summary', { cls: 'nb-sp-more-sum', text: `More (${plan.picks.length})` });
+      fold.addEventListener('toggle', () => {
+        if (fold.isConnected) this.moreOpen = fold.open;
+      });
+      pparent = fold;
+    }
+    const psec = pparent.createEl('section', { cls: 'nb-sp-sec' });
     const ph = psec.createEl('h3', { text: 'Problems and katas' });
     ph.createSpan({ cls: 'nb-sp-count', text: String(plan.picks.length) });
     psec.createDiv({ cls: 'nb-sp-sub', text: 'Picks aim at the stretch band (E 0.60–0.70); hidden picks show "?" until they settle.' });
@@ -155,6 +192,123 @@ export class TodayView extends ItemView {
     });
 
     this.requestsSec(root);
+  }
+
+  /** `<root>/plan/<date>.md` when that file exists, else null. */
+  private dayFile(date: string): { path: string; file: TFile } | null {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+    const root = this.ctx.settings().root.replace(/^\/+|\/+$/g, '');
+    const path = `${root ? root + '/' : ''}plan/${date}.md`;
+    const file = this.ctx.app.vault.getAbstractFileByPath(path);
+    return file instanceof TFile ? { path, file } : null;
+  }
+
+  /**
+   * The Plan section. It shows the cached rows at once when the file was read before, then reads
+   * the file and fills the section again if the text differs, unless a later render has begun.
+   */
+  private planSec(root: HTMLElement, path: string, file: TFile, gen: number): void {
+    const sec = root.createEl('section', { cls: 'nb-sp-sec nb-sp-plan' });
+    let shown: string | null = null;
+    if (this.cache && this.cache.path === path) {
+      shown = this.cache.text;
+      this.fillPlan(sec, path, shown);
+    }
+    this.ctx.app.vault.cachedRead(file).then(
+      text => {
+        if (gen !== this.gen) return;
+        this.cache = { path, text };
+        if (text !== shown) this.fillPlan(sec, path, text);
+      },
+      e => {
+        if (gen !== this.gen) return;
+        console.error('[study today] the day file', e);
+        sec.empty();
+        sec.createEl('h3', { text: 'Plan' });
+        sec.createDiv({ cls: 'nb-sp-empty', text: 'The day file could not be read.' });
+      },
+    );
+  }
+
+  private fillPlan(sec: HTMLElement, path: string, text: string): void {
+    sec.empty();
+    const day = parseDayFile(text);
+    let total = 0;
+    let done = 0;
+    for (const r of day.rows) {
+      total += r.minutes ?? 0;
+      if (r.ticked) done += r.minutes ?? 0;
+    }
+    const h = sec.createEl('h3', { text: 'Plan' });
+    h.createSpan({
+      cls: 'nb-sp-count',
+      text: `${done} / ${total} min done` + (day.header ? ` · day ${day.header.minutes} min` : ''),
+    });
+    const sub = sec.createDiv({ cls: 'nb-sp-sub' });
+    const open = sub.createEl('button', { cls: 'nb-sp-planfile', text: 'Open the day file' });
+    open.addEventListener('click', () => void this.ctx.app.workspace.openLinkText(path, '', 'tab'));
+    if (!day.rows.length) sec.createDiv({ cls: 'nb-sp-empty', text: 'The day file has no rows.' });
+    for (const r of day.rows) this.planRow(sec, path, r);
+  }
+
+  /**
+   * One day-file row: the checkbox and the row body are separate targets (a checkbox inside a
+   * button is unreliable on the iPad). The body opens the first linked study doc, if any.
+   */
+  private planRow(sec: HTMLElement, path: string, r: DayRow): void {
+    const docs = this.ctx.content().docs;
+    const target = r.links.find(l => docs.has(l.id)) ?? null;
+    const row = sec.createDiv({
+      cls: `nb-sp-item nb-sp-row${r.ticked ? ' is-done' : ''}`,
+      attr: { 'data-line': String(r.line) },
+    });
+    const tick = row.createEl('label', { cls: 'nb-sp-tick' });
+    const box = tick.createEl('input', { attr: { type: 'checkbox', 'aria-label': r.ticked ? 'Mark not done' : 'Mark done' } }) as HTMLInputElement;
+    box.checked = r.ticked;
+    box.addEventListener('change', () => void this.tick(path, r, box));
+    const body = target ? row.createEl('button', { cls: 'nb-sp-rowbody' }) : row.createDiv({ cls: 'nb-sp-rowbody' });
+    const lab = body.createDiv({ cls: 'nb-sp-rowlabel' });
+    const priv = isPrivate(r);
+    if (priv) {
+      lab.createSpan({ cls: 'nb-sp-private', text: 'private' });
+    } else {
+      for (const s of labelSegments(r.label)) {
+        const into = s.bold ? lab.createEl('strong') : lab;
+        // A link to a study doc is coloured as one; any other link reads as plain text.
+        if (s.link && docs.has(s.link.id)) into.createSpan({ cls: 'nb-sp-link', text: s.link.alias ?? this.title(s.link.id) });
+        else into.createSpan({ text: s.text });
+      }
+    }
+    const meta = body.createDiv({ cls: 'nb-sp-m' });
+    if (r.minutes != null) meta.createSpan({ cls: 'nb-sp-num', text: `${r.minutes} min` });
+    if (r.deliverable && !priv) meta.createSpan({ cls: 'nb-sp-chip', text: r.deliverable });
+    if (target) body.addEventListener('click', () => void this.ctx.ui.openDoc(target.id));
+  }
+
+  /** Ticks or unticks one row in the file, only if its line still reads as it did when shown. */
+  private async tick(path: string, r: DayRow, box: HTMLInputElement): Promise<void> {
+    box.disabled = true;
+    const vault = this.ctx.app.vault;
+    const file = vault.getAbstractFileByPath(path);
+    let changed = !(file instanceof TFile);
+    if (file instanceof TFile) {
+      try {
+        const text = await vault.process(file, data => {
+          const next = toggleRow(data, r.line, r.raw);
+          if (next == null) throw new PlanChanged();
+          return next;
+        });
+        this.cache = { path, text };
+      } catch (e) {
+        if (e instanceof PlanChanged) changed = true;
+        else {
+          console.error('[study today] tick', e);
+          this.ctx.ui.toast('The tick could not be saved to the day file.');
+        }
+      }
+    }
+    if (changed) this.ctx.ui.toast('The plan changed since Today showed it. Nothing was saved; try again.');
+    if (this.live) this.render();
   }
 
   /** A pick card. A hidden pick shows "?" where the topic would be and nothing that names a method. */
