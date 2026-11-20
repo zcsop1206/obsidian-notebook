@@ -1329,9 +1329,10 @@ try:
           const before = view.store.slots[0].page.strokes.length;
           view.setTool('eraser');
           view.setEraser({ size: 14 });
-          const pv = view.pages[0], bm = pv.bitmap, render = bm.render;
-          let renders = 0;
+          const pv = view.pages[0], bm = pv.bitmap, render = bm.render, renderRect = bm.renderRect;
+          let renders = 0, partial = 0;
           bm.render = function (...a) { renders++; return render.apply(this, a); };
+          bm.renderRect = function (...a) { partial++; return renderRect.apply(this, a); };  // #68: only where it erased
           const t0 = performance.now();
           // A wavy diagonal sweep, about 1 px per sample, 8 coalesced samples per event and a frame after each.
           const sweep = Array.from({ length: 800 }, (_, j) => [80 + j * 0.8, 150 + j * 0.9 + 30 * Math.sin(j / 40), 0.3]);
@@ -1340,6 +1341,7 @@ try:
           T.penUp(0, sweep[sweep.length - 1]);
           const wall = performance.now() - t0;
           bm.render = render;
+          bm.renderRect = renderRect;
           const after = view.store.slots[0].page.strokes.length;
           const last = view.input.lastErase;
           view.setTool('pen');
@@ -1349,17 +1351,18 @@ try:
           const tr = performance.now();
           bm.render(view.store.slots[0].page, { dark: false, paper: '#ffffff', ink: '#1f1f1f', line: '#c9c9c9' }, null);  // one redraw
           const redraw = performance.now() - tr;
-          return { before, after, renders, wall, last, build, redraw, frames, index: pv.spatial ? pv.spatial.size : -1 };
+          return { before, after, renders, partial, wall, last, build, redraw, frames, index: pv.spatial ? pv.spatial.size : -1 };
         }""")
         L = r['last']
         print(f"eraser on a page with {r['before']} strokes: {L['events']} events, {L['samples']} samples, removed {L['removed']}; "
               f"handler median {L['handlerMs']:.3f} ms (max {L['handlerMaxMs']:.3f}), frame (hit test + remove + redraw) median {L['frameMs']:.2f} ms "
-              f"(max {L['frameMaxMs']:.2f}, {L['frames']} frames), page redraws {r['renders']}, drag {r['wall']:.0f} ms; "
+              f"(max {L['frameMaxMs']:.2f}, {L['frames']} frames), page redraws {r['renders']} full, {r['partial']} partial, drag {r['wall']:.0f} ms; "
               f"index build {r['build']:.1f} ms (in the first frame), one page redraw {r['redraw']:.1f} ms; slowest frames [index, ms] {r['frames']}")
         check('eraser perf: the sweep removes strokes from the 1,000-stroke page, the index kept in step',
               r['before'] == 1000 and L['removed'] > 20 and r['after'] == 1000 - L['removed'] and r['index'] == r['after'], r)
         check('eraser perf: median handler time under 4 ms (Chromium)', L['handlerMs'] < 4, L['handlerMs'])
-        check('eraser perf: the page is redrawn at most once per frame', 0 < r['renders'] <= L['frames'] + 1, (r['renders'], L['frames']))
+        check('eraser perf: the page is redrawn at most once per frame, and only in part (#68)',
+              r['renders'] == 0 and 0 < r['partial'] <= L['frames'] + 1, (r['renders'], r['partial'], L['frames']))
         # ======== end of 14. The stroke eraser (#7) ========
 
         # ======== 15. Zoom and finger navigation (#9) ========
@@ -6417,6 +6420,228 @@ try:
         check('zoom 1000%: after panning the bands follow and cover the view, each within 16M pixels',
               r['pan']['covers'] and r['pan']['rebands'] >= 1 and all(m_['w'] * m_['h'] <= 16_000_000 for m_ in r['pan']['maps']), r['pan'])
         # ======== end of 32. The thin pen and 1000% zoom (#60) ========
+
+        # ======== 33. PDF pages redraw only what changed; pdf.js off the hot path (#68) ========
+        # A one-page PDF note (fake pdf.js) with 300 pen strokes. Writing, highlighting and erasing
+        # at 100% and 400%: no full redraw of the page bitmap during an eraser drag or at a
+        # highlighter's lift, frame times, and the bitmap compared pixel for pixel with a full
+        # redraw of the same page afterwards. Then the sharp render: in tiles, cancelled by a pen
+        # going down and finished after it lifts, handed over only once the pen has been up a
+        # moment, one render per page reused at smaller sizes, and a pdf.js without `cancel`.
+        ev("""async () => {
+          view.setZoom(1);
+          /** A 150 dpi JPEG of a page like a textbook's, as the import embeds. */
+          const c = document.createElement('canvas');
+          c.width = 1275; c.height = 1650;
+          const g = c.getContext('2d');
+          g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+          g.fillStyle = '#222'; g.font = '22px serif';
+          for (let y = 120; y < 1550; y += 30) g.fillText('Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor ' + y, 110, y);
+          T.j68 = c.toDataURL('image/jpeg', 0.85);
+          /** Puts the note `name` (one 816 x 1056 PDF page, 300 strokes) and its fake PDF in the vault. */
+          T.note68 = name => {
+            const files = ink.pdfNote('Pdf68', name, 1, { width: 816, height: 1056 }, () => T.j68, 1, 300);
+            dirs.add('Pdf68'); dirs.add(`Pdf68/${name}`);
+            for (const [k, v] of Object.entries(files)) fs.set(k, v);
+            fs.set(`Pdf68/${name}/${name}.pdf`, new Uint8Array(fakePdf([[612, 792]])));
+            return `Pdf68/${name}.md`;
+          };
+          /** Frame times (ms) from now until the returned function is called, which returns them. */
+          T.frames68 = () => {
+            const f = []; let last = 0, on = true;
+            const tick = t => { if (last) f.push(t - last); last = t; if (on) requestAnimationFrame(tick); };
+            requestAnimationFrame(tick);
+            return () => { on = false; return f; };
+          };
+          T.frameSummary = f => { const s = [...f].sort((a, b) => a - b); return { n: f.length, median: s[s.length >> 1] ?? 0, max: s[s.length - 1] ?? 0, over32: f.filter(x => x > 32).length }; };
+          /** Page i's bitmap compared with a full redraw of it: pixels whose channels differ, and the largest difference. */
+          T.same68 = i => {
+            const pv = view.pages[i], c0 = pv.bitmap.canvas, g0 = c0.getContext('2d');
+            const w = c0.width, h = c0.height, a = g0.getImageData(0, 0, w, h).data;
+            view.renderPage(pv);
+            const c1 = pv.bitmap.canvas, b = c1.getContext('2d').getImageData(0, 0, c1.width, c1.height).data;
+            if (c1 !== c0 || c1.width !== w || c1.height !== h) return { diff: -1, max: -1, w, h };
+            let diff = 0, max = 0;
+            for (let k = 0; k < a.length; k++) { const d = Math.abs(a[k] - b[k]); if (d) { diff++; if (d > max) max = d; } }
+            return { diff, max, w, h, band: !!pv.bitmap.band };
+          };
+          T.sharpNow = () => view.stats.pdf.received;
+          T.waitFor = T.waitFor || (async (f, ms = 3000) => { const t = performance.now(); while (!f() && performance.now() - t < ms) await T.sleep(20); return f(); });
+          /** Handwriting-like words along a line at page y, from x0: `n` short loops, each a separate stroke. */
+          T.words68 = (y, x0, n) => Array.from({ length: n }, (_, k) => T.loops(x0 + k * 46, y, 110));
+        }""")
+
+        def T68red(px):
+            """The fake PDF's page 1 marker (red 40) at the top-left: the sharp render is drawn (the embedded JPEG is white there)."""
+            return abs(px[0] - 40) <= 8 and px[1] <= 8 and px[2] <= 8
+
+        # (1) Open, and the sharp render at 100%: in tiles of at most 1024 px.
+        r = ev("""async () => {
+          const before = pdfjsStats.renders.length, rec = view.stats.pdf ? view.stats.pdf.received : 0;
+          await app.workspace.getLeaf(false).openFile(app.vault.getFile(T.note68('Book')));
+          await T.waitFor(() => view.store && view.pages.length === 1 && view.pages[0].bitmap);
+          const got = await T.waitFor(() => view.stats.pdf.received > rec, 6000);
+          await T.sleep(100);
+          const tiles = pdfjsStats.renders.slice(before), c = view.pages[0].bitmap.canvas;
+          return { got, tiles: tiles.length, biggest: Math.max(...tiles.map(t => Math.max(t[3], t[4]))), full: [tiles[0] && tiles[0][1], tiles[0] && tiles[0][2]],
+            bitmap: [c.width, c.height], stats: { ...view.stats.pdf }, strokes: view.store.page(view.store.slots[0]).strokes.length,
+            sharp: T.pixel(0, 12, 12) };
+        }""")
+        print('pdf68 open:', {k: r[k] for k in ('tiles', 'biggest', 'full', 'bitmap', 'stats')})
+        check('pdf68: the sharp render at 100% arrives, drawn in tiles of at most 1024 px', r['got'] and r['tiles'] >= 2 and r['biggest'] <= 1024
+              and r['full'][0] == r['bitmap'][0] and abs(r['full'][1] - r['bitmap'][1]) <= 1 and r['stats']['tiles'] == r['tiles'], r)
+        check('pdf68: the page has its 300 strokes and the sharp render drawn', r['strokes'] == 300 and T68red(r['sharp']), r)
+
+        # (2) At 100%: words with the pen, a highlighter over them, then partial and stroke erasing.
+        def gestures68(label):
+            return ev("""async (label) => {
+              const out = {}, R = view.stats.redraws;
+              // Words: one stroke each, a pen stroke is drawn on top (no redraw).
+              view.setTool('pen');
+              let stop = T.frames68(), full = R.full;
+              for (const w of T.words68(500, 120, 6)) { await T.pen(0, w); if (R.stroke) out.penFull = (out.penFull || 0) + R.stroke; }
+              out.pen = { frames: T.frameSummary(stop()), full: R.full - full };
+              // Highlighters across the words and the strokes around them: each redraws only its own box.
+              view.setTool('highlighter');
+              stop = T.frames68(); full = R.full;
+              const partial = R.partial, kinds = [];
+              for (const y of [495, 300, 700]) { await T.pen(0, Array.from({ length: 120 }, (_, j) => [100 + j * 4, y + 3 * Math.sin(j / 9), 0.5])); kinds.push([R.stroke, view.stats.redrawKind]); }
+              out.highlight = { frames: T.frameSummary(stop()), full: R.full - full, partial: R.partial - partial, kinds, ms: view.stats.redrawMs };
+              out.sameAfterHighlight = T.same68(0);
+              // The partial eraser sweeping through ink and highlighters.
+              view.setTool('eraser');
+              view.setEraser({ mode: 'partial', size: 14 });
+              stop = T.frames68(); full = R.full;
+              const sweep = Array.from({ length: 400 }, (_, j) => [90 + j * 1.6, 280 + j * 1.1 + 30 * Math.sin(j / 30), 0.3]);
+              await T.pen(0, sweep, { per: 6, predict: 0 });
+              out.partial = { frames: T.frameSummary(stop()), full: R.full - full, erase: R.erase, eraseFrames: R.eraseFrames, last: view.input.lastErase, ms: view.stats.redrawMs, kind: view.stats.redrawKind };
+              out.sameAfterPartial = T.same68(0);
+              // The stroke eraser.
+              view.setEraser({ mode: 'stroke' });
+              stop = T.frames68(); full = R.full;
+              await T.pen(0, Array.from({ length: 300 }, (_, j) => [700 - j * 2, 200 + j * 2, 0.3]), { per: 6, predict: 0 });
+              out.stroke = { frames: T.frameSummary(stop()), full: R.full - full, erase: R.erase, eraseFrames: R.eraseFrames, last: view.input.lastErase };
+              out.sameAfterStroke = T.same68(0);
+              view.setEraser({ mode: 'partial' });
+              view.setTool('pen');
+              return out;
+            }""", label)
+
+        r = gestures68('100%')
+        print('pdf68 at 100%:', {k: (v['frames'] if isinstance(v, dict) and 'frames' in v else v) for k, v in r.items() if k in ('pen', 'highlight', 'partial', 'stroke')},
+              'erase frames', r['partial']['eraseFrames'], r['stroke']['eraseFrames'], 'redraw ms', r['partial']['ms'], r['highlight']['ms'])
+        check('pdf68 100%: words with the pen: no full redraw', r['pen']['full'] == 0 and 'penFull' not in r, r['pen'])
+        check('pdf68 100%: highlighter lifts redraw only their part of the page (no full redraw)',
+              r['highlight']['full'] == 0 and r['highlight']['partial'] == 3 and all(k == [0, 'partial'] for k in r['highlight']['kinds']), r['highlight'])
+        check('pdf68 100%: no full redraw during a partial eraser drag (erasing every frame)',
+              r['partial']['full'] == 0 and r['partial']['erase'] == 0 and r['partial']['eraseFrames'] > 20 and r['partial']['last']['split'] > 3 and r['partial']['kind'] == 'partial', r['partial'])
+        check('pdf68 100%: no full redraw during a stroke eraser drag', r['stroke']['full'] == 0 and r['stroke']['erase'] == 0 and r['stroke']['last']['removed'] > 3, r['stroke'])
+        check('pdf68 100%: no frame over 32 ms but one (pen, highlighter, both erasers)',
+              all(r[k]['frames']['over32'] <= 1 for k in ('pen', 'highlight', 'partial', 'stroke')), {k: r[k]['frames'] for k in ('pen', 'highlight', 'partial', 'stroke')})
+        check('pdf68 100%: the bitmap equals a full redraw, pixel for pixel, after highlighting and after each eraser',
+              all(r[k]['diff'] == 0 and r[k]['w'] > 0 for k in ('sameAfterHighlight', 'sameAfterPartial', 'sameAfterStroke')),
+              {k: r[k] for k in ('sameAfterHighlight', 'sameAfterPartial', 'sameAfterStroke')})
+        page.locator('#leaf').screenshot(path=os.path.join(OUT, 'pdf68_100.png'))
+
+        # (3) At 400%: a band bitmap (#52) over a sharp render at the canvas limit, the same gestures.
+        r = ev("""async () => {
+          const rec = view.stats.pdf.received, req = view.stats.pdf.requested;
+          await T.z52at(4, 0, 330, 420, 300);
+          const got = await T.waitFor(() => view.stats.pdf.received > rec, 15000);
+          await T.sleep(400);
+          const pv = view.pages[0];
+          return { got, band: !!pv.bitmap.band, w: pv.bitmap.canvas.width, h: pv.bitmap.canvas.height, requested: view.stats.pdf.requested - req,
+            tiles: view.stats.pdf.tiles, renderMs: view.stats.pdf.renderMs, tileMaxMs: view.stats.pdf.tileMaxMs, cache: view.stats.pdf.sharpPixels };
+        }""")
+        print('pdf68 400%:', r)
+        check('pdf68 400%: a band bitmap, and one larger sharp render (at the 16M px cap) in tiles', r['got'] and r['band'] and r['requested'] == 1 and r['tiles'] >= 12, r)
+        check('pdf68: the sharp cache stays within 32M pixels', 0 < r['cache'] <= 32_000_000, r)
+        r = ev("""async () => {
+          const out = {}, R = view.stats.redraws;
+          view.setTool('highlighter');
+          let stop = T.frames68(), full = R.full;
+          await T.pen(0, Array.from({ length: 60 }, (_, j) => [270 + j * 2, 410 + 2 * Math.sin(j / 7), 0.5]));
+          out.highlight = { frames: T.frameSummary(stop()), full: R.full - full, kind: view.stats.redrawKind, ms: view.stats.redrawMs };
+          view.setTool('eraser');
+          view.setEraser({ mode: 'partial', size: 14 });
+          stop = T.frames68(); full = R.full;
+          await T.pen(0, Array.from({ length: 300 }, (_, j) => [260 + j * 0.5, 380 + j * 0.25 + 8 * Math.sin(j / 20), 0.3]), { per: 6, predict: 0 });
+          out.partial = { frames: T.frameSummary(stop()), full: R.full - full, erase: R.erase, eraseFrames: R.eraseFrames, last: view.input.lastErase, ms: view.stats.redrawMs };
+          view.setEraser({ mode: 'stroke' });
+          stop = T.frames68(); full = R.full;
+          await T.pen(0, Array.from({ length: 200 }, (_, j) => [380 - j * 0.5, 400 + j * 0.3, 0.3]), { per: 6, predict: 0 });
+          out.stroke = { frames: T.frameSummary(stop()), full: R.full - full, erase: R.erase, last: view.input.lastErase };
+          view.setEraser({ mode: 'partial' });
+          view.setTool('pen');
+          out.same = T.same68(0);
+          return out;
+        }""")
+        print('pdf68 at 400%:', {k: r[k]['frames'] for k in ('highlight', 'partial', 'stroke')}, 'redraw ms', r['highlight']['ms'], r['partial']['ms'], 'same', r['same'])
+        check('pdf68 400%: no full redraw at a highlighter lift or during either eraser drag',
+              r['highlight']['full'] == 0 and r['highlight']['kind'] == 'partial' and r['partial']['full'] == 0 and r['partial']['erase'] == 0
+              and r['partial']['eraseFrames'] > 20 and r['stroke']['full'] == 0 and r['stroke']['erase'] == 0, r)
+        check('pdf68 400%: no frame over 32 ms but one', all(r[k]['frames']['over32'] <= 1 for k in ('highlight', 'partial', 'stroke')), r)
+        check('pdf68 400%: the band bitmap equals a full redraw, pixel for pixel', r['same']['diff'] == 0 and r['same']['band'], r['same'])
+        page.locator('#leaf').screenshot(path=os.path.join(OUT, 'pdf68_400.png'))
+
+        # (4) Zooming back out reuses the render: no new pdf.js render at 200% or 100%.
+        r = ev("""async () => {
+          const req = view.stats.pdf.requested, n = pdfjsStats.renders.length;
+          view.setZoom(2); await T.sleep(500);
+          view.setZoom(1); await T.sleep(500);
+          return { requested: view.stats.pdf.requested - req, renders: pdfjsStats.renders.length - n, sharp: T.pixel(0, 12, 12) };
+        }""")
+        check('pdf68: zooming out to 200% and 100% reuses the one sharp render (nothing requested, nothing rendered)',
+              r['requested'] == 0 and r['renders'] == 0, r)
+
+        # (5) Writing right after opening, the sharp render still pending: the tile in progress is
+        # cancelled at each pen-down, no full redraw while writing, and the render arrives once
+        # the pen has been up a moment.
+        def pending68(name, cancel):
+            return ev("""async ([name, cancel]) => {
+              window.fakePdfDelay = 150;  // a tile is still rendering when the pen first goes down
+              window.fakePdfNoCancel = !cancel;
+              const R = view.stats.redraws, P = view.stats.pdf;
+              const rec = P.received, cancelled = pdfjsStats.cancelled, own = P.cancelled;
+              await app.workspace.getLeaf(false).openFile(app.vault.getFile(T.note68(name)));
+              await T.waitFor(() => view.store && view.pages.length === 1 && view.pages[0].bitmap && view.pages[0].pending == null);
+              await T.sleep(60);  // the first tile is rendering
+              const full = R.full, stop = T.frames68(), during = [];
+              let upAt = 0;
+              for (const w of T.words68(820, 140, 8)) {
+                await T.pen(0, w);
+                upAt = performance.now();
+                during.push([R.full - full, P.received - rec]);
+                await T.sleep(120);  // between words: less than the 300 ms idle
+              }
+              const frames = T.frameSummary(stop());
+              const got = await T.waitFor(() => P.received > rec, 8000);
+              const after = performance.now() - upAt;
+              await T.sleep(50);
+              const out = { during, frames, got, after, fullAfter: R.full - full, cancels: pdfjsStats.cancelled - cancelled, ownCancels: P.cancelled - own,
+                sharp: T.pixel(0, 12, 12), strokes: view.store.page(view.store.slots[0]).strokes.length };
+              window.fakePdfDelay = undefined;
+              window.fakePdfNoCancel = false;
+              return out;
+            }""", [name, cancel])
+
+        r = pending68('Fresh', True)
+        print('pdf68 pending render:', {k: r[k] for k in ('frames', 'after', 'fullAfter', 'cancels', 'ownCancels')})
+        check('pdf68 pending: no full redraw and no sharp image handed over while writing words', all(d == [0, 0] for d in r['during']), r['during'])
+        check('pdf68 pending: pen-downs cancel the pdf.js tile in progress (re-queued)', r['cancels'] >= 1 and r['ownCancels'] >= 1, r)
+        check('pdf68 pending: the sharp render arrives after the pen has been up a moment, one full redraw',
+              r['got'] and r['after'] >= 290 and r['fullAfter'] == 1 and T68red(r['sharp']) and r['strokes'] == 308, r)
+        check('pdf68 pending: no frame over 32 ms but one while writing', r['frames']['over32'] <= 1, r['frames'])
+        r = pending68('NoCancel', False)
+        check('pdf68: a pdf.js whose render task has no cancel still renders, after the writing',
+              r['got'] and r['cancels'] == 0 and all(d == [0, 0] for d in r['during']) and r['fullAfter'] == 1 and T68red(r['sharp']), r)
+
+        # (6) The stats overlay shows the redraws and the last sharp render.
+        r = ev("() => { view.toggleStats(); const t = view.contentEl.querySelector('.nb-ink-stats').textContent; view.toggleStats(); return t; }")
+        check('pdf68: the stats overlay shows the last redraw, full redraw counts and the last sharp render',
+              re.search(r'redraw: last (partial|full) [\d.]+ ms; full redraws: \d+ at the last stroke, \d+ in the last erase \(\d+ frames\)', r) is not None
+              and re.search(r'pdf: last sharp render [\d.]+ ms in \d+ tiles', r) is not None, r)
+        # ======== end of 33. PDF pages redraw only what changed (#68) ========
 
         # --- unload removes the patch
         r = ev("""async () => {

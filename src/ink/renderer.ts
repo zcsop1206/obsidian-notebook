@@ -11,10 +11,18 @@
 // resolution, positioned over that part of the page; below the cap a bitmap is the whole page,
 // as before. Everything is drawn in page px through pageTransform, so strokes, images and the
 // highlighter layer outside the band are simply clipped.
+//
+// Partial redraws (#68): erasing and a highlighter stroke used to redraw the whole bitmap (on a
+// PDF page a full-resolution image blit per eraser frame). `renderRect` redraws only a rectangle
+// of the page (see dirty.ts): clipped to it, it draws the paper, the part of the template image
+// under it (9-argument drawImage), the images, the highlighters and the pen strokes that meet it,
+// so the bitmap ends up the same as after a full redraw. Sharp PDF renders are kept one per page
+// and reused at every bitmap size at or below theirs, capped by count and total pixels.
 import { DEFAULT_INK, prepareSave, type Page, type PageImage, type Size, type Stroke } from '../format/page';
 import { isStroked, strokePathCached } from '../format/outline';
 import { fixedPaper, renderTemplate, type PdfTemplate, type Template } from '../format/template';
 import type { Band } from './layout';
+import { clipHolds, deviceClip, imagePart, meets, pageMatrix, pageRectOf, type Clip, type PageMatrix, type Rect } from './dirty';
 
 export interface Theme {
   dark: boolean;
@@ -258,7 +266,7 @@ export class TemplateImages {
       entry = e;
     }
     if (entry.ready) return entry.img;
-    entry.waiting.push(onReady);
+    if (!entry.waiting.includes(onReady)) entry.waiting.push(onReady);
     return null;
   }
 
@@ -354,13 +362,30 @@ export function setSharpPdfRenderer(render: SharpPdfRenderer | null) {
   sharpPdf = render;
 }
 
-/** Counts for tests: sharp renders requested and received, and times a sharp image was drawn. */
-export const pdfStats = { requested: 0, received: 0, sharpDrawn: 0, jpegDrawn: 0 };
+/**
+ * Counts for tests and the stats overlay: sharp renders requested and received, times a sharp
+ * image or the JPEG was drawn; and (#68, set by pdf.ts) the last sharp render: `renderMs`, the
+ * time its pdf.js renders took (the tiles' render times added up), `tiles`, `tileMaxMs` (the
+ * longest tile), and `cancelled`, renders cancelled by a pen going down (re-queued), in all.
+ * `sharpPixels` is the sharp cache's size in pixels.
+ */
+export const pdfStats = {
+  requested: 0, received: 0, sharpDrawn: 0, jpegDrawn: 0,
+  renderMs: 0, tiles: 0, tileMaxMs: 0, cancelled: 0, sharpPixels: 0,
+};
 
 /** The embedded image's resolution: 150 dpi over CSS px at 96 per inch. */
 const JPEG_PX_PER_CSS_PX = 150 / 96;
 
 type PdfEntry = { img: HTMLImageElement | null; ready: boolean; failed: boolean; waiting: (() => void)[] };
+
+/**
+ * A page's sharp render (#68: one per page, not one per bitmap size): `img` the best one
+ * received so far, rendered for `width` × `height` px (0 before one is), `asked` the widest
+ * size requested (in flight, done or failed: a size at or below it isn't asked again),
+ * `inFlight` while a request runs, and the callbacks to call when one arrives.
+ */
+type SharpEntry = { img: HTMLImageElement | null; width: number; height: number; pixels: number; asked: number; inFlight: boolean; waiting: Set<() => void> };
 
 /** Frees an image's decoded pixels, and its blob URL if it has one. */
 function releaseImage(img: HTMLImageElement) {
@@ -373,42 +398,42 @@ function releaseImage(img: HTMLImageElement) {
  * there); a render from the PDF at the bitmap's pixel size is requested at the same time and,
  * when it arrives, the page is redrawn with it. If it fails, the JPEG stays. Both caches are
  * small and least recently used first out, since images of pages at 400% are large.
+ *
+ * #68: one sharp render per page, reused for every bitmap size at or below its own (drawn
+ * scaled down, as a band bitmap already draws it); a larger one is requested only when a bitmap
+ * needs more pixels than the cached render has (zooming in), and the smaller render is drawn
+ * until it arrives. The cache holds at most MAX_SHARP renders and MAX_SHARP_PIXELS pixels in
+ * all (about two whole pages at the canvas limit). Every caller waiting for a page's render is
+ * told when it arrives (callers pass the same function each time, so a page redraws once).
  */
 class PdfImages {
   static MAX_JPEGS = 6;
   static MAX_SHARP = 4;
+  static MAX_SHARP_PIXELS = 32_000_000;
   private jpegs = new Map<string, PdfEntry>();
-  private sharp = new Map<string, PdfEntry>();
+  private sharp = new Map<string, SharpEntry>();
 
   get(t: PdfTemplate, size: Size, width: number, height: number, onReady: () => void): HTMLImageElement | null {
     try {
-      const sharpKey = `${t.source}#${t.page} ${width}x${height}`;
-      let s = touch(this.sharp, sharpKey);
+      // Per page of a PDF; the embedded image tells apart PDFs of the same name in different notes.
+      const sharpKey = `${t.source}#${t.page} ${t.image.length} ${t.image.slice(-32)}`;
       // Only when the bitmap has more pixels than the embedded image (not for thumbnails).
       const finer = width > size.width * JPEG_PX_PER_CSS_PX * 1.05 || !t.image;
-      if (!s && sharpPdf && finer) {
-        const entry: PdfEntry = s = { img: null, ready: false, failed: false, waiting: [] };
-        this.sharp.set(sharpKey, entry);
-        this.trim(this.sharp, PdfImages.MAX_SHARP);
-        pdfStats.requested++;
-        sharpPdf(t, width, height).then(img => {
-          if (!img) throw new Error('no render');
-          if (this.sharp.get(sharpKey) !== entry) return releaseImage(img); // evicted meanwhile
-          pdfStats.received++;
-          entry.img = img;
-          entry.ready = true;
-          entry.waiting.splice(0).forEach(f => f());
-        }).catch(() => {
-          entry.failed = true;
-          entry.waiting.length = 0;
-        });
+      let s = finer ? touch(this.sharp, sharpKey) : undefined;
+      if (finer && sharpPdf) {
+        if (!s) {
+          s = { img: null, width: 0, height: 0, pixels: 0, asked: 0, inFlight: false, waiting: new Set() };
+          this.sharp.set(sharpKey, s);
+          this.trimSharp(s);
+        }
+        if (!s.inFlight && width > s.asked) this.request(sharpKey, s, t, width, height);
       }
-      if (s?.ready) {
+      if (s?.img) {
         pdfStats.sharpDrawn++;
+        if (s.inFlight) s.waiting.add(onReady); // a larger one is coming
         return s.img;
       }
-      // Only the latest caller is told when the sharp image arrives: one redraw, not one per call.
-      if (s && !s.failed) s.waiting = [onReady];
+      if (s?.inFlight) s.waiting.add(onReady);
       if (!t.image) return null;
       const jpegKey = `${t.source}#${t.page} ${t.image.length} ${t.image.slice(-32)}`;
       let j = touch(this.jpegs, jpegKey);
@@ -440,6 +465,46 @@ class PdfImages {
     }
   }
 
+  /** Asks for the page at `width` × `height` px; when it arrives it replaces the entry's smaller render. */
+  private request(key: string, entry: SharpEntry, t: PdfTemplate, width: number, height: number) {
+    entry.inFlight = true;
+    entry.asked = width;
+    pdfStats.requested++;
+    sharpPdf!(t, width, height).then(img => {
+      entry.inFlight = false;
+      if (!img) throw new Error('no render');
+      if (this.sharp.get(key) !== entry) return releaseImage(img); // evicted meanwhile
+      pdfStats.received++;
+      if (entry.img) releaseImage(entry.img);
+      entry.img = img;
+      entry.width = width;
+      entry.height = height;
+      entry.pixels = (img.naturalWidth || width) * (img.naturalHeight || height);
+      this.trimSharp(entry);
+      const waiting = [...entry.waiting];
+      entry.waiting.clear();
+      waiting.forEach(f => f());
+    }).catch(() => {
+      entry.inFlight = false;
+      entry.waiting.clear();
+    });
+  }
+
+  /** Drops the least recently used sharp renders past MAX_SHARP or MAX_SHARP_PIXELS, never `keep`. */
+  private trimSharp(keep?: SharpEntry) {
+    let pixels = 0;
+    for (const e of this.sharp.values()) pixels += e.pixels;
+    for (const [key, e] of [...this.sharp]) {
+      if (this.sharp.size <= PdfImages.MAX_SHARP && pixels <= PdfImages.MAX_SHARP_PIXELS) break;
+      if (e === keep) continue;
+      this.sharp.delete(key);
+      pixels -= e.pixels;
+      e.waiting.clear();
+      if (e.img) releaseImage(e.img);
+    }
+    pdfStats.sharpPixels = pixels;
+  }
+
   private trim(cache: Map<string, PdfEntry>, max: number) {
     while (cache.size > max) {
       const [key, e] = cache.entries().next().value!;
@@ -451,7 +516,12 @@ class PdfImages {
 
   clear() {
     this.trim(this.jpegs, 0);
-    this.trim(this.sharp, 0);
+    for (const e of this.sharp.values()) {
+      e.waiting.clear();
+      if (e.img) releaseImage(e.img);
+    }
+    this.sharp.clear();
+    pdfStats.sharpPixels = 0;
   }
 }
 
@@ -549,6 +619,52 @@ function scratchCanvas(width: number, height: number): CanvasRenderingContext2D 
   return ctx;
 }
 
+/**
+ * The highlighter canvas for a partial redraw (#68): only `clip` cleared, not clipped (strokes
+ * drawn on it rasterise as in a full redraw; see renderRect). The rest keeps whatever it held,
+ * and only `clip` of it is used.
+ */
+function scratchRegion(width: number, height: number, clip: Clip): CanvasRenderingContext2D {
+  const ctx = scratchPlain(width, height);
+  ctx.clearRect(clip.x, clip.y, clip.width, clip.height);
+  return ctx;
+}
+
+/** The highlighter canvas at this size, unclipped, as it is (for the pen strokes of a partial redraw, #68). */
+function scratchPlain(width: number, height: number): CanvasRenderingContext2D {
+  if (!scratch) scratch = document.createElement('canvas');
+  if (scratch.width !== width || scratch.height !== height) {
+    scratch.width = width;
+    scratch.height = height;
+  }
+  const ctx = scratch.getContext('2d')!;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  return ctx;
+}
+
+/** An image's own pixel size (0 × 0 if unknown). */
+function imageSize(img: CanvasImageSource): [number, number] {
+  if (img instanceof HTMLImageElement) return [img.naturalWidth, img.naturalHeight];
+  const s = img as { width?: unknown; height?: unknown };
+  return typeof s.width === 'number' && typeof s.height === 'number' ? [s.width, s.height] : [0, 0];
+}
+
+/**
+ * Draws `img` stretched over (0, 0, W, H) of the current transform, for the part of that space
+ * under `r` (#68); the caller has clipped to `r`. An image drawn 1:1 (a line template of a
+ * band, a sharp render at the bitmap's size) is drawn only in part, through the 9-argument
+ * drawImage (imagePart). A scaled one is drawn whole, inside the clip: Chromium maps a source
+ * rectangle onto its destination with its own rounding, so a part of a scaled image can come out
+ * a pixel column off from the whole image drawn at the same scale (seen in the view test at
+ * 400%), and the clip already limits the drawing to its pixels.
+ */
+function drawImagePart(ctx: CanvasRenderingContext2D, img: CanvasImageSource, W: number, H: number, r: Rect) {
+  const [iw, ih] = imageSize(img);
+  const p = iw === W && ih === H ? imagePart(iw, ih, W, H, r, 0) : null;
+  if (p) ctx.drawImage(img, p.sx, p.sy, p.sw, p.sh, p.dx, p.dy, p.dw, p.dh);
+  else if (!(iw === W && ih === H)) ctx.drawImage(img, 0, 0, W, H);
+}
+
 /** Frees the highlighter canvas (when the last view closes). */
 export function releaseScratch() {
   if (scratch) scratch.width = scratch.height = 0;
@@ -608,15 +724,18 @@ export class PageBitmap {
     return x1 >= b.x * kx && x0 <= (b.x + b.width) * kx && y1 >= b.y * ky && y0 <= (b.y + b.height) * ky;
   }
 
+  /**
+   * Page px to the bitmap's device px: for a band (#52), device px per CSS px of the band times
+   * CSS px per page px, the band's corner at the origin.
+   */
+  private matrix(size: Size): PageMatrix {
+    const c = this.canvas;
+    return pageMatrix(c.width, c.height, this.cssWidth, this.cssHeight, size.width, size.height, this.band);
+  }
+
   private pageTransform(ctx: CanvasRenderingContext2D, size: Size) {
-    const c = this.canvas, b = this.band;
-    if (!b) {
-      ctx.setTransform(c.width / size.width, 0, 0, c.height / size.height, 0, 0);
-      return;
-    }
-    // Device px per CSS px of the band, times CSS px per page px; the band's corner at the origin.
-    const dx = c.width / b.width, dy = c.height / b.height;
-    ctx.setTransform(dx * this.cssWidth / size.width, 0, 0, dy * this.cssHeight / size.height, -b.x * dx, -b.y * dy);
+    const m = this.matrix(size);
+    ctx.setTransform(m.a, 0, 0, m.d, m.e, m.f);
   }
 
   /**
@@ -684,16 +803,96 @@ export class PageBitmap {
   }
 
   /**
-   * Draws a stroke just appended to the page. A pen stroke goes on top of the bitmap; a
-   * highlighter stroke belongs under the pen strokes, so it redraws the page.
+   * Redraws only `rect` (page px) of the bitmap (#68), leaving it as render() would: clipped to
+   * the whole device pixels the rectangle covers (dirty.ts), the paper, the part of the template
+   * image under them, the images, the highlighter layer (composited through the scratch canvas
+   * in the same clip) and the pen strokes, of those that meet them; strokes crossing the clip's
+   * edge are drawn unclipped on the scratch canvas (see below). Returns false if the
+   * rectangle misses the bitmap (outside its band), when nothing is drawn.
    */
-  addStroke(page: Page, stroke: Stroke, theme: Theme, template: TemplateSource | null) {
+  renderRect(page: Page, theme: Theme, template: TemplateSource | null, rect: Rect, skip?: ReadonlySet<string> | null, onImage?: () => void): boolean {
+    theme = pageTheme(page, theme);
+    const { ctx, canvas } = this, size = page.size;
+    const w = canvas.width, h = canvas.height, m = this.matrix(size);
+    const clip = deviceClip(rect, m, w, h);
+    if (!clip) return false;
+    // What a stroke or image must meet to reach a pixel of the clip, antialiasing included.
+    const area = pageRectOf(clip, m);
+    const clipArea: Rect = [clip.x, clip.y, clip.x + clip.width, clip.y + clip.height];
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.beginPath();
+    ctx.rect(clip.x, clip.y, clip.width, clip.height);
+    ctx.clip();
+    ctx.fillStyle = theme.paper;
+    ctx.fillRect(clip.x, clip.y, clip.width, clip.height);
+    if (template && 'page' in template) {
+      // A whole-page image over a band bitmap (#52), in page px.
+      this.pageTransform(ctx, size);
+      drawImagePart(ctx, template.page, size.width, size.height, area);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+    } else if (template) drawImagePart(ctx, template, w, h, clipArea);
+    const images = page.images?.filter(im => meets([im.x, im.y, im.x + im.width, im.y + im.height], area));
+    if (images?.length) {
+      this.pageTransform(ctx, size);
+      drawImages(ctx, images, skip, onImage);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+    }
+    const near = (s: Stroke) => !skip?.has(s.id) && meets(strokeBounds(s), area);
+    const highlights = page.strokes.filter(s => s.tool === 'highlighter' && near(s));
+    // A path crossing a clip's edge can rasterise a little differently from the same path
+    // unclipped (Chromium's Skia: antialiased edge pixels off by a few levels), so strokes are
+    // never drawn clipped where they cross it: highlighters go onto the scratch canvas (the
+    // size of the bitmap, the clip's pixels cleared) unclipped, and are composited inside the clip.
+    if (highlights.length) {
+      const hctx = scratchRegion(w, h, clip);
+      this.pageTransform(hctx, size);
+      for (const s of highlights) paintStroke(hctx, s, strokeColor(s, theme));
+      // Composited as render() does (the whole canvas at 40%, here inside the clip), so the
+      // blending rounds the same way.
+      ctx.globalAlpha = HIGHLIGHT_ALPHA;
+      ctx.drawImage(scratch!, 0, 0);
+      ctx.globalAlpha = 1;
+    }
+    const pens = page.strokes.filter(s => s.tool === 'pen' && near(s));
+    if (pens.some(s => !clipHolds(clip, deviceClip(strokeBounds(s), m, w, h)))) {
+      // Pen strokes crossing the clip's edge: they are drawn unclipped onto the scratch canvas
+      // over a copy of the clip's pixels, which are copied back. Copies are 1:1 and the bitmap
+      // is opaque, so they are exact.
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      const sctx = scratchPlain(w, h);
+      sctx.imageSmoothingEnabled = false;
+      sctx.globalAlpha = 1;
+      sctx.drawImage(canvas, clip.x, clip.y, clip.width, clip.height, clip.x, clip.y, clip.width, clip.height);
+      sctx.imageSmoothingEnabled = true;
+      this.pageTransform(sctx, size);
+      for (const s of pens) paintStroke(sctx, s, strokeColor(s, theme));
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(scratch!, clip.x, clip.y, clip.width, clip.height, clip.x, clip.y, clip.width, clip.height);
+      ctx.imageSmoothingEnabled = true;
+    } else {
+      // Every pen stroke lies wholly inside the clip, which then changes nothing about it.
+      this.pageTransform(ctx, size);
+      for (const s of pens) this.fill(s, theme);
+    }
+    ctx.restore();
+    return true;
+  }
+
+  /**
+   * Draws a stroke just appended to the page. A pen stroke goes on top of the bitmap; a
+   * highlighter stroke belongs under the pen strokes, so it redraws the part of the page it
+   * covers (#68; it redrew the whole page before). Returns how it was drawn.
+   */
+  addStroke(page: Page, stroke: Stroke, theme: Theme, template: TemplateSource | null, onImage?: () => void): 'pen' | 'partial' {
     if (stroke.tool === 'highlighter') {
-      this.render(page, theme, template);
-      return;
+      this.renderRect(page, theme, template, strokeBounds(stroke), null, onImage);
+      return 'partial';
     }
     this.pageTransform(this.ctx, page.size);
     this.fill(stroke, pageTheme(page, theme));
+    return 'pen';
   }
 
   private fill(s: Stroke, theme: Theme) {
