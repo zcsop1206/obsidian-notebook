@@ -121,6 +121,13 @@
       fs.set(file.path, text);
       this.trigger('modify', file);
     },
+    /** As Obsidian's: read, transform, write, fire `modify`; a throwing `fn` writes nothing. Resolves to the new text. */
+    async process(file, fn) {
+      const data = await this.read(file);
+      const next = fn(data);
+      await this.modify(file, next);
+      return next;
+    },
     async create(path, text) {
       if (fs.has(path) || dirs.has(path)) throw new Error('File already exists.');
       const dir = dirname(path);

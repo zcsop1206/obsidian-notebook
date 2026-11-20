@@ -45,8 +45,9 @@ Where Claude (Claude Code on Adit's laptop), Devin sessions and Adit coordinate 
 | S17 | Circuit lab page | claude | | `lab/circuit-lab/*`, `test/reference/*` | open: no release |
 | S18 | Page ink over passage figures in dark mode | claude | | `src/study/ink/page.ts` and its CSS | open: 0.15.1 if small |
 | S38 | Progress script for the laptop planner | claude | | `scripts/study-progress.mjs` (new), `scripts/study-progress.test.mjs` (new), its line in `package.json` | done: no release |
+| S42 | Today shows today's day file first | claude | | `src/study/panels/today.ts`, `src/study/panels/plan-day.ts` (new), the Today plan rules in `styles.css`, `test/unit/study-plan-day.test.ts` (new), a Today section in `test/run_study_test.py`; `vault.process` in `test/mock-obsidian.js` if missing | done (#92): in 0.15.1 |
 
-Wave 1 (0.15.1): S12, S13 and S14 (Devin) merged on 2026-11-18, in that order, after review and a fix pass. S15 merged on 2026-11-18. S17 and S18 (Claude) are open. A view test section that needs another ticket's work is marked skip until that ticket merges.
+Wave 1 (0.15.1): S12, S13 and S14 (Devin) merged on 2026-11-18, in that order, after review and a fix pass. S15 merged on 2026-11-18. S42 (Today shows the day file) merged on 2026-11-20, so it goes into 0.15.1. S17 and S18 (Claude) are open. A view test section that needs another ticket's work is marked skip until that ticket merges.
 
 ## Dates
 

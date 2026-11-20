@@ -847,6 +847,24 @@ def section_panels(page):
     }""")
     check('panels: a Today problem pick opens the standalone problem view',
           r.get('problem') and r.get('card') and r.get('cardId') == r.get('id') != '' and 'not in the study folder' not in r.get('body', ''), r)
+    # S42: a day file for the engine's today reaches Today through the real content loader's onChange
+    # (no listener of Today's own), and leaves again when it is deleted.
+    r = page.evaluate("""async () => {
+      const l = app.workspace.getLeavesOfType('notebook-study-today')[0];
+      const path = 'study/plan/' + plugin.study.engine().today() + '.md';
+      const plan = () => l.view.contentEl.querySelector('.nb-sp-plan .nb-sp-row');
+      externalWrite(path, '---\\nstudy: plan\\n---\\n# Day · 30 min\\n\\n- [ ] 30 · nt · a row from the laptop\\n');
+      let shown = null;
+      for (let i = 0; i < 60 && !shown; i++) { await sleep(50); shown = plan(); }
+      const text = shown ? shown.textContent : '';
+      const docs = plugin.study.content().docs.size;
+      await app.vault.delete(app.vault.getFile(path));
+      let gone = false;
+      for (let i = 0; i < 60 && !gone; i++) { await sleep(50); gone = !plan(); }
+      return { text, gone, docs, after: plugin.study.content().docs.size };
+    }""")
+    check('panels: a day file synced in shows in Today through the content loader, and leaves when deleted',
+          'a row from the laptop' in r['text'] and r['gone'] and r['docs'] == r['after'], r)
     r = page.evaluate("""async () => {
       await plugin.study.ui.openMap();
       await sleep(200);
@@ -964,6 +982,257 @@ MARKS_PANELS_SETUP = """() => {
 }"""
 
 
+# S42: an invented day file for the fixture's date (2025-06-10), put in the mock vault at run time
+# (never in test/fixtures/study/, whose docs other checks count). Rows 0..4 sit on lines 6..10.
+DAY_FILE = '\n'.join([
+    '---',
+    'study: plan',
+    '---',
+    '# Tue 06-10 · 240 min',
+    'A planner line. Work from the top.',
+    '',
+    "- [ ] 30 · drills · Today's drills (one is 2 days overdue)",
+    '- [x] 45 · cs-core · first pass [[topic-dp]], part 1 of 2',
+    '- [ ] 20 · cs-core · reread [[b-logic|the logic basic]] then **the timed paper** · due 06-12',
+    '- [ ] 45 · private',
+    '- [ ] 15 · misc · look at [[not-a-doc]] only',
+    'hours 2025-07-01 60',
+    'answer fx-q a',
+    '',
+])
+DAY_PATH = 'study/plan/2025-06-10.md'
+
+
+def section_today_plan(page):
+    ev = page.evaluate
+    # The panel before any day file: its DOM is the baseline the end of this section compares to.
+    base = ev("""async () => { ctx.fire('events'); await sleep(30); return view.contentEl.innerHTML; }""")
+    r = ev("""async ([path, text]) => {
+      window.planPath = path;
+      window.dayRows = () => [...view.contentEl.querySelectorAll('.nb-sp-plan .nb-sp-row')];
+      window.dayRow = i => dayRows()[i];
+      externalWrite(path, text);
+      ctx.fire('content');
+      // Before the first read lands: the section already has its heading and a reading line.
+      const sec0 = view.contentEl.querySelector('.nb-sp-plan');
+      const early = sec0 ? { h: sec0.querySelector('h3') ? sec0.querySelector('h3').textContent : null,
+        wait: sec0.querySelector('.nb-sp-planwait') ? sec0.querySelector('.nb-sp-planwait').textContent : null,
+        height: sec0.getBoundingClientRect().height } : null;
+      await sleep(40);
+      const el = view.contentEl;
+      const plan = el.querySelector('.nb-sp-plan');
+      const kids = [...el.querySelector('.nb-sp').children].map(c => c.className.split(' ').pop() + ':' + (c.querySelector('h3, summary') ? c.querySelector('h3, summary').firstChild.textContent : ''));
+      return {
+        kids, early, waitLeft: el.querySelectorAll('.nb-sp-planwait').length,
+        count: plan && plan.querySelector('h3 .nb-sp-count').textContent,
+        rows: dayRows().map(x => ({ line: x.dataset.line, text: x.querySelector('.nb-sp-rowbody').textContent,
+          label: x.querySelector('.nb-sp-rowlabel').textContent, checked: x.querySelector('input[type=checkbox]').checked,
+          done: x.classList.contains('is-done'), button: x.querySelector('.nb-sp-rowbody').tagName === 'BUTTON',
+          strong: [...x.querySelectorAll('strong')].map(s => s.textContent) })),
+        planText: plan ? plan.textContent : '',
+        nested: el.querySelectorAll('button input, button label, button button').length,
+      };
+    }""", [DAY_PATH, DAY_FILE])
+    check('plan: the Plan section comes first, right after the date and deadline, then Drills, More, Settled, Requests',
+          r['kids'] == ['nb-sp-date:', 'nb-sp-next:', 'nb-sp-plan:Plan', 'nb-sp-sec:Drills', 'nb-sp-more:More (2)', 'nb-sp-sec:Settled today', 'nb-sp-sec:Requests'], r['kids'])
+    check('plan: before the first read lands, the section shows "Plan" and a reading line, so nothing below jumps unlabelled',
+          r['early'] is not None and r['early']['h'] == 'Plan' and r['early']['wait'] == 'Reading the day file…'
+          and r['early']['height'] > 30, r['early'])
+    check('plan: the reading line is gone once the rows are in', r['waitLeft'] == 0, r['waitLeft'])
+    check('plan: done and planned minutes, and the day minutes', r['count'] == '45 / 155 min done · day 240 min', r['count'])
+    rows = r['rows']
+    check('plan: one row per day-file row, in file order', [x['line'] for x in rows] == ['6', '7', '8', '9', '10'], [x['line'] for x in rows])
+    check('plan: a row shows minutes, deliverable and label',
+          rows and "Today's drills (one is 2 days overdue)" == rows[0]['label'] and '30 min' in rows[0]['text'] and 'drills' in rows[0]['text'], rows[:1])
+    check('plan: links show the doc title or the alias, bold shows bold, no markup shows',
+          len(rows) == 5 and rows[1]['label'] == 'first pass Dynamic programming, part 1 of 2'
+          and rows[2]['label'] == 'reread the logic basic then the timed paper · due 06-12' and rows[2]['strong'] == ['the timed paper']
+          and rows[4]['label'] == 'look at not-a-doc only'
+          and '[[' not in r['planText'] and '**' not in r['planText'], [x['label'] for x in rows])
+    check('plan: a private row shows "private" and its minutes only',
+          len(rows) == 5 and rows[3]['label'] == 'private' and rows[3]['text'] == 'private45 min', rows[3:4])
+    check('plan: ticked rows show ticked', [x['checked'] for x in rows] == [False, True, False, False, False] and [x['done'] for x in rows] == [False, True, False, False, False])
+    check('plan: no checkbox sits inside a button; only rows linking a study doc are buttons',
+          r['nested'] == 0 and [x['button'] for x in rows] == [False, True, True, False, False], (r['nested'], [x['button'] for x in rows]))
+
+    # taps: a link row opens its first study doc; the private row and a row linking no study doc open nothing
+    r = ev("""async () => {
+      const before = ctx.uiCalls.length;
+      dayRow(1).querySelector('.nb-sp-rowbody').click();
+      dayRow(2).querySelector('.nb-sp-rowbody').click();
+      dayRow(3).querySelector('.nb-sp-rowbody').click();
+      dayRow(4).querySelector('.nb-sp-rowbody').click();
+      dayRow(0).querySelector('.nb-sp-rowbody').click();
+      await sleep(20);
+      const btn = view.contentEl.querySelector('.nb-sp-plan .nb-sp-planfile');
+      window.openedLinks = [];
+      btn.click();
+      await sleep(20);
+      return { calls: ctx.uiCalls.slice(before), links: openedLinks.slice() };
+    }""")
+    check('plan: a link row opens its doc; the private row and a row without a study doc open nothing',
+          r['calls'] == [{'fn': 'openDoc', 'args': ['topic-dp']}, {'fn': 'openDoc', 'args': ['b-logic']}], r['calls'])
+    check('plan: "Open the day file" opens the file in a tab', r['links'] == [{'linktext': DAY_PATH, 'sourcePath': '', 'newLeaf': 'tab'}], r['links'])
+
+    # tick a checkbox: exactly that line changes in the vault file, the view shows it ticked, no doc opens
+    r = ev("""async () => {
+      const before = ctx.uiCalls.length;
+      const w0 = app.vault.writes.length;
+      const old = fs.get(planPath);
+      dayRow(0).querySelector('input[type=checkbox]').click();
+      await sleep(40);
+      const now = fs.get(planPath);
+      const a = old.split('\\n'), b = now.split('\\n');
+      const diff = a.map((l, i) => l === b[i] ? null : [i, b[i]]).filter(Boolean);
+      return { diff, lines: [a.length, b.length], writes: app.vault.writes.slice(w0), calls: ctx.uiCalls.length - before,
+        checked: dayRow(0).querySelector('input').checked, done: dayRow(0).classList.contains('is-done'),
+        count: view.contentEl.querySelector('.nb-sp-plan h3 .nb-sp-count').textContent, toasts: ctx.toasts.slice() };
+    }""")
+    check('plan: a tick changes exactly that line in the day file (one write through vault.process)',
+          r['diff'] == [[6, "- [x] 30 · drills · Today's drills (one is 2 days overdue)"]] and r['lines'][0] == r['lines'][1] and r['writes'] == [DAY_PATH], r)
+    check('plan: after the tick Today shows the row ticked and the new minutes; no doc opens',
+          r['checked'] and r['done'] and r['count'] == '75 / 155 min done · day 240 min' and r['calls'] == 0 and r['toasts'] == [], r)
+
+    # a tick on a row that links a study doc opens nothing either: untick row 1 (topic-dp), tick it back
+    r = ev("""async () => {
+      const before = ctx.uiCalls.length, l0 = openedLinks.length, w0 = app.vault.writes.length;
+      const old = fs.get(planPath);
+      dayRow(1).querySelector('input[type=checkbox]').click();
+      await sleep(40);
+      const mid = { checked: dayRow(1).querySelector('input').checked, done: dayRow(1).classList.contains('is-done') };
+      dayRow(1).querySelector('input[type=checkbox]').click();
+      await sleep(40);
+      return { mid, calls: ctx.uiCalls.slice(before), links: openedLinks.length - l0, writes: app.vault.writes.length - w0,
+        same: fs.get(planPath) === old, checked: dayRow(1).querySelector('input').checked, toasts: ctx.toasts.slice() };
+    }""")
+    check('plan: ticking a row that links a study doc never opens the doc (untick and tick back)',
+          r['calls'] == [] and r['links'] == 0 and r['writes'] == 2 and r['same'] and r['checked']
+          and r['mid'] == {'checked': False, 'done': False} and r['toasts'] == [], r)
+
+    # a tick on a line that changed under it (a sync Today has not seen) writes nothing and says so
+    r = ev("""async () => {
+      const synced = fs.get(planPath).replace('- [ ] 20 · cs-core · reread', '- [ ] 25 · cs-core · reread');
+      fs.set(planPath, synced);   // as a sync would, before Today re-rendered
+      const w0 = app.vault.writes.length, c0 = ctx.uiCalls.length;
+      dayRow(2).querySelector('input[type=checkbox]').click();
+      await sleep(40);
+      return { same: fs.get(planPath) === synced, writes: app.vault.writes.length - w0, toasts: ctx.toasts.slice(),
+        text: dayRow(2).textContent, checked: dayRow(2).querySelector('input').checked, calls: ctx.uiCalls.slice(c0) };
+    }""")
+    check('plan: a tick on a changed line writes nothing, opens nothing, and a toast says the plan changed',
+          r['same'] and r['writes'] == 0 and r['calls'] == [] and len(r['toasts']) == 1 and 'plan changed' in r['toasts'][0] and 'try again' in r['toasts'][0], r)
+    check('plan: after a refused tick Today shows the file as it is now', '25 min' in r['text'] and not r['checked'], r['text'])
+
+    # a narrow pane: ticking a row below the fold keeps the panel where it was, through the tick's
+    # render and the content loader's re-render that follows it
+    r = ev("""async () => {
+      const ce = view.contentEl, css = ce.style.cssText;
+      ce.style.cssText = 'height:220px;flex:none;min-height:0';
+      const sp = () => ce.querySelector('.nb-sp');
+      const out = { overflow: sp().scrollHeight > sp().clientHeight + 100 };
+      dayRow(4).scrollIntoView({ block: 'end' });
+      out.at = sp().scrollTop;
+      const top0 = dayRow(4).getBoundingClientRect().top;
+      dayRow(4).querySelector('input[type=checkbox]').click();
+      await sleep(40);
+      out.afterTick = sp().scrollTop;
+      out.moved = Math.abs(dayRow(4).getBoundingClientRect().top - top0);
+      out.ticked = dayRow(4).querySelector('input').checked;
+      ctx.fire('content');               // the loader's reload after vault.process fires 'modify'
+      await sleep(40);
+      out.afterReload = sp().scrollTop;
+      dayRow(4).querySelector('input[type=checkbox]').click();   // untick: leave the file as it was
+      await sleep(40);
+      out.unticked = !dayRow(4).querySelector('input').checked;
+      ce.style.cssText = css;
+      return out;
+    }""")
+    check('plan: a tick below the fold keeps the scroll position, through the tick and the reload after it',
+          r['overflow'] and r['at'] > 50 and abs(r['afterTick'] - r['at']) <= 1 and abs(r['afterReload'] - r['at']) <= 1
+          and r['moved'] <= 1 and r['ticked'] and r['unticked'], r)
+
+    # touch targets: the day-file button, the checkbox and the fold are at least 44 px, as a one-line card
+    r = ev("""() => {
+      const el = view.contentEl, h = q => el.querySelector(q).getBoundingClientRect();
+      return { file: h('.nb-sp-plan .nb-sp-planfile').height, tick: h('.nb-sp-row .nb-sp-tick').height,
+        tickW: h('.nb-sp-row .nb-sp-tick').width, fold: h('details.nb-sp-more > summary').height };
+    }""")
+    check('plan: "Open the day file", the checkbox and the fold are touch-sized (44 px or more)',
+          r['file'] >= 44 and r['tick'] >= 44 and r['tickW'] >= 44 and r['fold'] >= 44, r)
+
+    # the More fold: collapsed, the picks' count, open across a re-render once opened
+    r = ev("""async () => {
+      const f = () => view.contentEl.querySelector('details.nb-sp-more');
+      const out = { open0: f().open, sum: f().querySelector('summary').textContent,
+        inside: [...f().querySelectorAll('h3')].map(h => h.firstChild.textContent), picks: f().querySelectorAll('.nb-sp-item').length };
+      f().querySelector('summary').click();
+      await sleep(30);
+      out.open1 = f().open;
+      ctx.fire('events');
+      await sleep(30);
+      out.open2 = f().open;
+      out.fresh = true;
+      f().querySelector('summary').click();
+      await sleep(30);
+      ctx.fire('events');
+      await sleep(30);
+      out.open3 = f().open;
+      f().querySelector('summary').click();   // leave it open for the checks below
+      await sleep(30);
+      return out;
+    }""")
+    check('plan: the picks sit under a collapsed "More (n)" fold, n the number of picks',
+          r['open0'] is False and r['sum'] == 'More (2)' and r['inside'] == ['Problems and katas'] and r['picks'] == 2, r)
+    check('plan: the fold stays open across a re-render once opened (and closed once closed)',
+          r['open1'] is True and r['open2'] is True and r['open3'] is False, r)
+
+    # a vault change to the day file re-renders Today (the content loader fires onChange for any .md under the root)
+    r = ev("""async () => {
+      externalWrite(planPath, fs.get(planPath) + '- [ ] 10 · misc · a row added on the iPad\\n');
+      ctx.fire('content');
+      await sleep(40);
+      return { n: dayRows().length, last: dayRows().length ? dayRows()[dayRows().length - 1].textContent : '',
+        open: view.contentEl.querySelector('details.nb-sp-more').open };
+    }""")
+    check('plan: a change to the day file re-renders Today with it', r['n'] == 6 and 'a row added on the iPad' in r['last'] and r['open'], r)
+
+    # a read that an earlier render started never fills a later render
+    r = ev("""async () => {
+      const v = app.vault, real = v.cachedRead;
+      let first = true;
+      v.cachedRead = async f => {
+        if (first && f.path === planPath) { first = false; await sleep(120); return fs.get(planPath) + '- [ ] 5 · misc · a stale row\\n'; }
+        return real.call(v, f);
+      };
+      ctx.fire('events');                 // render 1: its read is slow and returns a stale text
+      await sleep(10);
+      ctx.fire('events');                 // render 2: reads the file as it is
+      await sleep(200);                   // render 1's read has now resolved
+      const afterSlow = view.contentEl.textContent.includes('a stale row');
+      ctx.fire('events');                 // render 3 draws from what the panel kept, before its read
+      const sync3 = view.contentEl.textContent.includes('a stale row');
+      await sleep(40);
+      v.cachedRead = real;
+      return { afterSlow, sync3, end: view.contentEl.textContent.includes('a stale row'), n: dayRows().length };
+    }""")
+    check('plan: a stale read from an earlier render never fills the panel', not r['afterSlow'] and not r['sync3'] and not r['end'] and r['n'] == 6, r)
+
+    # only another date's day file: Today is exactly the S8 panel again
+    r = ev("""async () => {
+      const text = fs.get(planPath);
+      await app.vault.delete(app.vault.getFile(planPath));
+      externalWrite('study/plan/2025-06-09.md', text);
+      ctx.fire('content');
+      await sleep(40);
+      const el = view.contentEl;
+      return { html: el.innerHTML, plan: !!el.querySelector('.nb-sp-plan'), fold: !!el.querySelector('details'),
+        sections: [...el.querySelectorAll('h3')].map(h => h.firstChild.textContent) };
+    }""")
+    check('plan: a day file for another date shows nothing', not r['plan'] and not r['fold'] and r['sections'] == ['Drills', 'Problems and katas', 'Settled today', 'Requests'], r['sections'])
+    check('plan: without a day file for today the Today DOM is exactly as before', r['html'] == base, (len(r['html']), len(base)))
+    ev("""async () => { await app.vault.delete(app.vault.getFile('study/plan/2025-06-09.md')); ctx.fire('content'); await sleep(20); }""")
+
+
 def part_marks_panels(b):
     """S5 marks and S8 Today/Map, on the mock StudyContext from test/out/study-fixture.js (a mocked
     engine steered through triageOverride), in its own browser context."""
@@ -1037,6 +1306,9 @@ def part_marks_panels(b):
     }""")
     check('today: a pending request row opens the doc at its anchor',
           r['row'] and 'rewrite' in r['row'] and r['calls'] == [['topic-dp', 'p-def']], r)
+
+    # ================= S42: Today's day file =================
+    section_today_plan(page)
 
     # ================= S8: Map =================
     r = ev("""async () => {
