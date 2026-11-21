@@ -33,6 +33,32 @@ export const PAGE_INK_SKIP = [
 /** Where the mouse does not write either: links and chips, so a click follows them. */
 const MOUSE_SKIP = 'a[href], a.internal-link, a.external-link, .sr-ref, [data-href], .chip, [data-act]';
 
+/**
+ * The colour a page stroke over a passage figure draws in, whatever the theme (S18). Figures sit on a
+ * white plate (FORMAT), where the theme's --text-normal (light grey in the dark theme) nearly vanishes.
+ * Same value as FIGURE_INK in blocks/figure-ink.ts (S13), kept here so the ink module needs no block.
+ */
+export const PAGE_FIGURE_INK = '#1f1f1f';
+/** Images that are not passage figures for page ink: those with their own ink surface (S13) or in ink UI. */
+const FIGURE_SKIP = '.nb-study-ink, .nb-study-figure, .nb-study-ink-orphans, .nb-study-ink-chip';
+
+/** A rectangle in paper px. */
+export interface PaperRect { x0: number; y0: number; x1: number; y1: number }
+
+/**
+ * True when at least half of a stroke's points, moved down by dy, fall on one of the figures
+ * (each padded by `pad` paper px). A stroke that only crosses a figure's edge keeps the theme colour.
+ */
+export function strokeOverFigure(p: readonly (readonly number[])[], dy: number, figs: readonly PaperRect[], pad = 2): boolean {
+  if (!p.length || !figs.length) return false;
+  let on = 0;
+  for (const q of p) {
+    const x = q[0], y = q[1] + dy;
+    if (figs.some(f => x >= f.x0 - pad && x <= f.x1 + pad && y >= f.y0 - pad && y <= f.y1 + pad)) on++;
+  }
+  return on * 2 >= p.length;
+}
+
 function plural(n: number, w: string): string { return `${n} ${w}${n === 1 ? '' : 's'}`; }
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls: string, css?: string, text?: string): HTMLElementTagNameMap[K] {
@@ -101,7 +127,7 @@ export class PageInkImpl implements PageInk {
       host: stack,
       strokes: () => this.d.store.strokesOf(null),
       place: s => placeStroke(s, this.revs, a => (this.tops.has(a) ? this.tops.get(a)! : null), a => this.orphanPos.get(a) ?? null),
-      color: () => '--text-normal',
+      color: s => this.colorOf(s),
       readOnly: () => false,
       ignore: e => this.ignore(e),
       swallowClick: true,
@@ -120,10 +146,49 @@ export class PageInkImpl implements PageInk {
     return false;
   }
 
+  /** Stored strokes' colours since the last measure (a live stroke is decided afresh each frame). */
+  private colors = new Map<InkStroke, string>();
+  /** Passage figures in paper px, from the last measure. */
+  private figs: PaperRect[] = [];
+
+  private colorOf(s: InkStroke): string {
+    const hit = s.id ? this.colors.get(s) : undefined;
+    if (hit) return hit;
+    let dy = 0;
+    if (s.id) {
+      const pl = placeStroke(s, this.revs, a => (this.tops.has(a) ? this.tops.get(a)! : null), a => this.orphanPos.get(a) ?? null);
+      dy = pl ? pl.dy : 0;
+    }
+    const c = s.p && strokeOverFigure(s.p, dy, this.figs) ? PAGE_FIGURE_INK : '--text-normal';
+    if (s.id) this.colors.set(s, c);
+    return c;
+  }
+
+  /** Every loaded passage figure's box in paper px. */
+  private measureFigures(): void {
+    const figs: PaperRect[] = [];
+    const sr = this.stack.getBoundingClientRect();
+    const k = this.stack.offsetWidth > 0 && sr.width > 0 ? sr.width / this.stack.offsetWidth : 1;
+    for (const img of Array.from(this.stack.querySelectorAll('img'))) {
+      if (img.closest(FIGURE_SKIP)) continue;
+      const r = img.getBoundingClientRect();
+      if (r.width < 2 || r.height < 2) continue;
+      figs.push({ x0: (r.left - sr.left) / k, y0: (r.top - sr.top) / k, x1: (r.right - sr.left) / k, y1: (r.bottom - sr.top) / k });
+    }
+    this.figs = figs;
+    this.colors.clear();
+  }
+
+  /** Tests and debugging: the colour each page stroke draws in now. */
+  strokeColors(): { key: string; color: string }[] {
+    return this.d.store.strokesOf(null).map(s => ({ key: strokeKey(s), color: this.colorOf(s) }));
+  }
+
   /** The doc's anchors in document order (list items after their list), with their tops now. */
   private measure(): AnchorTop[] {
     const out: AnchorTop[] = [];
     this.tops.clear();
+    this.measureFigures();
     for (const a of this.revs.keys()) {
       let top: number | null = null;
       try { top = this.passageTop(a); } catch { top = null; }
