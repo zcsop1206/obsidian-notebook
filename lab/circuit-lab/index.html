@@ -1,0 +1,120 @@
+<title>Circuit Lab</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<style>
+/* Layout: a bench of cards, the circuit beside the plot you sketch on; one column below 860 px.
+   Ink is pencil blue, a second prediction amber, the solver's trace teal, earlier attempts grey. */
+:root{--bg:#f2f5f4;--paper:#ffffff;--fg:#14201c;--muted:#5a6a64;--line:#d2dbd7;--grid:#e4eae7;--accent:#0f766e;--ink:#2747c7;--ink2:#b25700;--ghost:#a3aea9;--good:#1d7a48;--warn:#9a6400;--bad:#b42318;--tint:rgba(15,118,110,.08);
+--sans:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;--mono:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0e1413;--paper:#151d1b;--fg:#e2eae7;--muted:#93a39d;--line:#2a3633;--grid:#1e2926;--accent:#3cc2b0;--ink:#93abff;--ink2:#ffb05a;--ghost:#55625d;--good:#5cc98a;--warn:#e3b04f;--bad:#f07a6b;--tint:rgba(60,194,176,.1);color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#0e1413;--paper:#151d1b;--fg:#e2eae7;--muted:#93a39d;--line:#2a3633;--grid:#1e2926;--accent:#3cc2b0;--ink:#93abff;--ink2:#ffb05a;--ghost:#55625d;--good:#5cc98a;--warn:#e3b04f;--bad:#f07a6b;--tint:rgba(60,194,176,.1);color-scheme:dark}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font:15px/1.5 var(--sans);margin:0;overflow-x:hidden}
+#lab{max-width:1180px;margin:0 auto;padding-block:20px 40px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));display:grid;gap:16px}
+h1,h2,h3{margin:0;text-wrap:balance}
+h1{font-size:26px;font-weight:600;letter-spacing:-.01em}
+h2{font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:.07em;color:var(--muted)}
+h3{font-size:17px;font-weight:600}
+p{margin:0}
+sub{font-size:.72em}
+.muted{color:var(--muted)}
+.lede{color:var(--muted);max-width:60ch}
+.top{display:flex;flex-wrap:wrap;gap:12px 24px;align-items:end;justify-content:space-between}
+.brand{display:grid;gap:2px;min-width:0}
+.top-tools{display:flex;flex-wrap:wrap;gap:12px;align-items:center}
+button{font:500 14px/1.2 var(--sans);color:var(--fg);background:var(--paper);border:1px solid var(--line);border-radius:6px;padding:8px 12px;min-height:38px;cursor:pointer;touch-action:manipulation}
+button:hover:not(:disabled){border-color:var(--accent)}
+button:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+button:disabled{opacity:.45;cursor:default}
+button.primary{background:var(--accent);border-color:var(--accent);color:var(--paper)}
+.tabs{display:inline-flex;border:1px solid var(--line);border-radius:7px;overflow:hidden}
+.tabs button{border:0;border-radius:0;min-width:96px}
+.tabs button[aria-selected="true"]{background:var(--fg);color:var(--bg)}
+.check{display:inline-flex;gap:6px;align-items:center;font-size:14px;color:var(--muted);cursor:pointer}
+.check input{width:18px;height:18px;accent-color:var(--accent)}
+section{display:grid;gap:16px;min-width:0}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{border-radius:999px;font-weight:400;padding:6px 12px;min-height:34px}
+.chip[aria-pressed="true"]{background:var(--tint);border-color:var(--accent);color:var(--accent);font-weight:500}
+.bench{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.35fr);gap:16px;align-items:start}
+@media (max-width:860px){.bench{grid-template-columns:minmax(0,1fr)}}
+.card{background:var(--paper);border:1px solid var(--line);border-radius:10px;padding:14px;display:grid;gap:10px;min-width:0}
+.card-head{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+.meta,.src{font-size:13px;color:var(--muted)}
+.src{font-family:var(--mono);color:var(--fg);font-size:14px}
+.sch-box{overflow-x:auto}
+.sch{display:block;width:100%;height:auto;max-height:300px;margin:0 auto}
+.sch line,.sch polyline,.sch path,.sch circle{fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.sch-w{stroke:var(--fg)}
+.sch .fill{fill:var(--fg)}
+.sch .fillbg{fill:var(--paper)}
+.sch text{font:13px var(--mono);stroke:none}
+.sch .sch-t{fill:var(--fg)}
+.sch .sch-t.name{font:italic 14px var(--sans)}
+.sch .sch-t.small{font-size:11px;fill:var(--muted)}
+.sch .sign{font-size:15px}
+.sch .sch-sub{font-size:10px}
+.sch line.sch-p,.sch path.sch-p,.sch circle.sch-p{stroke:var(--accent)}
+.sch text.sch-p,.sch path.sch-p.fill{fill:var(--accent)}
+.sch text.sch-p.name{font:italic 600 14px var(--sans)}
+.sch line.sch-m,.sch path.sch-m{stroke:var(--muted)}
+.sch text.sch-m,.sch path.sch-m.fill{fill:var(--muted)}
+.sch text.sch-m.name{font:italic 13px var(--sans)}
+.plot-box{min-width:0}
+.plot{display:block;width:100%;height:auto;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;cursor:crosshair}
+.plot.locked{cursor:default}
+.plot .plot-bg{fill:var(--paper);stroke:var(--line)}
+.plot .grid{stroke:var(--grid);stroke-width:1}
+.plot .grid.minor{stroke-dasharray:2 3}
+.plot .grid.zero{stroke:var(--muted);stroke-width:1}
+.plot .grid.switch{stroke:var(--muted);stroke-dasharray:4 3}
+.plot text{font:11px var(--mono);fill:var(--muted)}
+.plot .axis-label{font:italic 12px var(--sans);fill:var(--muted)}
+.plot path{fill:none;stroke-linecap:round;stroke-linejoin:round}
+.plot .ink{stroke:var(--ink);stroke-width:2.6}
+.plot .ink.ink2{stroke:var(--ink2)}
+.plot .truth{stroke:var(--accent);stroke-width:2.6;stroke-opacity:.9}
+.plot .fc{stroke:var(--accent);stroke-width:1;stroke-dasharray:5 4}
+.plot .ghost-curve,.plot .ghost-ink{stroke:var(--ghost);stroke-width:2}
+.plot .ghost-curve{stroke-dasharray:6 4}
+.tools{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.sp{flex:1}
+.why{font-size:14px;color:var(--muted);min-height:1.5em}
+.results{display:grid;gap:12px}
+.table-wrap{overflow-x:auto}
+table{border-collapse:collapse;font-variant-numeric:tabular-nums;width:100%}
+th,td{padding:7px 10px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
+@media (max-width:560px){th,td{padding:6px 5px;white-space:normal}td{font-size:13px}thead th{font-size:11px}}
+thead th{font:600 12px var(--sans);color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+td{font:14px var(--mono)}
+tbody th{font-weight:600}
+.pill{display:inline-block;font:600 12px var(--sans);padding:2px 9px;border-radius:999px;border:1px solid currentColor}
+.pill.ok{color:var(--good)}.pill.close{color:var(--warn)}.pill.off{color:var(--bad)}.pill.none{color:var(--muted)}
+.var-grid{display:flex;flex-wrap:wrap;gap:8px}
+.var{display:flex;align-items:center;gap:4px;border:1px solid var(--line);border-radius:8px;padding:4px 4px 4px 10px}
+.var-name{font:italic 15px var(--sans);min-width:28px}
+.var button{min-height:34px;padding:6px 10px;font-family:var(--mono)}
+.pred{display:flex;flex-wrap:wrap;gap:10px;align-items:end}
+.pred label{display:grid;gap:4px;font-size:13px;color:var(--muted)}
+.pred input{font:16px var(--mono);width:9.5em;max-width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}
+.ph-out{display:grid;gap:10px}
+.ph-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,240px);gap:12px;align-items:center}
+@media (max-width:560px){.ph-grid{grid-template-columns:minmax(0,1fr)}}
+.ph-diagram svg{width:100%;max-width:260px;height:auto;display:block;margin:0 auto}
+.ph-diagram line,.ph-diagram path{fill:none;stroke-width:2;stroke-linecap:round}
+.ph-diagram .axis{stroke:var(--line);stroke-width:1}
+.ph-diagram text{font:12px var(--mono);stroke:none}
+.ph-diagram .tick{fill:var(--muted)}
+.ph-V{stroke:var(--fg)}.ph-R{stroke:var(--accent)}.ph-C{stroke:var(--ink)}.ph-L{stroke:var(--ink2)}.ph-o{stroke:var(--bad)}.ph-i{stroke:var(--muted)}
+.ph-diagram .fill.ph-V,.ph-diagram text.ph-V{fill:var(--fg)}.ph-diagram .fill.ph-R,.ph-diagram text.ph-R{fill:var(--accent)}.ph-diagram .fill.ph-C,.ph-diagram text.ph-C{fill:var(--ink)}
+.ph-diagram .fill.ph-L,.ph-diagram text.ph-L{fill:var(--ink2)}.ph-diagram .fill.ph-o,.ph-diagram text.ph-o{fill:var(--bad)}.ph-diagram .fill.ph-i,.ph-diagram text.ph-i{fill:var(--muted)}
+.ph-diagram text{stroke:none!important}
+.ph-diagram .dash{stroke-dasharray:5 4}
+.bode{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px}
+@media (max-width:860px){.bode{grid-template-columns:minmax(0,1fr)}}
+footer{display:grid;gap:4px;font-size:13px;color:var(--muted);border-top:1px solid var(--line);padding-top:12px}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+<div id="lab"><noscript>This lab needs JavaScript.</noscript></div>
+<script type="module" src="src/lab.mjs"></script>

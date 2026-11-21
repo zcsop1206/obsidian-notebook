@@ -149,3 +149,6 @@ export function ac(els, src, outp, f) {
   const v = r.v(outp);
   return { mag: Math.hypot(v[0], v[1]), phase: Math.atan2(v[1], v[0]) * 180 / Math.PI };
 }
+
+/** Every node voltage and branch current at f Hz for a unit source src, as complex [re, im]: { v(node), i(name) }. */
+export function acop(els, src, f) { return system(els, 'ac', { w: 2 * Math.PI * f, src, t: 1 }); }
