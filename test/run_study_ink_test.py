@@ -354,6 +354,48 @@ try:
         check('a tall page draws a band, at full resolution and under 16 M pixels', f[1] <= 16_000_000 and s2[1] <= 16_000_000 and abs(s2[3] - 1.7) < 0.01, band)
         check('scrolling far down moves the band and the ink is drawn there', s2[0] > 10000 and s2[2] > 50, band)
 
+        # --- 12. S18: page ink over a passage figure draws dark in the dark theme; elsewhere the theme colour
+        fig = page.evaluate("""async () => {
+          window.ctx = mkctx('desktop'); renderDoc(D2); window.ink = studyInk.createInkApi(ctx);
+          document.body.style.setProperty('--text-normal', '#dadada');
+          const host = byA('h-units');
+          const img = document.createElement('img');
+          img.width = 300; img.height = 120; img.style.cssText = 'display:block;background:#fff;margin:8px 0';
+          img.src = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="300" height="120"><rect width="300" height="120" fill="#fff"/></svg>');
+          await new Promise(r => { img.onload = r; host.appendChild(img); });
+          // A figure with its own ink surface (S13) is not a passage figure.
+          const own = document.createElement('div'); own.className = 'nb-study-figure';
+          const img2 = img.cloneNode(); own.appendChild(img2); byA('order-thm').appendChild(own);
+          await new Promise(r => requestAnimationFrame(r));
+          window.pageInk = ink.page(D2, stack, passageTop);
+          await new Promise(r => setTimeout(r, 50));
+          const ir = img.getBoundingClientRect();
+          const pts = []; for (let i = 0; i <= 12; i++) pts.push([ir.left + 20 + i * 18, ir.top + 50 + 5 * Math.sin(i)]);
+          penStroke(img, pts);
+          strokeOver(byA('unit-gcd'), 14);
+          await new Promise(r => requestAnimationFrame(r));
+          const cols = pageInk.strokeColors().map(c => c.color);
+          // Pixels: dark ink over the figure, light ink beside it.
+          const c = stack.querySelector(':scope > canvas.nb-study-ink-canvas'), k = c.width / 920, top = parseFloat(c.style.top) || 0;
+          const sr = stack.getBoundingClientRect(), s = sr.width / 920;
+          const count = (r, test) => { const d = c.getContext('2d').getImageData(Math.floor((r.left - sr.left) / s * k), Math.floor(((r.top - sr.top) / s - top) * k), Math.floor(r.width / s * k), Math.floor(r.height / s * k)).data;
+            let n = 0; for (let i = 0; i < d.length; i += 4) if (d[i + 3] > 200 && test(d[i])) n++; return n; };
+          const dark = count(ir, v => v < 60), light = count(byA('unit-gcd').getBoundingClientRect(), v => v > 180);
+          // Move the figure: a relayout re-measures, and the stroke (anchored to its passage) is re-decided.
+          img.style.marginLeft = '420px'; pageInk.relayout();
+          const moved = pageInk.strokeColors().map(c => c.color);
+          img.style.marginLeft = '0px'; pageInk.relayout();
+          return { cols, dark, light, moved };
+        }""")
+        if os.environ.get('S18_SHOT'):
+            page.evaluate("() => { document.body.style.background = '#1e1e1e'; byA('h-units').scrollIntoView(); }")
+            page.locator('#leaf').screenshot(path=os.environ['S18_SHOT'])
+            page.evaluate("() => { document.body.style.background = ''; }")
+        page.evaluate("() => { pageInk.destroy(); document.body.style.removeProperty('--text-normal'); }")
+        check('S18: a page stroke over a passage figure is figure ink, one beside it the theme colour', fig['cols'][-2:] == ['#1f1f1f', '--text-normal'], fig)
+        check('S18: drawn dark on the figure and light off it in the dark theme', fig['dark'] > 50 and fig['light'] > 50, fig)
+        check('S18: after the figure moves away the stroke takes the theme colour', fig['moved'][-2:] == ['--text-normal', '--text-normal'], fig)
+
         check('no page errors', not errors, errors[:3])
         b.close()
 finally:
